@@ -4,109 +4,7 @@
    Bright canvas, monochrome ink, editorial serif display, soft bordered cards.
    Color is reserved for true status only.
    ========================================================================== */
-
-:root {
-  --primary: #0d0d0d;
-  --primary-contrast: #ffffff;
-  --secondary: #191a1d;
-  --tertiary: #e5e7eb;
-  --neutral: #ffffff;
-  --surface: #f7f7f7;
-  --on-surface: #0d0d0d;
-  --text-muted: #6b7280;
-  --border: #e5e7eb;
-  --error: #d92d20;
-
-  --r-none: 0;
-  --r-sm: 4px;
-  --r-md: 8px;
-  --r-lg: 12px;
-  --r-xl: 16px;
-  --r-full: 9999px;
-
-  --s-xs: 2px;
-  --s-sm: 6px;
-  --s-md: 14px;
-  --s-lg: 20px;
-  --s-xl: 44px;
-  --gutter: 16px;
-  --section: 32px;
-
-  --font: 'Geist Variable', Geist, 'Segoe UI', system-ui, sans-serif;
-  --serif: 'Crimson Text', Georgia, 'Times New Roman', serif;
-
-  /* secondary tones — kept as tokens so the dark theme stays coherent */
-  --text-soft: #374151;
-  --text-faint: #9ca3af;
-  --hover-border: #cfd3d9;
-  --hover-surface: #fcfcfc;
-  --line: #d1d5db;
-  --scroll-thumb: #d8dade;
-  --scroll-thumb-hover: #c2c5ca;
-  --add-bg: #f4faf6;
-  --add-bg-hover: #edf8f1;
-  --del-bg: #fdf5f4;
-  --del-bg-hover: #fbeceb;
-  --add-text: #067647;
-  --line-num: #b3b8bf;
-  --code-bg: #fbfbfb;
-  --line-hover: #fafafa;
-  --nav-glass: rgba(255, 255, 255, 0.86);
-  --dot-idle: #c8ccd2;
-  --frame-text: #4b5563;
-  --shadow-soft: rgba(13, 13, 13, 0.14);
-  --error-soft: rgba(217, 45, 32, 0.06);
-  --error-border: rgba(217, 45, 32, 0.18);
-  --focus-ring: rgba(13, 13, 13, 0.06);
-  --shine-color: rgba(13, 13, 13, 0.55);
-
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --page: 1120px;
-}
-
-[data-theme='dark'] {
-  --primary: #f3f3ef;
-  --primary-contrast: #0d0d0d;
-  --secondary: #e4e4df;
-  --tertiary: #2a2c30;
-  --neutral: #0b0b0c;
-  --surface: #141416;
-  --on-surface: #f3f3ef;
-  --text-muted: #9ba1a9;
-  --border: #26282c;
-  --error: #ff7062;
-
-  --text-soft: #c7cbd1;
-  --text-faint: #767d87;
-  --hover-border: #3a3d43;
-  --hover-surface: #17181a;
-  --line: #33363b;
-  --scroll-thumb: #34373c;
-  --scroll-thumb-hover: #4b4f55;
-  --add-bg: rgba(48, 180, 120, 0.1);
-  --add-bg-hover: rgba(48, 180, 120, 0.17);
-  --del-bg: rgba(255, 112, 98, 0.09);
-  --del-bg-hover: rgba(255, 112, 98, 0.16);
-  --add-text: #5fd39b;
-  --line-num: #565c65;
-  --code-bg: #121315;
-  --line-hover: #191a1d;
-  --nav-glass: rgba(11, 11, 12, 0.86);
-  --dot-idle: #3f434a;
-  --frame-text: #b9bec5;
-  --shadow-soft: rgba(0, 0, 0, 0.5);
-  --error-soft: rgba(255, 112, 98, 0.1);
-  --error-border: rgba(255, 112, 98, 0.26);
-  --focus-ring: rgba(243, 243, 239, 0.09);
-  --shine-color: rgba(243, 243, 239, 0.8);
-  --glow: rgba(138, 160, 122, 0.1);
-}
-
-@property --shine-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
+/* Design tokens live in the @splyce/design-tokens workspace package. */
 
 * {
   box-sizing: border-box;
@@ -513,7 +411,7 @@ a {
   color: var(--on-surface);
 }
 .picker .plabel {
-  color: var(--text-faint);
+  color: var(--text-muted);
 }
 .menu {
   position: absolute;

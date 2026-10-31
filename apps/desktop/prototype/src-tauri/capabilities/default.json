@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Default capability for the main Splyce window.",
+  "windows": ["main"],
+  "permissions": ["core:default", "wdio:default", "wdio-webdriver:default"]
+}

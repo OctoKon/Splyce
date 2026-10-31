@@ -4,10 +4,7 @@
   import Mark from './Mark.svelte';
   import Icon from './Icon.svelte';
 
-  let {
-    collapsed = false,
-    ontoggle,
-  }: { collapsed?: boolean; ontoggle?: () => void } = $props();
+  let { collapsed = false, ontoggle }: { collapsed?: boolean; ontoggle?: () => void } = $props();
 
   const KEY = 'splyce.greeting';
   let greeting = $state('Hello greeting');

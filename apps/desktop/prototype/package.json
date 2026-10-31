@@ -3,25 +3,60 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "format": "prettier --write ."
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "e2e:build": "cross-env VITE_E2E=1 tauri build --debug --no-bundle --config src-tauri/tauri.e2e.conf.json",
+    "test:e2e": "npm run e2e:build && wdio run wdio.conf.ts"
   },
   "dependencies": {
-    "@fontsource-variable/geist": "^5.2.6",
-    "@fontsource/crimson-text": "^5.2.6"
+    "@splyce/design-tokens": "*",
+    "@tauri-apps/api": "^2.12.4"
   },
   "devDependencies": {
+    "@axe-core/webdriverio": "^4.14.0",
+    "@eslint/js": "^10.0.1",
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@tauri-apps/cli": "^2.12.4",
     "@tsconfig/svelte": "^5.0.5",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^24.19.2",
+    "@wdio/cli": "^9.31.9",
+    "@wdio/globals": "^9.31.3",
+    "@wdio/local-runner": "^9.31.9",
+    "@wdio/mocha-framework": "^9.31.9",
+    "@wdio/spec-reporter": "^9.31.2",
+    "@wdio/tauri-plugin": "^1.5.1",
+    "@wdio/tauri-service": "^1.5.1",
+    "cross-env": "^10.1.0",
+    "eslint": "^10.14.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-svelte": "^3.23.1",
+    "globals": "^17.13.0",
     "prettier": "^3.6.2",
     "prettier-plugin-svelte": "^4.1.1",
     "svelte": "^5.57.2",
     "svelte-check": "^4.7.7",
+    "svelte-eslint-parser": "^1.10.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.2",
-    "vite": "^8.3.5"
+    "typescript-eslint": "^8.72.1",
+    "vite": "^8.3.5",
+    "webdriverio": "^9.31.9"
   }
 }

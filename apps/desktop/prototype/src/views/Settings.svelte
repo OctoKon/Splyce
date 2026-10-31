@@ -78,19 +78,6 @@
     if (timer) clearTimeout(timer);
   });
 
-  const visibleSections = $derived(
-    query.trim()
-      ? sections.filter((section) => {
-          const needle = query.trim().toLowerCase();
-          return (
-            section.label.toLowerCase().includes(needle) ||
-            section.index.includes(needle) ||
-            (active === section.id && section.index.includes(needle))
-          );
-        })
-      : sections,
-  );
-
   const sectionRows = $derived(sections.find((section) => section.id === active)?.index ?? '');
 
   const noResults = $derived(!!query.trim() && !sectionRows.includes(query.trim().toLowerCase()));
@@ -463,7 +450,9 @@
           <div class="set-row">
             <div class="set-main">
               <div class="set-title">Models</div>
-              <div class="set-desc">Local and cloud providers, per-role bindings and credentials.</div>
+              <div class="set-desc">
+                Local and cloud providers, per-role bindings and credentials.
+              </div>
             </div>
             <button class="btn secondary sm" type="button" onclick={() => app.go('models')}>
               Open

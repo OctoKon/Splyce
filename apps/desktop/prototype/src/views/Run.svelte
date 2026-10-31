@@ -389,7 +389,7 @@
               <Icon name="check" size={14} stroke={2.2} />
               <div class="banner-main">
                 <b>Verified complete.</b>
-                {run.verification?.command ?? 'npm test'} · exit {run.verification?.exit ?? 0} ·{' '}
+                {run.verification?.command ?? 'npm test'} · exit {run.verification?.exit ?? 0} ·
                 {run.verification?.tests ?? 0} tests · bound to {run.base}
               </div>
               <button class="btn sm secondary" type="button" onclick={() => (tab = 'changes')}
@@ -559,11 +559,7 @@
             </div>
             <div class="diff-files">
               {#each diffFiles as file (file.path)}
-                <button
-                  class="diff-file"
-                  type="button"
-                  onclick={() => openDiff(file.path)}
-                >
+                <button class="diff-file" type="button" onclick={() => openDiff(file.path)}>
                   <Icon name="file" size={13} />
                   <span class="df-name">{file.path}</span>
                   <span class="df-add">+{file.additions}</span>
@@ -746,12 +742,7 @@
             <h3>{diffFile ?? 'All changes'}</h3>
             <span>{visibleDiff.length} file{visibleDiff.length === 1 ? '' : 's'} · +42 −11</span>
           </div>
-          <button
-            class="icon-btn"
-            type="button"
-            aria-label="Close review"
-            onclick={closeDiff}
-          >
+          <button class="icon-btn" type="button" aria-label="Close review" onclick={closeDiff}>
             <Icon name="x" size={15} />
           </button>
         </header>

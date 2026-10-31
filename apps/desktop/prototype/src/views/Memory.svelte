@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { fade, slide } from 'svelte/transition';
   import { app } from '../lib/state.svelte';
   import { memoryItems } from '../lib/data';
@@ -17,8 +18,8 @@
   let filter = $state<Kind>('all');
   let scope = $state<'workspace' | 'all'>('workspace');
   let granted = $state(false);
-  let expanded = $state<Set<string>>(new Set());
-  let removed = $state<Set<string>>(new Set());
+  const expanded = new SvelteSet<string>();
+  const removed = new SvelteSet<string>();
   let corrected = $state<Record<string, { title: string; excerpt: string }>>({});
   let editing = $state<string | null>(null);
   let draft = $state('');
@@ -64,10 +65,8 @@
   }
 
   function toggleExpand(id: string) {
-    const next = new Set(expanded);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    expanded = next;
+    if (expanded.has(id)) expanded.delete(id);
+    else expanded.add(id);
   }
 
   function startCorrect(id: string) {
@@ -93,7 +92,7 @@
       confirmId = id;
       return;
     }
-    removed = new Set(removed).add(id);
+    removed.add(id);
     confirmId = null;
     app.toast('Forgotten · tombstone keeps no content');
   }

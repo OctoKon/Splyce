@@ -10,7 +10,14 @@
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["vite/client", "svelte"]
+    "types": ["vite/client", "svelte", "node", "@wdio/globals/types"]
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts", "svelte.config.js"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "tests/**/*.ts",
+    "vite.config.ts",
+    "svelte.config.js",
+    "wdio.conf.ts"
+  ]
 }

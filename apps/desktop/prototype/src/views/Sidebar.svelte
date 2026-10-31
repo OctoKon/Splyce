@@ -48,7 +48,6 @@
     app.go('work');
     open = false;
   }
-
 </script>
 
 <aside class="side" class:open class:collapsed id="app-sidebar" inert={collapsed && !open}>

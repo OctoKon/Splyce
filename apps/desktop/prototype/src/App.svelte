@@ -116,7 +116,7 @@
         <Runs />
       {:else if app.page === 'run'}
         {#key app.runId}
-          <Run sidebarCollapsed={sidebarCollapsed} ontoggleSidebar={toggleSidebar} />
+          <Run {sidebarCollapsed} ontoggleSidebar={toggleSidebar} />
         {/key}
       {:else if app.page === 'memory'}
         <Memory />

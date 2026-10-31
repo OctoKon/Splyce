@@ -1,12 +1,11 @@
 import { mount } from 'svelte';
-import '@fontsource-variable/geist';
-import '@fontsource/crimson-text/400.css';
-import '@fontsource/crimson-text/600.css';
-import '@fontsource/crimson-text/700.css';
-import '@fontsource/crimson-text/400-italic.css';
-import '@fontsource/crimson-text/700-italic.css';
+import '@splyce/design-tokens/tokens.css';
 import './styles.css';
 import App from './App.svelte';
+
+if (import.meta.env.VITE_E2E) {
+  await import('@wdio/tauri-plugin');
+}
 
 const target = document.getElementById('root');
 if (!target) throw new Error('Missing #root');

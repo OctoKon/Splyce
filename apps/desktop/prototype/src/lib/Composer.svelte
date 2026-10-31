@@ -56,7 +56,7 @@
 
   $effect(() => {
     // read value so the height follows programmatic clears as well
-    value;
+    const _value = value;
     if (!el) return;
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, compact ? 120 : 180)}px`;
@@ -187,7 +187,7 @@
             onmouseleave={scheduleAttachClose}
             onkeydown={onAttachKey}
           >
-            {#each dialOptions as option, i}
+            {#each dialOptions as option, i (option.source)}
               <button
                 type="button"
                 role="menuitem"
