@@ -17,6 +17,7 @@
     icon,
     trigger,
     align = 'left',
+    placement = 'down',
     onchange,
   }: {
     label?: string;
@@ -25,6 +26,7 @@
     icon?: IconName;
     trigger?: string;
     align?: 'left' | 'right';
+    placement?: 'down' | 'up';
     onchange: (value: string) => void;
   } = $props();
 
@@ -53,7 +55,12 @@
   </button>
 
   {#if open}
-    <div class="menu" class:right={align === 'right'} transition:fly={{ y: -4, duration: 120 }}>
+    <div
+      class="menu"
+      class:right={align === 'right'}
+      class:up={placement === 'up'}
+      transition:fly={{ y: placement === 'up' ? 4 : -4, duration: 120 }}
+    >
       {#if options.length === 0}
         <div class="menu-note">Nothing available</div>
       {/if}
@@ -84,5 +91,9 @@
   .menu.right {
     left: auto;
     right: 0;
+  }
+  .menu.up {
+    top: auto;
+    bottom: calc(100% + 6px);
   }
 </style>

@@ -6,7 +6,7 @@
   import Icon from '../lib/Icon.svelte';
   import Switch from '../lib/Switch.svelte';
 
-  type Section = 'general' | 'runtime' | 'memory' | 'privacy' | 'updates';
+  type Section = 'general' | 'runtime' | 'modules' | 'memory' | 'privacy' | 'updates';
 
   const sections: { id: Section; label: string; index: string }[] = [
     {
@@ -18,6 +18,11 @@
       id: 'runtime',
       label: 'Runtime',
       index: 'engine approvals concurrency timeout restart self-check pi node',
+    },
+    {
+      id: 'modules',
+      label: 'Modules',
+      index: 'memory models extensions providers lsp editor plugins',
     },
     {
       id: 'memory',
@@ -443,6 +448,35 @@
             <span>Filesystem access</span><span class="spacer"></span><span class="muted"
               >Engine only</span
             >
+          </div>
+        {:else if active === 'modules'}
+          <div class="set-cat">Workspace modules</div>
+          <div class="set-row">
+            <div class="set-main">
+              <div class="set-title">Memory</div>
+              <div class="set-desc">Cross-session memory, citations, retention and deletion.</div>
+            </div>
+            <button class="btn secondary sm" type="button" onclick={() => app.go('memory')}>
+              Open
+            </button>
+          </div>
+          <div class="set-row">
+            <div class="set-main">
+              <div class="set-title">Models</div>
+              <div class="set-desc">Local and cloud providers, per-role bindings and credentials.</div>
+            </div>
+            <button class="btn secondary sm" type="button" onclick={() => app.go('models')}>
+              Open
+            </button>
+          </div>
+          <div class="set-row">
+            <div class="set-main">
+              <div class="set-title">Extensions</div>
+              <div class="set-desc">Pinned modules, optional editor and language services.</div>
+            </div>
+            <button class="btn secondary sm" type="button" onclick={() => app.go('extensions')}>
+              Open
+            </button>
           </div>
         {:else if active === 'memory'}
           <div class="set-cat">Journal</div>

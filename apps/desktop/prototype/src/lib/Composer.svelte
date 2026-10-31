@@ -158,7 +158,7 @@
   }
 </script>
 
-<div class="composer" class:compact>
+<div class="composer" class:compact class:shine={value.trim().length > 0}>
   <div class="c-top">
     {#if allowAttachments}
       <div class="attach" use:clickOutside={closeAttachments}>
@@ -264,15 +264,6 @@
           submit();
         }
       }}></textarea>
-    <button
-      class="send"
-      type="button"
-      aria-label="Send"
-      onclick={submit}
-      disabled={(!value.trim() && attachments.length === 0) || disabled}
-    >
-      <Icon name="arrow-up" size={15} stroke={2} />
-    </button>
   </div>
   {#if allowAttachments && attachments.length > 0}
     <div class="c-files">
@@ -292,9 +283,19 @@
       {/each}
     </div>
   {/if}
-  {#if children}
-    <div class="c-bottom">{@render children()}</div>
-  {/if}
+  <div class="c-bottom">
+    {#if children}{@render children()}{/if}
+    <span class="spacer"></span>
+    <button
+      class="send"
+      type="button"
+      aria-label="Send"
+      onclick={submit}
+      disabled={(!value.trim() && attachments.length === 0) || disabled}
+    >
+      <Icon name="arrow-up" size={15} stroke={2} />
+    </button>
+  </div>
 </div>
 
 <style>

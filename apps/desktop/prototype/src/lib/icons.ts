@@ -1,6 +1,8 @@
 export type IconName =
   | 'search'
   | 'plus'
+  | 'plus-circle'
+  | 'panel-left'
   | 'chevron-down'
   | 'chevron-left'
   | 'chevron-right'

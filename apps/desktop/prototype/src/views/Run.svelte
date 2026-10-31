@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import { slide, fade } from 'svelte/transition';
+  import { onDestroy, onMount, tick } from 'svelte';
+  import { fade } from 'svelte/transition';
   import { app } from '../lib/state.svelte';
   import { diffFiles, receipts as seedReceipts } from '../lib/data';
   import Icon from '../lib/Icon.svelte';
   import Chip from '../lib/Chip.svelte';
   import StatusChip from '../lib/StatusChip.svelte';
   import Composer from '../lib/Composer.svelte';
+  import Picker from '../lib/Picker.svelte';
   import ApprovalCard from '../lib/ApprovalCard.svelte';
   import DiffView from '../lib/DiffView.svelte';
   import { clickOutside } from '../lib/actions';
@@ -14,24 +15,47 @@
   type Tab = 'changes' | 'context' | 'receipts';
   type Extra = { id: number; role: 'user' | 'agent'; text: string };
 
+  let {
+    sidebarCollapsed = false,
+    ontoggleSidebar,
+  }: { sidebarCollapsed?: boolean; ontoggleSidebar?: () => void } = $props();
+
   const run = $derived(app.currentRun);
   let tab = $state<Tab>('changes');
-  let actionOpen = $state(true);
   let menuOpen = $state(false);
   let evidenceOpen = $state(false);
   let isDesktop = $state(window.matchMedia('(min-width: 821px)').matches);
-  let inspectorOpen = $state(true);
+  let inspectorOpen = $state(false);
   let closeInspector = $state<HTMLButtonElement>();
   let evidenceBtn = $state<HTMLButtonElement>();
   let message = $state('');
+  let mode = $state('Build');
+  let effort = $state('Max');
   let extra = $state<Extra[]>([]);
   let queued = $state(false);
+  let streamEl = $state<HTMLElement>();
+  let atBottom = $state(true);
   let comments = $state<Record<string, string>>({});
+  let diffOpen = $state(false);
+  let diffFile = $state<string | null>(null);
   let nextTurn = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   const receipts = seedReceipts;
   const commentCount = $derived(Object.keys(comments).length);
+  const visibleDiff = $derived(
+    diffFile ? diffFiles.filter((file) => file.path === diffFile) : diffFiles,
+  );
+
+  function openDiff(path: string | null = null) {
+    diffFile = path;
+    diffOpen = true;
+  }
+
+  function closeDiff() {
+    diffOpen = false;
+    diffFile = null;
+  }
 
   onDestroy(() => {
     if (timer) clearTimeout(timer);
@@ -116,9 +140,24 @@
     app.toast('Change request added to the run');
   }
 
-  function send(text: string) {
+  function onStreamScroll() {
+    if (!streamEl) return;
+    const distance = streamEl.scrollHeight - streamEl.scrollTop - streamEl.clientHeight;
+    atBottom = distance < 48;
+  }
+
+  function scrollToBottom(smooth = true) {
+    streamEl?.scrollTo({
+      top: streamEl.scrollHeight,
+      behavior: smooth ? 'smooth' : 'auto',
+    });
+  }
+
+  async function send(text: string) {
     extra = [...extra, { id: ++nextTurn, role: 'user', text }];
     message = '';
+    await tick();
+    scrollToBottom();
     if (run.status === 'running') {
       queued = true;
       if (timer) clearTimeout(timer);
@@ -132,6 +171,7 @@
           },
         ];
         queued = false;
+        void tick().then(() => scrollToBottom());
         app.toast('Agent replied · local runtime');
       }, 1100);
     } else {
@@ -163,7 +203,8 @@
 <svelte:window
   onkeydown={(event) => {
     if (event.key === 'Escape') {
-      if (evidenceOpen) closeEvidence();
+      if (diffOpen) closeDiff();
+      else if (evidenceOpen) closeEvidence();
       menuOpen = false;
     }
   }}
@@ -171,13 +212,20 @@
 
 <div class="run">
   <div class="run-top">
-    <button class="run-back" type="button" onclick={() => app.go('work')}>
-      <Icon name="chevron-left" size={13} /> Work
-    </button>
+    {#if sidebarCollapsed}
+      <button
+        class="icon-btn run-side-toggle"
+        type="button"
+        aria-label="Open sidebar"
+        title="Open sidebar"
+        onclick={ontoggleSidebar}
+      >
+        <Icon name="panel-left" size={15} />
+      </button>
+    {/if}
     <div class="run-head">
-      <span class="proj">{run.workspace}</span>
       <h2>{run.title}</h2>
-      <span class="branch">{run.branch}</span>
+      <span class="run-meta">{run.workspace} · {run.branch} · {run.base}</span>
     </div>
     <div class="run-status">
       {#if run.status === 'approval' && run.approval}
@@ -188,24 +236,15 @@
     </div>
     <span class="spacer"></span>
     <button
-      class="icon-btn copy-btn"
+      class="btn secondary sm review-btn"
       type="button"
-      title="Copy run link"
-      aria-label="Copy run link"
-      onclick={() => copy(`splyce://run/${run.id}`, 'Run link copied')}
-    >
-      <Icon name="copy" size={15} />
-    </button>
-    <button
-      class="icon-btn evidence-btn"
-      type="button"
-      title="Run evidence"
-      aria-label="Toggle run evidence"
+      title="Review changes and receipts"
+      aria-label="Review changes and receipts"
       aria-expanded={isDesktop ? inspectorOpen : evidenceOpen}
       bind:this={evidenceBtn}
       onclick={toggleEvidence}
     >
-      <Icon name="file" size={15} />
+      Review
     </button>
     <div class="more-wrap" use:clickOutside={() => (menuOpen = false)}>
       <button
@@ -255,13 +294,8 @@
 
   <div class="run-body">
     <div class="run-main" inert={evidenceOpen && !isDesktop}>
-      <div class="stream">
+      <div class="stream" bind:this={streamEl} onscroll={onStreamScroll}>
         <div class="stream-inner">
-          <div class="stream-tools">
-            <span><Icon name="shield" size={12} /> Policy: workspace write · approvals on</span>
-            <span class="mono">{run.id} · base {run.base}</span>
-          </div>
-
           <div class="turn">
             <span class="avatar">You</span>
             <div>
@@ -365,38 +399,6 @@
           {/if}
 
           {#if run.status === 'approval'}
-            <div class="act">
-              <button
-                class="act-head"
-                type="button"
-                onclick={() => (actionOpen = !actionOpen)}
-                aria-expanded={actionOpen}
-              >
-                <Icon name="terminal" size={12} />
-                Actions · {actionOpen ? 'hide' : 'show'} 4 events
-                <span class="when">3.4s</span>
-              </button>
-              {#if actionOpen}
-                <div class="act-body" transition:slide={{ duration: 160 }}>
-                  <div class="act-line">
-                    <span class="ico">+</span> read src/webhooks/verify.ts
-                    <span class="dim">12ms</span>
-                  </div>
-                  <div class="act-line">
-                    <span class="ico">+</span> read src/http/headers.ts <span class="dim">8ms</span>
-                  </div>
-                  <div class="act-line">
-                    <span class="ico">+</span> edit src/webhooks/verify.ts
-                    <span class="dim">allowed · 41ms</span>
-                  </div>
-                  <div class="act-line">
-                    <span class="ico">+</span> npm test -- webhooks
-                    <span class="dim">exit 0 · 1.8s</span>
-                  </div>
-                </div>
-              {/if}
-            </div>
-
             <ApprovalCard {run} onresolve={resolve} />
           {/if}
 
@@ -434,20 +436,58 @@
         </div>
       </div>
 
+      {#if !atBottom}
+        <button
+          class="scroll-bottom"
+          type="button"
+          aria-label="Scroll to latest"
+          title="Scroll to latest"
+          onclick={() => scrollToBottom()}
+        >
+          <Icon name="chevron-down" size={16} />
+        </button>
+      {/if}
+
       <div class="composer-wrap">
         <Composer
           bind:value={message}
           compact
           allowAttachments
-          placeholder={isDesktop
-            ? run.status === 'running'
-              ? 'Steer the run or ask about a receipt…'
-              : 'Ask about this run or request a change…'
-            : run.status === 'running'
-              ? 'Steer the run…'
-              : 'Ask or request a change…'}
+          placeholder="Ask anything, / for commands, @ for context…"
           onsend={send}
-        />
+        >
+          <Picker
+            trigger={mode}
+            value={mode}
+            options={[
+              { value: 'Build', label: 'Build' },
+              { value: 'Plan', label: 'Plan' },
+              { value: 'Review', label: 'Review' },
+            ]}
+            onchange={(value) => (mode = value)}
+          />
+          <Picker
+            trigger={run.model}
+            value={run.model}
+            placement="up"
+            options={[
+              { value: 'Qwen3-Coder-30B-A3B', label: 'Pi · Qwen3-Coder' },
+              { value: 'Devstral-Small-24B', label: 'Pi · Devstral' },
+            ]}
+            onchange={(value) => app.updateRun(run.id, { model: value })}
+          />
+          <Picker
+            trigger={effort}
+            value={effort}
+            placement="up"
+            options={[
+              { value: 'Low', label: 'Low' },
+              { value: 'Medium', label: 'Medium' },
+              { value: 'Max', label: 'Max' },
+            ]}
+            onchange={(value) => (effort = value)}
+          />
+        </Composer>
       </div>
     </div>
 
@@ -517,8 +557,24 @@
               <span class="spacer"></span>
               <span>{commentCount} comments</span>
             </div>
-            <DiffView files={diffFiles} {comments} oncomment={addComment} />
-            <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+            <div class="diff-files">
+              {#each diffFiles as file (file.path)}
+                <button
+                  class="diff-file"
+                  type="button"
+                  onclick={() => openDiff(file.path)}
+                >
+                  <Icon name="file" size={13} />
+                  <span class="df-name">{file.path}</span>
+                  <span class="df-add">+{file.additions}</span>
+                  <span class="df-del">−{file.deletions}</span>
+                </button>
+              {/each}
+            </div>
+            <button class="btn secondary sm diff-review" type="button" onclick={() => openDiff()}>
+              Review all changes
+            </button>
+            <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
               <button
                 class="btn secondary sm"
                 type="button"
@@ -675,6 +731,36 @@
       </div>
     </aside>
   </div>
+
+  {#if diffOpen}
+    <div
+      class="diff-overlay"
+      role="presentation"
+      onclick={(event) => {
+        if (event.target === event.currentTarget) closeDiff();
+      }}
+    >
+      <div class="diff-modal" role="dialog" aria-modal="true" aria-label="Review changes">
+        <header class="diff-modal-head">
+          <div>
+            <h3>{diffFile ?? 'All changes'}</h3>
+            <span>{visibleDiff.length} file{visibleDiff.length === 1 ? '' : 's'} · +42 −11</span>
+          </div>
+          <button
+            class="icon-btn"
+            type="button"
+            aria-label="Close review"
+            onclick={closeDiff}
+          >
+            <Icon name="x" size={15} />
+          </button>
+        </header>
+        <div class="diff-modal-body">
+          <DiffView files={visibleDiff} {comments} oncomment={addComment} />
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -691,7 +777,110 @@
     opacity: 0.4;
     pointer-events: none;
   }
-  .act-head {
+  .diff-files {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .diff-file {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: var(--neutral);
+    color: var(--on-surface);
+    text-align: left;
+    font-size: 12px;
+    transition:
+      background 0.15s,
+      border-color 0.15s;
+  }
+  .diff-file:hover {
+    background: var(--surface);
+    border-color: var(--hover-border);
+  }
+  .diff-file:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 1px;
+  }
+  .df-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .df-add {
+    color: var(--add-text);
+    font-size: 11px;
+  }
+  .df-del {
+    color: var(--error);
+    font-size: 11px;
+  }
+  .diff-review {
+    width: 100%;
+    margin-top: 10px;
+  }
+  .diff-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(4px);
+    animation: overlay-in 0.18s var(--ease) both;
+  }
+  .diff-modal {
+    display: flex;
+    flex-direction: column;
+    width: min(920px, 100%);
+    max-height: 86vh;
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    background: var(--neutral);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+    overflow: hidden;
+    animation: modal-in 0.24s var(--ease) both;
+  }
+  .diff-modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .diff-modal-head h3 {
+    margin: 0 0 2px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .diff-modal-head span {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .diff-modal-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 16px;
+  }
+  @keyframes overlay-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes modal-in {
+    from {
+      opacity: 0;
+      transform: translateY(12px) scale(0.98);
+    }
   }
 </style>

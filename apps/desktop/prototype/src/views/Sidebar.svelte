@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { flushSync } from 'svelte';
   import { fly } from 'svelte/transition';
   import { app } from '../lib/state.svelte';
+  import { toggleThemeFrom } from '../lib/theme';
   import { workspaces } from '../lib/data';
   import type { Page } from '../lib/types';
   import Mark from '../lib/Mark.svelte';
@@ -15,7 +15,17 @@
   }: { open?: boolean; collapsed?: boolean; onfold?: () => void } = $props();
   let wsOpen = $state(false);
   let closeEl = $state<HTMLButtonElement>();
-  let themeBusy = false;
+  let searchOpen = $state(false);
+  let query = $state('');
+  let searchEl = $state<HTMLInputElement>();
+
+  const filteredRuns = $derived(
+    query.trim()
+      ? app.runs.filter((run) =>
+          `${run.title} ${run.workspace}`.toLowerCase().includes(query.trim().toLowerCase()),
+        )
+      : app.runs,
+  );
 
   const approvals = $derived(
     app.runs.filter((run) => run.status === 'approval' && !run.approval).length,
@@ -23,6 +33,10 @@
 
   $effect(() => {
     if (open) closeEl?.focus();
+  });
+
+  $effect(() => {
+    if (searchOpen) queueMicrotask(() => searchEl?.focus());
   });
 
   function go(page: Page) {
@@ -35,46 +49,6 @@
     open = false;
   }
 
-  function toggleTheme(event: MouseEvent) {
-    const root = document.documentElement;
-    const reduced =
-      root.dataset.motion === 'reduced' ||
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const start = (
-      document as Document & {
-        startViewTransition?: (callback: () => void) => {
-          ready: Promise<void>;
-          finished: Promise<void>;
-        };
-      }
-    ).startViewTransition;
-
-    if (!start || reduced || themeBusy) {
-      if (!themeBusy) app.toggleTheme();
-      return;
-    }
-
-    const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    const x = event.clientX || box.left + box.width / 2;
-    const y = event.clientY || box.top + box.height / 2;
-    const radius = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
-
-    themeBusy = true;
-    const transition = start.call(document, () => flushSync(() => app.toggleTheme()));
-    transition.ready
-      .then(() => {
-        root.animate(
-          { clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${radius}px at ${x}px ${y}px)`] },
-          {
-            duration: 520,
-            easing: 'cubic-bezier(0.65, 0, 0.35, 1)',
-            pseudoElement: '::view-transition-new(root)',
-          } as KeyframeAnimationOptions,
-        );
-      })
-      .catch(() => {});
-    transition.finished.finally(() => (themeBusy = false));
-  }
 </script>
 
 <aside class="side" class:open class:collapsed id="app-sidebar" inert={collapsed && !open}>
@@ -94,12 +68,11 @@
     title="Collapse sidebar"
     onclick={() => onfold?.()}
   >
-    <Icon name="chevron-left" size={15} />
+    <Icon name="panel-left" size={15} />
   </button>
   <button class="brand" type="button" onclick={home} title="Go to Work">
     <Mark size={22} />
     Splyce
-    <em>reference</em>
   </button>
 
   <div class="ws-wrap" use:clickOutside={() => (wsOpen = false)}>
@@ -130,6 +103,65 @@
     {/if}
   </div>
 
+  <button
+    class="new-chat"
+    type="button"
+    onclick={() => {
+      app.go('work');
+      open = false;
+    }}
+  >
+    <Icon name="plus" size={14} />
+    New chat
+  </button>
+
+  <section class="recent" aria-labelledby="recent-label">
+    <div class="recent-head">
+      <h2 class="recent-label" id="recent-label">Recent</h2>
+      <button
+        class="recent-search"
+        type="button"
+        aria-label={searchOpen ? 'Close search' : 'Search recent chats'}
+        title={searchOpen ? 'Close search' : 'Search recent chats'}
+        onclick={() => {
+          searchOpen = !searchOpen;
+          if (!searchOpen) query = '';
+        }}
+      >
+        <Icon name={searchOpen ? 'x' : 'search'} size={13} />
+      </button>
+    </div>
+    {#if searchOpen}
+      <input
+        class="recent-input"
+        bind:this={searchEl}
+        type="search"
+        placeholder="Search chats…"
+        bind:value={query}
+        aria-label="Search recent chats"
+      />
+    {/if}
+    <div class="recent-list">
+      {#each filteredRuns as run (run.id)}
+        <button
+          class="recent-item"
+          type="button"
+          class:active={app.page === 'run' && app.runId === run.id}
+          onclick={() => {
+            app.openRun(run.id);
+            open = false;
+          }}
+        >
+          <span class="recent-dot" data-status={run.status} aria-hidden="true"></span>
+          <span class="recent-copy">
+            <span class="recent-title">{run.title}</span>
+            <span class="recent-meta">{run.workspace} · {run.updated}</span>
+          </span>
+        </button>
+      {/each}
+    </div>
+  </section>
+
   <nav class="nav" aria-label="Workspace">
     <button class="nav-item" class:active={app.page === 'work'} onclick={() => go('work')}>
       <span class="n-ico"><Icon name="terminal" size={15} /></span>
@@ -143,22 +175,6 @@
       <span class="n-ico"><Icon name="clock" size={15} /></span>
       Runs
       {#if approvals}<span class="n-count">{approvals}</span>{/if}
-    </button>
-    <button class="nav-item" class:active={app.page === 'memory'} onclick={() => go('memory')}>
-      <span class="n-ico"><Icon name="database" size={15} /></span>
-      Memory
-    </button>
-    <button class="nav-item" class:active={app.page === 'models'} onclick={() => go('models')}>
-      <span class="n-ico"><Icon name="cpu" size={15} /></span>
-      Models
-    </button>
-    <button
-      class="nav-item"
-      class:active={app.page === 'extensions'}
-      onclick={() => go('extensions')}
-    >
-      <span class="n-ico"><Icon name="layers" size={15} /></span>
-      Extensions
     </button>
     <button class="nav-item" class:active={app.page === 'settings'} onclick={() => go('settings')}>
       <span class="n-ico"><Icon name="settings" size={15} /></span>
@@ -174,12 +190,11 @@
         type="button"
         aria-label={app.theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
         title={app.theme === 'light' ? 'Dark theme' : 'Light theme'}
-        onclick={toggleTheme}
+        onclick={toggleThemeFrom}
       >
         <Icon name={app.theme === 'light' ? 'moon' : 'sun'} size={14} />
       </button>
     </div>
-    <div class="fine">No cloud fallback · AGPL-3.0</div>
   </div>
 </aside>
 
@@ -196,6 +211,157 @@
     left: 0;
     right: 0;
     min-width: 0;
+  }
+  .recent {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 1;
+    margin: 4px 0 12px;
+  }
+  .recent-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 5px 6px 9px;
+  }
+  .recent-label {
+    margin: 0;
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 14px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .recent-search {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--text-faint);
+    transition:
+      background 0.15s,
+      color 0.15s;
+  }
+  .recent-search:hover {
+    background: var(--surface);
+    color: var(--on-surface);
+  }
+  .recent-search:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -1px;
+  }
+  .recent-input {
+    width: 100%;
+    margin-bottom: 4px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: var(--neutral);
+    color: var(--on-surface);
+    font: inherit;
+    font-size: 12px;
+  }
+  .recent-input:focus {
+    outline: 2px solid var(--primary);
+    outline-offset: -1px;
+  }
+  .recent-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow-y: auto;
+  }
+  .recent-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    padding: 7px 9px;
+    border: 0;
+    border-radius: var(--r-sm);
+    background: transparent;
+    text-align: left;
+    transition: background 0.15s;
+  }
+  .recent-item:hover {
+    background: var(--surface);
+  }
+  .recent-item.active {
+    background: var(--surface);
+  }
+  .recent-item:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+  }
+  .recent-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: var(--r-full);
+    background: var(--dot-idle);
+    flex: none;
+  }
+  .recent-dot[data-status='approval'] {
+    background: var(--error);
+  }
+  .recent-dot[data-status='running'] {
+    background: var(--primary);
+  }
+  .recent-dot[data-status='verified'] {
+    background: var(--add-text);
+  }
+  .recent-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+  .recent-title {
+    overflow: hidden;
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 17px;
+    color: var(--on-surface);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .recent-meta {
+    overflow: hidden;
+    font-size: 11px;
+    line-height: 14px;
+    color: var(--text-faint);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .new-chat {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    width: 100%;
+    margin-bottom: 14px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background: var(--surface);
+    color: var(--on-surface);
+    font-size: 13px;
+    font-weight: 500;
+    transition:
+      background 0.15s,
+      border-color 0.15s;
+  }
+  .new-chat:hover {
+    background: var(--neutral);
+    border-color: var(--hover-border);
+  }
+  .new-chat:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
   }
   .side-close {
     display: none;

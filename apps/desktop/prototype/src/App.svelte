@@ -5,6 +5,7 @@
   import Icon from './lib/Icon.svelte';
   import Mark from './lib/Mark.svelte';
   import Toasts from './lib/Toasts.svelte';
+  import TopBar from './lib/TopBar.svelte';
   import Landing from './views/Landing.svelte';
   import Sidebar from './views/Sidebar.svelte';
   import Work from './views/Work.svelte';
@@ -17,7 +18,6 @@
 
   let navOpen = $state(false);
   let menuBtn = $state<HTMLButtonElement>();
-  let sideTab = $state<HTMLButtonElement>();
   let hadNav = false;
   let sidebarCollapsed = $state(localStorage.getItem('splyce.sidebar') === 'closed');
   const approvals = $derived(
@@ -39,13 +39,17 @@
   async function foldSidebar() {
     sidebarCollapsed = true;
     await tick();
-    sideTab?.focus();
   }
 
   async function unfoldSidebar() {
     sidebarCollapsed = false;
     await tick();
     document.querySelector<HTMLButtonElement>('#app-sidebar .side-fold')?.focus();
+  }
+
+  function toggleSidebar() {
+    if (sidebarCollapsed) void unfoldSidebar();
+    else void foldSidebar();
   }
 </script>
 
@@ -64,20 +68,6 @@
 {:else}
   <div class="app" class:side-collapsed={sidebarCollapsed}>
     <Sidebar bind:open={navOpen} collapsed={sidebarCollapsed} onfold={foldSidebar} />
-    {#if sidebarCollapsed}
-      <button
-        class="side-tab"
-        type="button"
-        aria-label="Open sidebar"
-        aria-controls="app-sidebar"
-        title="Open sidebar"
-        bind:this={sideTab}
-        onclick={unfoldSidebar}
-        transition:fade={{ duration: 120 }}
-      >
-        <Icon name="chevron-right" size={15} />
-      </button>
-    {/if}
     {#if navOpen}
       <button
         class="scrim"
@@ -117,13 +107,16 @@
           {#if approvals}<span class="mb-badge">{approvals}</span>{/if}
         </button>
       </div>
+      {#if app.page !== 'run'}
+        <TopBar collapsed={sidebarCollapsed} ontoggle={toggleSidebar} />
+      {/if}
       {#if app.page === 'work'}
         <Work />
       {:else if app.page === 'runs'}
         <Runs />
       {:else if app.page === 'run'}
         {#key app.runId}
-          <Run />
+          <Run sidebarCollapsed={sidebarCollapsed} ontoggleSidebar={toggleSidebar} />
         {/key}
       {:else if app.page === 'memory'}
         <Memory />

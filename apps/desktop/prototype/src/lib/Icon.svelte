@@ -24,6 +24,12 @@
     <path d="m16.5 16.5 4 4" />
   {:else if name === 'plus'}
     <path d="M12 5v14M5 12h14" />
+  {:else if name === 'plus-circle'}
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 8v8M8 12h8" />
+  {:else if name === 'panel-left'}
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M9 4v16" />
   {:else if name === 'chevron-down'}
     <path d="m6 9 6 6 6-6" />
   {:else if name === 'chevron-left'}
