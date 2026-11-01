@@ -62,6 +62,15 @@
     "webdriverio": "9.31.9"
   },
   "overrides": {
+    "eslint": {
+      "minimatch": "11.0.1"
+    },
+    "@eslint/config-array": {
+      "minimatch": "11.0.1"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.1"
+    },
     "@wdio/utils": {
       "@puppeteer/browsers": "3.2.6"
     },
