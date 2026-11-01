@@ -771,7 +771,6 @@ export interface EventPayloads {
     activeWorkers: number;
     ports?: PortAvailability;
   };
-  "stream.resync": { fromSeq: number };
   "run.reconnect_snapshot": {
     runId: string;
     lastDurableSeq: number;
@@ -844,7 +843,6 @@ const EVENT_SCHEMAS = {
     state: ["ready", "busy", "stopping", "stopped"],
     activeWorkers: "uint",
   },
-  "stream.resync": { fromSeq: "uint" },
   "run.reconnect_snapshot": {
     runId: "ref",
     lastDurableSeq: "uint",
@@ -896,6 +894,15 @@ export interface Handshake {
     receipts: boolean;
     ports: PortAvailability;
   };
+}
+
+/** Unsequenced transport control: never persisted, never a cursor advance. */
+export interface ResyncControlFrame {
+  frame: "control";
+  kind: "stream.resync";
+  sessionId: string;
+  /** Replay is requested strictly after this cursor (may be 0). */
+  fromSeq: number;
 }
 
 export interface NativeLifecycleEvent {
@@ -1382,6 +1389,24 @@ export function validateCursor(
   return afterSeq;
 }
 
+const CONTROL_KEYS = ["frame", "kind", "sessionId", "fromSeq"];
+
+/** Exact-shape resync control frame; unknown or missing keys are rejected. */
+export function validateControlFrame(value: unknown): ResyncControlFrame {
+  const frame = object(value, "control");
+  requireThat(
+    Object.keys(frame).length === CONTROL_KEYS.length &&
+      CONTROL_KEYS.every((key) => Object.hasOwn(frame, key)),
+    "INVALID_SHAPE",
+    "control",
+  );
+  requireThat(frame.frame === "control", "INVALID_SHAPE", "frame");
+  requireThat(frame.kind === "stream.resync", "UNKNOWN_KIND", "kind");
+  opaque(frame.sessionId, "sessionId");
+  uint(frame.fromSeq, "fromSeq");
+  return frame as unknown as ResyncControlFrame;
+}
+
 export function validateCommand(
   value: unknown,
   context: ContractContext,
@@ -1559,7 +1584,6 @@ export function validateEvent(
         "WRONG_SCOPE",
         "sessionId",
       );
-    if (kind === "stream.resync") validateCursor(payload.fromSeq, context);
     if (kind === "run.reconnect_snapshot")
       validateCursor(payload.lastDurableSeq, context);
   }

@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   copyFileSync,
@@ -73,12 +74,18 @@ const waitFor = (file: string, timeoutMs = 15000) => {
   }
 };
 
-const killTree = (pid: number) => {
+const killTree = async (child: ReturnType<typeof spawn>) => {
+  const { pid } = child;
   const result = spawnSync("taskkill", ["/PID", String(pid), "/F", "/T"], {
     stdio: "ignore",
   });
   if (result.status !== 0)
     throw new Error(`taskkill failed for ${String(pid)}`);
+  await once(child, "close", { signal: AbortSignal.timeout(15000) });
+  assert.ok(
+    child.exitCode !== null || child.signalCode !== null,
+    "child must exit before SQLite recovery",
+  );
 };
 
 const spawnChild = (mode: string, dir: string) =>
@@ -109,7 +116,7 @@ test("S1 fresh commit and reopen", () => {
   console.log(`S1 n=${String(trials)} pass`);
 });
 
-test("S2 forced kill mid-transaction (child processes)", () => {
+test("S2 forced kill mid-transaction (child processes)", async () => {
   for (let i = 0; i < trials; i += 1) {
     // killed after acknowledged commit: the record must be present.
     {
@@ -119,7 +126,7 @@ test("S2 forced kill mid-transaction (child processes)", () => {
       const ack = JSON.parse(readFileSync(join(dir, "ack.json"), "utf8")) as {
         seq: number;
       };
-      killTree(child.pid as number);
+      await killTree(child);
       const reopened = Store.open(join(dir, "store.db"));
       assert.ok(reopened.cursor() >= ack.seq);
       const got = reopened.get("rec-child-ack");
@@ -132,7 +139,7 @@ test("S2 forced kill mid-transaction (child processes)", () => {
       const dir = freshDir();
       const child = spawnChild("mid-transaction", dir);
       waitFor(join(dir, "mid.json"));
-      killTree(child.pid as number);
+      await killTree(child);
       const reopened = Store.open(join(dir, "store.db"));
       // the acknowledged first append survives; the uncommitted one must not.
       assert.ok(reopened.get("rec-child-open"));

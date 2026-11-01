@@ -1,0 +1,119 @@
+diff --git a/vendor/pi/packages/ai/src/auth/oauth/openai-chatgpt.ts b/vendor/pi/packages/ai/src/auth/oauth/openai-chatgpt.ts
+index 65e0371..66a8d4c 100644
+--- a/vendor/pi/packages/ai/src/auth/oauth/openai-chatgpt.ts
++++ b/vendor/pi/packages/ai/src/auth/oauth/openai-chatgpt.ts
+@@ -99,6 +99,12 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
+ 					return;
+ 				}
+ 
++				const state = url.searchParams.get("state");
++				if (state !== expectedState) {
++					sendHtml(response, 400, oauthErrorHtml(state ? "OAuth state mismatch" : "Missing OAuth state"));
++					return;
++				}
++
+ 				const error = url.searchParams.get("error");
+ 				if (error) {
+ 					sendHtml(response, 400, oauthErrorHtml("ChatGPT was not connected.", `Error: ${error}`));
+diff --git a/vendor/pi/packages/ai/test/openai-chatgpt-oauth.test.ts b/vendor/pi/packages/ai/test/openai-chatgpt-oauth.test.ts
+index 35ba33a..c7e6660 100644
+--- a/vendor/pi/packages/ai/test/openai-chatgpt-oauth.test.ts
++++ b/vendor/pi/packages/ai/test/openai-chatgpt-oauth.test.ts
+@@ -1,3 +1,4 @@
++import { get } from "node:http";
+ import { afterEach, describe, expect, it, vi } from "vitest";
+ import { openaiChatGPTOAuth } from "../src/auth/oauth/openai-chatgpt.ts";
+ import type { OAuthCredential, ProviderAuthInteraction } from "../src/auth/types.ts";
+@@ -55,6 +56,44 @@ function loginInteraction(options?: {
+ 	};
+ }
+ 
++function callbackInteraction(visit: (callback: URL) => Promise<void>) {
++	let authorizeUrl: URL;
++	let callbackDone: Promise<void>;
++	const interaction: ProviderAuthInteraction = {
++		signal: neverAbortedSignal,
++		notify: (event) => {
++			if (event.type === "auth_url") authorizeUrl = new URL(event.url);
++		},
++		prompt: async (prompt) => {
++			if (prompt.type !== "manual_code") throw new Error(`Unexpected prompt: ${prompt.type}`);
++			const callback = new URL(authorizeUrl.searchParams.get("redirect_uri") ?? "");
++			callback.searchParams.set("state", authorizeUrl.searchParams.get("state") ?? "");
++			callbackDone = visit(callback);
++			await callbackDone;
++			return new Promise<string>((_resolve, reject) => {
++				const cancel = () => reject(new Error("Manual input cancelled"));
++				if (prompt.signal?.aborted) cancel();
++				else prompt.signal?.addEventListener("abort", cancel, { once: true });
++			});
++		},
++	};
++	return { interaction, callbackDone: () => callbackDone };
++}
++
++function visitCallback(url: URL): Promise<{ status: number | undefined; body: string }> {
++	return new Promise((resolve, reject) => {
++		get(url, { agent: false }, (response) => {
++			let body = "";
++			response.setEncoding("utf8");
++			response.on("data", (chunk: string) => {
++				body += chunk;
++			});
++			response.on("end", () => resolve({ status: response.statusCode, body }));
++			response.on("error", reject);
++		}).on("error", reject);
++	});
++}
++
+ function connectedCredential(): OAuthCredential {
+ 	return {
+ 		type: "oauth",
+@@ -108,6 +147,47 @@ describe("OpenAI ChatGPT OAuth", () => {
+ 		});
+ 	});
+ 
++	it.each([undefined, "different-state"])(
++		"keeps callback login active after an error with state %s",
++		async (state) => {
++			const fetchMock = stubTokenEndpoint(tokenResponse(), (body) => {
++				expect(body.get("code")).toBe("callback-code");
++			});
++			const { interaction, callbackDone } = callbackInteraction(async (callback) => {
++				const unrelated = new URL(callback);
++				if (state === undefined) unrelated.searchParams.delete("state");
++				else unrelated.searchParams.set("state", state);
++				unrelated.searchParams.set("error", "access_denied");
++				expect((await visitCallback(unrelated)).status).toBe(400);
++				expect(fetchMock).not.toHaveBeenCalled();
++				callback.searchParams.set("code", "callback-code");
++				callback.searchParams.set("client_id", "oaiapp_issued");
++				expect((await visitCallback(callback)).status).toBe(200);
++			});
++
++			await expect(openaiChatGPTOAuth.login(interaction, { getDeviceId: () => DEVICE_ID })).resolves.toMatchObject({
++				access: "access-token",
++				clientId: "oaiapp_issued",
++			});
++			await callbackDone();
++			expect(fetchMock).toHaveBeenCalledTimes(1);
++		},
++	);
++
++	it("rejects a correlated provider error without exchanging tokens", async () => {
++		const fetchMock = stubTokenEndpoint(tokenResponse());
++		const { interaction, callbackDone } = callbackInteraction(async (callback) => {
++			callback.searchParams.set("error", "access_denied");
++			expect((await visitCallback(callback)).status).toBe(400);
++		});
++
++		await expect(openaiChatGPTOAuth.login(interaction, { getDeviceId: () => DEVICE_ID })).rejects.toThrow(
++			"ChatGPT authorization failed: access_denied",
++		);
++		await callbackDone();
++		expect(fetchMock).not.toHaveBeenCalled();
++	});
++
+ 	it("uses the app's agent name as the name hint", async () => {
+ 		let authorizeUrl: URL | undefined;
+ 		stubTokenEndpoint(tokenResponse());

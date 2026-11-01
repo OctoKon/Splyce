@@ -15,8 +15,10 @@ import { randomUUID } from "crypto";
 import {
 	appendFileSync,
 	closeSync,
+	constants,
 	createReadStream,
 	existsSync,
+	fstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -24,6 +26,7 @@ import {
 	type Stats,
 	statSync,
 	writeFileSync,
+	writeSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
 import { basename, join, resolve } from "path";
@@ -630,14 +633,17 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 
 	const entries: FileEntry[] = [];
 	let pending = "";
+	let totalBytesRead = 0n;
 	const fd = openSync(resolvedFilePath, "r");
 	try {
+		const initialStat = fstatSync(fd, { bigint: true });
 		const decoder = new StringDecoder("utf8");
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
 
 		while (true) {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
+			totalBytesRead += BigInt(bytesRead);
 
 			pending += decoder.write(buffer.subarray(0, bytesRead));
 			let lineStart = 0;
@@ -654,19 +660,47 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		pending += decoder.end();
 		const finalEntry = parseSessionEntryLine(pending);
 		if (finalEntry) entries.push(finalEntry);
+
+		// Validate session header before repairing the file.
+		if (entries.length === 0) return entries;
+		const header = entries[0];
+		if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
+			return [];
+		}
+
+		if (pending) {
+			let appendFd: number;
+			try {
+				appendFd = openSync(resolvedFilePath, constants.O_WRONLY | constants.O_APPEND);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT")
+					throw new Error("Session file changed while loading");
+				throw error;
+			}
+			try {
+				const readStat = fstatSync(fd, { bigint: true });
+				const appendStat = fstatSync(appendFd, { bigint: true });
+				if (
+					readStat.dev !== appendStat.dev ||
+					readStat.ino !== appendStat.ino ||
+					readStat.size !== totalBytesRead ||
+					appendStat.size !== totalBytesRead ||
+					readStat.mtimeNs !== initialStat.mtimeNs ||
+					readStat.ctimeNs !== initialStat.ctimeNs ||
+					appendStat.mtimeNs !== initialStat.mtimeNs ||
+					appendStat.ctimeNs !== initialStat.ctimeNs
+				) {
+					throw new Error("Session file changed while loading");
+				}
+				writeSync(appendFd, "\n");
+			} finally {
+				closeSync(appendFd);
+			}
+		}
+		return entries;
 	} finally {
 		closeSync(fd);
 	}
-
-	// Validate session header before repairing the file.
-	if (entries.length === 0) return entries;
-	const header = entries[0];
-	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
-		return [];
-	}
-
-	if (pending) appendFileSync(resolvedFilePath, "\n");
-	return entries;
 }
 
 /**

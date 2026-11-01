@@ -208,6 +208,19 @@ describe("projectStatus", () => {
     ).toBe("unknown");
   });
 
+  it("safely handles prototype property names without collision", () => {
+    for (const key of ["constructor", "__proto__", "toString", "valueOf"]) {
+      expect(projectStatus("run", { state: key } as never).status).toBe(
+        "unknown",
+      );
+      expect(projectStatus("run", { state: key } as never).label).toBe(
+        "Unknown",
+      );
+      expect(projectTurnStatus(key as never).status).toBe("unknown");
+      expect(projectToolStatus(key as never).status).toBe("unknown");
+    }
+  });
+
   it("does not mutate the input or copy metadata, paths or error text", () => {
     const record = Object.freeze({
       state: "failed",

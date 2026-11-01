@@ -640,3 +640,122 @@ test("follow re-resolves payload references from the event schema: a revoked pay
   assert.deepEqual(map.follow(k1, 0).replay, [started, intent]);
   store.close();
 });
+
+// TD-15 resync: the real SessionMap -> DesktopBridge -> renderer transport.
+const resyncChain = async () => {
+  const { createTurnStreamTransport } =
+    await import("../../apps/desktop/src/stores/turns.ts");
+  const { store, pi, map } = setup();
+  map.bind(k1, pi);
+  const id = pi.getSessionId();
+  map.anchorRun(id, run("run-1"));
+  const requests: number[] = [];
+  const transport = createTurnStreamTransport({
+    sessionId: "s1",
+    scopeId: "w-demo",
+    schedule: (task) => task(),
+    onResync: (afterSeq) => requests.push(afterSeq),
+  });
+  let published = 0;
+  // Durable publishes until the follower's bridge overflows; returns its control.
+  const overflowDurable = () => {
+    for (;;) {
+      published += 1;
+      const { frame } = map.publish(id, durableEvent(`e-${String(published)}`));
+      if (frame) return frame.event;
+    }
+  };
+  // Large transients overflow the byte budget quickly; nothing is retained.
+  const overflowTransient = () => {
+    const [, delta] = fixture.engineEvents;
+    for (;;) {
+      published += 1;
+      const { frame } = map.publish(id, {
+        ...delta,
+        eventId: `t-${String(published)}`,
+        payload: { runId: "run-1", delta: "x".repeat(60000) },
+      });
+      if (frame) return frame.event;
+    }
+  };
+  return {
+    store,
+    map,
+    id,
+    transport,
+    requests,
+    overflowDurable,
+    overflowTransient,
+  };
+};
+
+test("TD-15 B1: a fresh follower's overflow control (fromSeq 0) replays seq 1 plainly and recovers", async () => {
+  const { store, map, transport, requests, overflowDurable } =
+    await resyncChain();
+  const { channel } = map.follow(k1, 0);
+  const control = overflowDurable();
+  assert.deepEqual(control, {
+    frame: "control",
+    kind: "stream.resync",
+    sessionId: "s1",
+    fromSeq: 0,
+  });
+  transport.enqueue(control as never);
+  assert.deepEqual(requests, [0]);
+  assert.equal(transport.current().needsResync, true);
+  assert.equal(channel.bridge.drain().frames.length, 0);
+  const { replay } = map.follow(k1, requests[0]!);
+  assert.equal(replay[0]!.seq, 1);
+  assert.equal(replay[0]!.kind, "turn.started");
+  for (const event of replay) transport.enqueue(event);
+  const state = transport.flush();
+  assert.equal(state.needsResync, false);
+  assert.equal(state.resyncCount, 1);
+  assert.equal(state.duplicateCount, 0);
+  assert.equal(state.lastDurableSeq, replay.at(-1)!.seq);
+  store.close();
+});
+
+test("TD-15 B2: overflow controls carry the follower's current applied seq across resubscribes", async () => {
+  const { store, map, id, overflowTransient } = await resyncChain();
+  for (const n of [1, 2, 3, 4, 5]) map.publish(id, durableEvent(`d-${n}`));
+  const { channel } = map.follow(k1, 5);
+  assert.equal((overflowTransient() as { fromSeq: number }).fromSeq, 5);
+  channel.bridge.drain();
+  const applied = store.eventHighwater("w-demo", "s1") - 3;
+  assert.equal(map.follow(k1, applied).channel, channel);
+  assert.equal((overflowTransient() as { fromSeq: number }).fromSeq, applied);
+  assert.equal(channel.bridge.status().lastResyncFromSeq, applied);
+  store.close();
+});
+
+test("TD-15 B3: bridge replay is the session's own event ledger in its event seq domain", () => {
+  const { dir, store, pi, map } = setup();
+  const pi2 = SessionManager.create(dir, join(dir, "pi"));
+  map.bind(k1, pi);
+  map.bind(k2, pi2);
+  map.anchorRun(pi.getSessionId(), run("run-1"));
+  map.anchorRun(pi2.getSessionId(), run("run-2"));
+  const other = {
+    ...durableEvent("b-1"),
+    recordId: "rec-run-2",
+    payload: { runId: "run-2", turnId: "t-b" },
+  };
+  const a1 = map.publish(pi.getSessionId(), durableEvent("a-1")).event;
+  map.publish(pi2.getSessionId(), other);
+  map.anchorRun(pi.getSessionId(), run("run-3"));
+  map.publish(pi2.getSessionId(), { ...other, eventId: "b-2" });
+  const a2 = map.publish(pi.getSessionId(), durableEvent("a-2")).event;
+  const { bridge } = map.follow(k1, 0).channel;
+  assert.deepEqual(bridge.replay(0), [a1, a2]);
+  assert.deepEqual(
+    bridge.replay(0).map((e: { seq: number }) => e.seq),
+    [1, 2],
+  );
+  assert.deepEqual(bridge.replay(a1.seq), [a2]);
+  // The receipts' global record cursor is a different domain entirely.
+  const recordCursor = store.cursor("w-demo");
+  assert.ok(recordCursor > a2.seq);
+  assert.throws(() => bridge.replay(recordCursor), code("INVALID_CURSOR"));
+  store.close();
+});

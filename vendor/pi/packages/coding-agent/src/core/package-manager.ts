@@ -1525,6 +1525,7 @@ export class DefaultPackageManager implements PackageManager {
 		// Try parsing as git URL
 		const gitParsed = parseGitUrl(source);
 		if (gitParsed) {
+			if (gitParsed.ref?.startsWith("-")) throw new Error("Invalid git ref");
 			return gitParsed;
 		}
 
