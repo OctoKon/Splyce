@@ -617,6 +617,9 @@ textarea {
 #composer-status:empty {
   display: none;
 }
+#composer-status.is-blocked {
+  color: var(--status-warning, #b45309);
+}
 #composer-status.has-error {
   color: var(--error);
 }

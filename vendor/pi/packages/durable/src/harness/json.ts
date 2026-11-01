@@ -26,7 +26,7 @@ export function assignJson<T extends object, K extends keyof T & (string | numbe
 	if (plan?.kind === "keep") return;
 	// Every target is a document container: JSON members or items, whatever its declared type names them.
 	const slots = target as Record<string | number, JsonValue>;
-	const current: JsonValue | undefined = slots[key];
+	const current: JsonValue | undefined = Object.hasOwn(slots, key) ? slots[key] : undefined;
 	const fields = plan?.kind === "fields" ? plan.fields : undefined;
 	if (isRecord(current) && isRecord(value)) {
 		for (const name of Object.keys(current)) if (!Object.hasOwn(value, name)) delete current[name];

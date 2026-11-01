@@ -113,7 +113,8 @@ function projectPorts(ports: PortAvailability): boolean {
   return (
     lastHandshake?.readiness.state === "ready" &&
     ports.generation &&
-    ports.provider
+    ports.provider &&
+    ports.workspace
   );
 }
 const stateListeners = new Set<(state: EngineConnectionState) => void>();

@@ -9,6 +9,7 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -189,8 +190,25 @@ test("embedded WebDriver tool pins match their lockfiles", async () => {
     const locked = packageLock.packages[`node_modules/${tool.name}`];
     assert.equal(locked?.version, tool.version, `${tool.name} version`);
     assert.equal(locked?.license, tool.license, `${tool.name} license`);
-    if (!tool.via)
-      assert.equal(packageJson.devDependencies[tool.name], tool.version);
+    if (!tool.via) {
+      assert.equal(
+        packageJson.devDependencies[tool.name],
+        tool.packageSpec ?? tool.version,
+      );
+      if (tool.packageSpec) {
+        assert.equal(tool.name, "mocha");
+        assert.equal(tool.packageSpec, "file:patches/mocha/mocha-10.8.2.tgz");
+        assert.equal(locked.resolved, tool.packageSpec);
+        assert.equal(locked.integrity, tool.integrity);
+        const archive = await readFile(
+          resolve(root, "patches/mocha/mocha-10.8.2.tgz"),
+        );
+        assert.equal(
+          `sha512-${createHash("sha512").update(archive).digest("base64")}`,
+          tool.integrity,
+        );
+      }
+    }
   }
   const cargoLock = await readFile(
     resolve(root, "apps/desktop/src-tauri/Cargo.lock"),

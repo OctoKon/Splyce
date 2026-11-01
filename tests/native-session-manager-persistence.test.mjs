@@ -17,6 +17,7 @@ import { createSplyceOwner } from "../vendor/pi/packages/agent/src/splyce-readin
 import {
   SessionManager,
   assertUnownedSessionExport,
+  loadEntriesFromFile,
 } from "../vendor/pi/packages/coding-agent/src/core/session-manager.ts";
 
 const marker = "fixture-persistence-private-value";
@@ -50,6 +51,35 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+test("an owned stage cannot repair an unterminated session through the public loader", async (t) => {
+  const directory = temporary(t);
+  const owner = createSplyceOwner(() => {});
+  const manager = await SessionManager.createOwned(
+    directory,
+    (subject) => owner.bindPersistence(subject, async (text) => text),
+    join(directory, "sessions"),
+  );
+  const path = join(directory, "unterminated.jsonl");
+  const bytes = JSON.stringify({
+    type: "session",
+    id: "repair-fixture",
+    version: 3,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    cwd: directory,
+  });
+  writeFileSync(path, bytes);
+  const before = structuredClone(manager.getEntries());
+  await assert.rejects(
+    manager.withPersistence(() => loadEntriesFromFile(path)),
+    unavailable,
+  );
+  assert.equal(readFileSync(path, "utf8"), bytes);
+  assert.deepEqual(manager.getEntries(), before);
+  assert.equal(existsSync(manager.getSessionFile()), false);
+  assert.equal(loadEntriesFromFile(path)[0].id, "repair-fixture");
+  assert.equal(readFileSync(path, "utf8"), `${bytes}\n`);
+});
 
 async function settledWithin(promise) {
   let timer;

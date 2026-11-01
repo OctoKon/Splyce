@@ -529,10 +529,20 @@ describe("App wiring", () => {
       } as SplyceEvent);
       await settle();
       expect(button("Send").disabled).toBe(true);
+      expect(q("[data-testid=app-shell]")?.dataset.connectionState).toBe(
+        "unavailable",
+      );
+      expect(
+        ipc.invoke.mock.calls.filter(
+          ([command, args]) =>
+            command === "send" &&
+            (args as { op?: string }).op === "session.prompt",
+        ),
+      ).toHaveLength(0);
       expect(q("#composer-status")?.textContent).toContain(
         missing === "provider"
           ? "Generation unconfigured"
-          : "No profile is selected",
+          : "Engine is unavailable",
       );
       if (missing === "workspace")
         expect(document.body.textContent).toContain(

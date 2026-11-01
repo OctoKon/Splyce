@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InMemoryModelsStore } from "@earendil-works/pi-ai";
@@ -39,8 +39,7 @@ let tempDir: string;
 
 beforeEach(() => {
 	allowNetwork();
-	tempDir = join(tmpdir(), `pi-test-radius-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-	mkdirSync(tempDir, { recursive: true });
+	tempDir = mkdtempSync(join(tmpdir(), "pi-test-radius-"));
 });
 
 afterEach(() => {

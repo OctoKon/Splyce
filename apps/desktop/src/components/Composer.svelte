@@ -183,7 +183,8 @@
     <span id="composer-hint">Enter to start · Shift+Enter for a line</span>
   </div>
   <div class="composer-footer">
-    <p id="composer-status" role="status" class:has-error={!!error}>
+    <p id="composer-status" role="status" class:has-error={!!error} class:is-blocked={!!reason}>
+
       {#if error}Send failed: {error}{:else if reason}{reason}{/if}
     </p>
     {#if cancellable && cancel}<button

@@ -123,9 +123,8 @@ function selectedProfile(writer) {
           role: "chat",
           providerConnectionId:
             fixtures.providerConnection.providerConnectionId,
-          modelId: "org/model:version",
           connectionRevision: "c1",
-          modelId: "fixture-chat-model",
+          modelId: "fixture-model",
         },
       ],
       egressPolicyRefs: [],
@@ -175,9 +174,8 @@ test("current uses the exact applied immutable profile with its selected config 
           role: "chat",
           providerConnectionId:
             fixtures.providerConnection.providerConnectionId,
-          modelId: "org/model:version",
           connectionRevision: "c1",
-          modelId: "fixture-chat-model",
+          modelId: "fixture-model",
         },
       ],
       egressPolicyRefs: [],
