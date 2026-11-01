@@ -327,6 +327,12 @@ export function createToolDispatch(deps: ToolDispatchDeps): ToolDispatch {
         hex(permit.argumentsDigest) !== hex(req.argumentsDigest)
       )
         return { ok: false, reason: "GRANT_REQUIRED" };
+      if (
+        permit.approvedBy &&
+        permit.approvedBy !==
+          `mode:${deps.permissionMode?.() ?? readPermissionMode(store, deps.workspaceId, caller.sessionId)}`
+      )
+        return { ok: false, reason: "GRANT_REVOKED" };
       return {
         ok: true,
         grantId: permit.grantId,

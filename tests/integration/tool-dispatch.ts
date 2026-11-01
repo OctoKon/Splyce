@@ -3,15 +3,19 @@
 // sequence (reserve -> prepare -> finish -> execute). Only the host ports are
 // injected: approval, native redaction, native directory identity.
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
   existsSync,
 } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -20,6 +24,7 @@ import {
   actionArgumentsDigest,
 } from "../../packages/splyce-pi/dist/policy.js";
 import { Store } from "../../packages/splyce-pi/dist/store.js";
+import { persistPermissionMode } from "../../packages/splyce-pi/dist/permission-modes.js";
 import {
   APPROVAL_ARGS_MAX,
   WITHHELD,
@@ -1505,6 +1510,162 @@ test("automatic authorization revoked before effect leaves target unchanged", as
   );
   assert.equal(existsSync(join(f.workDir, "revoked.txt")), false);
 });
+
+test("automatic authorization revoked during target redaction prevents the write", async (t) => {
+  let revoked = false;
+  const f = await setup(t, {
+    nativeRedact: async (text) => {
+      if (text === "late-revoked.txt") {
+        await Promise.resolve();
+        persistPermissionMode(f.store, caller, {
+          requestId: "revoke-during-redaction",
+          workspaceId: f.workspaceId,
+          sessionId: caller.sessionId,
+          mode: "manual",
+        });
+        revoked = true;
+      }
+      return { text };
+    },
+  });
+  persistPermissionMode(f.store, caller, {
+    requestId: "initial-auto",
+    workspaceId: f.workspaceId,
+    sessionId: caller.sessionId,
+    mode: "auto",
+  });
+  const out = await f.drive("late-revoked", "write", {
+    path: "late-revoked.txt",
+    content: "changed",
+  });
+  assert.equal(revoked, true);
+  assert.equal(existsSync(join(f.workDir, "late-revoked.txt")), false);
+  assert.equal(out.isError, true);
+  assert.equal(
+    f.actions("late-revoked").some((row) => state(row) === "completed"),
+    false,
+  );
+  assert.equal(f.approvals.length, 0);
+});
+
+for (const mode of ["auto", "bypass", "manual"] as const) {
+  for (const tool of ["write", "edit"] as const) {
+    test(`permission ${mode}: ${tool} rechecks after the temporary write without invalidating explicit approval`, async (t) => {
+      const f = await setup(t);
+      persistPermissionMode(f.store, caller, {
+        requestId: "initial-mode",
+        workspaceId: f.workspaceId,
+        sessionId: caller.sessionId,
+        mode,
+      });
+      writeFileSync(join(f.workDir, "late.txt"), "before");
+      const original = fsPromises.writeFile;
+      let revoked = false;
+      fsPromises.writeFile = async (...args) => {
+        await original(...args);
+        if (String(args[0]).startsWith(join(f.workDir, ".late.txt."))) {
+          persistPermissionMode(f.store, caller, {
+            requestId: "revoke-after-temp-write",
+            workspaceId: f.workspaceId,
+            sessionId: caller.sessionId,
+            mode: "manual",
+          });
+          revoked = true;
+        }
+      };
+      syncBuiltinESMExports();
+      let out;
+      try {
+        out = await f.drive(
+          "late-effect",
+          tool,
+          tool === "write"
+            ? { path: "late.txt", content: "after" }
+            : {
+                path: "late.txt",
+                edits: [{ oldText: "before", newText: "after" }],
+              },
+        );
+      } finally {
+        fsPromises.writeFile = original;
+        syncBuiltinESMExports();
+      }
+      assert.equal(revoked, true);
+      assert.equal(
+        readFileSync(join(f.workDir, "late.txt"), "utf8"),
+        mode === "manual" ? "after" : "before",
+      );
+      assert.equal(out.isError, mode !== "manual");
+      if (mode !== "manual") assert.match(returned(out).text, /GRANT_REVOKED/u);
+      assert.equal(
+        f.actions("late-effect").some((row) => state(row) === "completed"),
+        mode === "manual",
+      );
+      assert.equal(
+        readdirSync(f.workDir).some((name) => name.startsWith(".late.txt.")),
+        false,
+      );
+      assert.equal(f.approvals.length, mode === "manual" ? 1 : 0);
+    });
+  }
+}
+
+for (const mode of ["bypass", "manual"] as const) {
+  test(`permission ${mode}: shell rechecks after temporary directory creation and cleans up`, async (t) => {
+    const f = await setup(t);
+    persistPermissionMode(f.store, caller, {
+      requestId: "initial-shell-mode",
+      workspaceId: f.workspaceId,
+      sessionId: caller.sessionId,
+      mode,
+    });
+    const original = fsPromises.mkdtemp;
+    const originalSpawn = childProcess.spawn;
+    let launches = 0;
+    childProcess.spawn = (...args) => {
+      launches++;
+      return originalSpawn(...args);
+    };
+    let revoked = false;
+    fsPromises.mkdtemp = async (...args) => {
+      const path = await original(...args);
+      if (String(args[0]).startsWith(join(f.workDir, ".splyce-shell-"))) {
+        persistPermissionMode(f.store, caller, {
+          requestId: "revoke-before-spawn",
+          workspaceId: f.workspaceId,
+          sessionId: caller.sessionId,
+          mode: "manual",
+        });
+        revoked = true;
+      }
+      return path;
+    };
+    syncBuiltinESMExports();
+    let out;
+    try {
+      out = await f.drive("late-shell", "powershell", {
+        command: "Get-Location",
+      });
+    } finally {
+      fsPromises.mkdtemp = original;
+      childProcess.spawn = originalSpawn;
+      syncBuiltinESMExports();
+    }
+    assert.equal(revoked, true);
+    assert.equal(launches, mode === "manual" ? 1 : 0);
+    assert.equal(out.isError, mode !== "manual");
+    if (mode !== "manual") assert.match(returned(out).text, /GRANT_REVOKED/u);
+    assert.equal(
+      f.actions("late-shell").some((row) => state(row) === "completed"),
+      mode === "manual",
+    );
+    assert.equal(
+      readdirSync(f.workDir).some((name) => name.startsWith(".splyce-shell-")),
+      false,
+    );
+    assert.equal(f.approvals.length, mode === "manual" ? 1 : 0);
+  });
+}
 
 test("automatic cancellation before effect leaves target unchanged", async (t) => {
   const f = await setup(t, { permissionMode: () => "bypass" });

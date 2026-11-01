@@ -59,6 +59,7 @@ export interface Intent extends Act {
   summary: string;
 }
 export interface GrantPort {
+  /** GRANT_CONSUMED identifies this exact request's grant; revocation and invalidation take precedence. */
   check(
     req: {
       workspaceId: string;
@@ -441,16 +442,29 @@ export function createWorkspaceTools(
     target: string,
     grantId: string,
     a: Act,
-    fn: () => Promise<T>,
+    fn: (assertCurrent: () => void) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
     // The grant check matches the exact target above; durable intent/receipt text is redacted.
-    const intent = { ...req(capability, await clean(target), a), summary: "" };
-    if (signal?.aborted) fail("ABORTED", "aborted");
+    const request = req(capability, target, a);
+    const intent = { ...request, target: await clean(target), summary: "" };
+    let consumed = false;
+    const assertCurrent = () => {
+      if (signal?.aborted) fail("ABORTED", "aborted");
+      const current = grants.check(request);
+      if (!current.ok) {
+        // Only this call's successful consume can authorize its remaining physical steps.
+        if (consumed && current.reason === "GRANT_CONSUMED") return;
+        fail(current.reason, `${capability} authorization is unavailable`);
+      } else if (current.grantId !== grantId)
+        fail("GRANT_REQUIRED", `${capability} authorization changed`);
+    };
+    assertCurrent();
     try {
       grants.consume(grantId, intent);
+      consumed = true;
     } catch {
-      const r = grants.check(req(capability, target, a));
+      const r = grants.check(request);
       return fail(
         r.ok ? "GRANT_CONSUMED" : r.reason,
         `${capability} grant unusable for ${target}`,
@@ -458,7 +472,7 @@ export function createWorkspaceTools(
     }
     let out: T;
     try {
-      out = await fn();
+      out = await fn(assertCurrent);
     } catch (e) {
       try {
         receipts.record({
@@ -489,6 +503,7 @@ export function createWorkspaceTools(
     path: string,
     abs: string,
     data: string,
+    assertCurrent: () => void,
     signal?: AbortSignal,
   ) {
     await recheck(path, abs, signal);
@@ -503,13 +518,16 @@ export function createWorkspaceTools(
     )
       missing.unshift(d);
     for (const d of missing) {
+      assertCurrent();
       await mkdir(d);
       await recheck(path, abs, signal);
     }
     const tmp = join(dirname(abs), `.${basename(abs)}.${randomUUID()}.tmp`);
     try {
+      assertCurrent();
       await writeFile(tmp, data);
       await recheck(path, abs, signal);
+      assertCurrent();
       await rename(tmp, abs);
     } catch (e) {
       await rm(tmp, { force: true }).catch(() => undefined);
@@ -584,6 +602,7 @@ export function createWorkspaceTools(
     kind: "bash" | "powershell",
     command: string,
     ms: number,
+    assertCurrent: () => void,
     signal?: AbortSignal,
   ) {
     const cwd = root();
@@ -640,6 +659,7 @@ export function createWorkspaceTools(
       }
     }
     if (signal?.aborted) fail("ABORTED", "aborted");
+    assertCurrent();
     const temp = win ? await mkdtemp(join(cwd, ".splyce-shell-")) : undefined;
     try {
       const env = win
@@ -653,6 +673,7 @@ export function createWorkspaceTools(
           }
         : scrubbedEnv();
       if (signal?.aborted) fail("ABORTED", "aborted");
+      assertCurrent();
       const child = spawn(file, args, {
         cwd,
         env,
@@ -802,8 +823,8 @@ export function createWorkspaceTools(
       const ms = Math.min(timeoutMs, optNum(args.timeout, Infinity) * 1000);
       const target = `${kind}:${command}`;
       const grantId = gate("shell.run", target, a);
-      const execute = async () => {
-        const r = await exec(kind, command, ms, signal);
+      const execute = async (assertCurrent: () => void) => {
+        const r = await exec(kind, command, ms, assertCurrent, signal);
         return { summary: `exit ${String(r.code)}`, ok: r.code === 0, r };
       };
       const { r } = await effect(
@@ -1063,9 +1084,9 @@ export function createWorkspaceTools(
         const path = str(args.path, "path");
         const { abs, rel } = await confine(path);
         const grantId = gate("fs.write", rel, a);
-        const o = await effect("fs.write", rel, grantId, a, () =>
+        const o = await effect("fs.write", rel, grantId, a, (assertCurrent) =>
           io(rel, async () => {
-            await put(path, abs, content, signal);
+            await put(path, abs, content, assertCurrent, signal);
             const n = encoder.encode(content).length;
             return {
               summary: `wrote ${String(n)} bytes`,
@@ -1141,9 +1162,9 @@ export function createWorkspaceTools(
         text += original.slice(pos);
         if (crlf) text = text.replace(/\n/g, "\r\n");
         text = bom + text;
-        const o = await effect("fs.write", rel, grantId, a, () =>
+        const o = await effect("fs.write", rel, grantId, a, (assertCurrent) =>
           io(rel, async () => {
-            await put(path, abs, text, signal);
+            await put(path, abs, text, assertCurrent, signal);
             return {
               summary: `edited ${String(list.length)} block(s)`,
               ok: true,

@@ -263,6 +263,20 @@ test("a revoked grant is denied", async () => {
   assert.equal(existsSync(join(h.root, "x.txt")), false);
 });
 
+test("revocation takes precedence over the selected grant's consumed state", async () => {
+  const h = harness();
+  const id = h.grants.approve("fs.write", "x.txt");
+  const grant = h.grants.all.find((entry) => entry.id === id)!;
+  grant.consumed = true;
+  grant.revoked = true;
+  assert.equal(
+    await codeOf(run(h, "write", { path: "x.txt", content: "changed" })),
+    "GRANT_REVOKED",
+  );
+  assert.equal(existsSync(join(h.root, "x.txt")), false);
+  assert.equal(h.log.length, 0);
+});
+
 test("a grant consumed concurrently by another caller blocks the effect", async () => {
   const h = harness();
   h.grants.approve("fs.write", "x.txt");
