@@ -116,6 +116,12 @@ jobs:
       - name: Build and qualify per-run release-smoke drivers
         shell: pwsh
         run: ./tests/bootstrap/prepare-release-drivers.ps1
+      - name: Check standard desktop launcher guards
+        shell: pwsh
+        run: ./tests/bootstrap/run-standard-desktop.ps1 -SelfCheck
+      - name: Probe release smoke in the standard user session
+        shell: pwsh
+        run: ./tests/bootstrap/run-standard-desktop.ps1 -Mode Smoke
       - name: Run release and embedded desktop gates
         run: |
           # Once defined, the release gate always runs; path detection only decides whether a missing script is an error.
