@@ -1812,513 +1812,505 @@ for (const mode of ["auto", "bypass"])
 test.before(() => {
   if (process.platform === "win32") shellFixturePath();
 });
+function nativeToolSession(loseCleanupReply) {
+  return async (t) => {
+    const bodies = [];
+    const server = createServer(async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      const turn = bodies.length;
+      const tool =
+        turn === 1
+          ? { name: "read", arguments: JSON.stringify({ path: "README.md" }) }
+          : turn === 2 || turn === 3
+            ? {
+                name: "write<|channel|>commentary",
+                arguments: JSON.stringify({
+                  path: turn === 2 ? "approved.txt" : "denied.txt",
+                  content: turn === 2 ? "approved" : "blocked",
+                }),
+              }
+            : turn === 4 || turn === 6
+              ? {
+                  name: "powershell",
+                  arguments: JSON.stringify({
+                    command:
+                      turn === 4
+                        ? "Write-Output 'native-shell-ok'"
+                        : "Start-Sleep -Seconds 10",
+                  }),
+                }
+              : null;
+      const delta = tool
+        ? {
+            tool_calls: [
+              {
+                index: 0,
+                id: `call-${turn}`,
+                type: "function",
+                function: tool,
+              },
+            ],
+          }
+        : { role: "assistant", content: "done" };
+      const event = (delta, finish_reason) =>
+        `data: ${JSON.stringify({ id: "tools-fixture", object: "chat.completion.chunk", created: 0, model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(event(delta, tool ? "tool_calls" : "stop") + "data: [DONE]\n\n");
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(async () => {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    });
+    const f = fixture(
+      t,
+      {
+        modelId: "fixture-model",
+        model: { contextWindow: 8192, maxOutputTokens: 1024 },
+      },
+      `http://127.0.0.1:${server.address().port}/v1`,
+      "openai-completions",
+      "loopback",
+      false,
+      true,
+    );
+    const workspace = join(f.dir, "workspace");
+    writeFileSync(
+      join(workspace, "README.md"),
+      "visible fixture PRIVATE_MARKER",
+    );
+    let control;
+    let longStartId,
+      longStart,
+      accepted = false,
+      confirmed;
+    const shellRequests = new Map();
+    const shell = shellPeer(
+      (frame) => {
+        const reply = frame.native,
+          request = shellRequests.get(reply.id);
+        shellRequests.delete(reply.id);
+        if (reply.id === longStartId && reply.ok) accepted = true;
+        if (
+          loseCleanupReply &&
+          reply.value?.state === "done" &&
+          request?.params.effectId === longStart?.effectId
+        ) {
+          // The native fixture observed settlement, but the engine loses its terminal reply.
+          confirmed = reply.value;
+          control.accept({
+            native: {
+              id: reply.id,
+              ok: false,
+              error: { code: "SHELL_CLEANUP_UNCERTAIN" },
+            },
+          });
+        } else control.accept(frame);
+      },
+      () => control.shutdown(),
+      {
+        onFrame: ({ native }) => {
+          shellRequests.set(native.id, native);
+          if (
+            native.method === "shell.start" &&
+            native.params.command === "Start-Sleep -Seconds 10"
+          ) {
+            longStartId = native.id;
+            longStart = native.params;
+          }
+        },
+      },
+    );
+    t.after(() => shell.close());
+    control = new NativeControl(async ({ native }, maySend) => {
+      if (native.method.startsWith("shell."))
+        return shell.send({ native }, maySend);
+      let value;
+      if (native.method === "credential.status") value = { present: true };
+      else if (native.method === "inventory.capture")
+        value = {
+          manifest: { tracked: [], untracked: [], links: [], excluded: [] },
+        };
+      else if (native.method === "credential.redact") {
+        const text = native.params.text.replaceAll(
+          "PRIVATE_MARKER",
+          "[redacted]",
+        );
+        value = { text, redactedCount: text === native.params.text ? 0 : 1 };
+      } else if (native.method === "credential.read")
+        value = { secret: "synthetic-loopback-credential" };
+      else if (
+        ["credential.scope.open", "credential.scope.close"].includes(
+          native.method,
+        )
+      )
+        value = {};
+      else throw new Error(`Unexpected native method: ${native.method}`);
+      control.accept({ native: { id: native.id, ok: true, value } });
+    });
+    const host = createNativeHost(f.appDataDir, control);
+    f.cleanup.push(async () => {
+      await host.shutdown();
+      control.shutdown();
+    });
+    const selected = await host.selectProfile(
+      {
+        requestId: "tools-select",
+        workspaceId: f.input.workspaceId,
+        profileId: f.input.profileId,
+        expectedProfileRevision: "p1",
+        expectedConfigRevision: "cfg-1",
+      },
+      "tools-select",
+    );
+    const started = await host.startSession(
+      {
+        requestId: "tools-start",
+        workspaceId: f.input.workspaceId,
+        profileId: selected.selectedProfileId,
+        expectedConfigRevision: selected.configRevision,
+      },
+      "tools-start",
+    );
+    host.subscribeSession(started.sessionId, 0);
+    const events = [];
+    let settle;
+    const terminal = new Promise((resolve) => {
+      settle = resolve;
+    });
+    const collect = () => {
+      events.push(...host.drainSessionEvents(started.sessionId).frames);
+      const result = events.find((event) =>
+        ["turn.completed", "turn.failed", "turn.canceled"].includes(event.kind),
+      );
+      if (result) settle(result);
+    };
+    f.cleanup.push(host.onSessionEvents(collect));
+    const command = {
+      protocolVersion: 2,
+      correlationId: "tools-prompt",
+      sessionId: started.sessionId,
+      scopeId: f.input.workspaceId,
+      expectedConfigRevision: selected.configRevision,
+      expectedProfileRevision: selected.profileRevision,
+      expectedPolicyRevision: started.policyRevision,
+    };
+    assert.equal(
+      (
+        await host.preparePrompt({
+          ...command,
+          op: "session.prompt",
+          payload: { text: "Read the workspace, then write a file" },
+        })
+      ).accepted,
+      true,
+    );
+    for (const [index, decision] of ["approve", "deny"].entries()) {
+      let approval;
+      const deadline = Date.now() + 15000;
+      while (
+        !approval &&
+        Date.now() < deadline &&
+        !events.some((event) =>
+          ["turn.completed", "turn.failed", "turn.canceled"].includes(
+            event.kind,
+          ),
+        )
+      ) {
+        collect();
+        approval = events.filter(
+          (event) => event.kind === "approval.requested",
+        )[index];
+        if (!approval) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.ok(
+        approval,
+        JSON.stringify({ events, requestCount: bodies.length }),
+      );
+      const target = join(
+        workspace,
+        index === 0 ? "approved.txt" : "denied.txt",
+      );
+      assert.equal(existsSync(target), false);
+      if (index === 1)
+        assert.equal(
+          readFileSync(join(workspace, "approved.txt"), "utf8"),
+          "approved",
+        );
+      await host.respondApproval({
+        ...command,
+        correlationId: `tools-${decision}`,
+        op: "approval.respond",
+        payload: {
+          approvalRequestId: approval.payload.approvalRequestId,
+          runId: approval.payload.runId,
+          actionId: approval.payload.actionId,
+          decision,
+        },
+      });
+    }
+    collect();
+    assert.equal((await terminal).kind, "turn.failed");
+    assert.equal(existsSync(join(workspace, "denied.txt")), false);
+    assert.equal(
+      readFileSync(join(workspace, "approved.txt"), "utf8"),
+      "approved",
+    );
+    const firstEventCount = events.length;
+    assert.equal(
+      (
+        await host.preparePrompt({
+          ...command,
+          correlationId: "shell-prompt",
+          op: "session.prompt",
+          payload: { text: "Run the shell command" },
+        })
+      ).accepted,
+      true,
+    );
+    let shellApproval;
+    const shellDeadline = Date.now() + 15000;
+    while (!shellApproval && Date.now() < shellDeadline) {
+      collect();
+      shellApproval = events
+        .slice(firstEventCount)
+        .find((event) => event.kind === "approval.requested");
+      if (!shellApproval)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(shellApproval, JSON.stringify(events.slice(firstEventCount)));
+    await host.respondApproval({
+      ...command,
+      correlationId: "shell-approve",
+      op: "approval.respond",
+      payload: {
+        approvalRequestId: shellApproval.payload.approvalRequestId,
+        runId: shellApproval.payload.runId,
+        actionId: shellApproval.payload.actionId,
+        decision: "approve",
+      },
+    });
+    // collect only the new turn's terminal event
+    while (
+      !events
+        .slice(firstEventCount)
+        .some((event) =>
+          ["turn.completed", "turn.failed", "turn.canceled"].includes(
+            event.kind,
+          ),
+        ) &&
+      Date.now() < shellDeadline
+    ) {
+      collect();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(
+      events
+        .slice(firstEventCount)
+        .find((event) =>
+          ["turn.completed", "turn.failed", "turn.canceled"].includes(
+            event.kind,
+          ),
+        )?.kind,
+      "turn.completed",
+    );
+    assert.match(JSON.stringify(bodies[4].messages), /native-shell-ok/u);
+    const outcome = (id) =>
+      f.store
+        .list(f.input.workspaceId)
+        .records.filter(
+          ({ kind, record }) => kind === "outcome" && record.actionId === id,
+        )
+        .at(-1)?.record;
+    assert.equal(
+      outcome(shellApproval.payload.actionId)?.cleanupState,
+      "complete",
+    );
+    const cancelEventStart = events.length;
+    assert.equal(
+      (
+        await host.preparePrompt({
+          ...command,
+          correlationId: "cancel-prompt",
+          op: "session.prompt",
+          payload: { text: "Run the long shell command" },
+        })
+      ).accepted,
+      true,
+    );
+    let cancelApproval;
+    const cancelDeadline = Date.now() + 15000;
+    while (!cancelApproval && Date.now() < cancelDeadline) {
+      collect();
+      cancelApproval = events
+        .slice(cancelEventStart)
+        .find((event) => event.kind === "approval.requested");
+      if (!cancelApproval)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(cancelApproval, JSON.stringify(events.slice(cancelEventStart)));
+    await host.respondApproval({
+      ...command,
+      correlationId: "cancel-approve",
+      op: "approval.respond",
+      payload: {
+        approvalRequestId: cancelApproval.payload.approvalRequestId,
+        runId: cancelApproval.payload.runId,
+        actionId: cancelApproval.payload.actionId,
+        decision: "approve",
+      },
+    });
+    const intentDeadline = Date.now() + 5000;
+    while (
+      (!accepted ||
+        !events
+          .slice(cancelEventStart)
+          .some(
+            (event) =>
+              event.kind === "turn.tool_intent" &&
+              event.payload.actionId === cancelApproval.payload.actionId,
+          )) &&
+      Date.now() < intentDeadline
+    ) {
+      collect();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(
+      events
+        .slice(cancelEventStart)
+        .some(
+          (event) =>
+            event.kind === "turn.tool_intent" &&
+            event.payload.actionId === cancelApproval.payload.actionId,
+        ),
+    );
+    assert.equal(accepted, true);
+    const cancellation = host.cancelSession({
+      sessionId: started.sessionId,
+      reason: "user",
+    });
+    if (loseCleanupReply) {
+      await assert.rejects(cancellation);
+      const actionId = cancelApproval.payload.actionId;
+      assert.equal(outcome(actionId)?.cleanupState, "uncertain");
+      assert.equal(longStart.actionId, actionId);
+      assert.equal(longStart.workspaceId, f.input.workspaceId);
+      assert.equal(longStart.sessionId, started.sessionId);
+      assert.equal(confirmed?.status, "aborted");
+      const owner = f.store.workspaceOwner(f.input.workspaceId);
+      assert.equal(owner.epoch, longStart.ownershipEpoch);
+      for (const id of [started.sessionId, "other"])
+        assert.throws(() => f.store.acquireWorkspace(f.input.workspaceId, id), {
+          code: "OWNERSHIP_CONFLICT",
+        });
+      await assert.rejects(host.shutdown(), {
+        code: "SHELL_CLEANUP_UNCERTAIN",
+      });
+      assert.throws(() => host.preparePrompt(command), {
+        code: "NATIVE_CONTEXT_CLOSED",
+      });
+      const sessionDir = join(
+        f.dir,
+        "sessions",
+        createHash("sha256").update(f.input.workspaceId).digest("hex"),
+      );
+      const file = readdirSync(sessionDir).find((n) =>
+        n.endsWith(started.sessionId + ".jsonl"),
+      );
+      assert.ok(file);
+      assert.throws(() => acquireNativeSessionWriter(join(sessionDir, file)));
+      // Only the separately retained terminal response for this exact live effect qualifies this test's cleanup record.
+      const prior = outcome(actionId);
+      f.store.append(
+        {
+          kind: "outcome",
+          record: {
+            ...prior,
+            recordId: "test-confirmed-shell-cleanup",
+            cleanupState: "complete",
+          },
+        },
+        {
+          ...f.caller,
+          sessionId: started.sessionId,
+          resolveReference: () => true,
+        },
+      );
+      await host.shutdown();
+      const lease = acquireNativeSessionWriter(join(sessionDir, file));
+      lease.close();
+      return;
+    }
+    assert.deepEqual(await cancellation, { canceled: true });
+    collect();
+    const canceledEvents = events.slice(cancelEventStart);
+    assert.ok(
+      canceledEvents.some((event) => event.kind === "turn.canceled"),
+      JSON.stringify(canceledEvents),
+    );
+    assert.ok(
+      canceledEvents.some(
+        (event) =>
+          event.kind === "turn.tool_outcome" &&
+          event.payload.actionId === cancelApproval.payload.actionId,
+      ),
+      JSON.stringify(canceledEvents),
+    );
+    const action = f.store
+      .list(f.input.workspaceId)
+      .records.filter(
+        ({ kind, record }) =>
+          kind === "action" &&
+          record.actionId === cancelApproval.payload.actionId,
+      )
+      .at(-1);
+    assert.ok(
+      action && action.record.state !== "running",
+      JSON.stringify(action),
+    );
+    assert.equal(
+      outcome(cancelApproval.payload.actionId)?.cleanupState,
+      "complete",
+    );
+    assert.equal(f.store.workspaceOwner(f.input.workspaceId), undefined);
+    assert.deepEqual(
+      events.map((event) => event.seq),
+      events.map((_, index) => index + 1),
+    );
+    assert.ok(
+      events.some(
+        (event) =>
+          event.kind === "turn.tool_outcome" &&
+          event.payload.status === "success" &&
+          event.payload.summary.preview.includes("visible fixture [redacted]"),
+      ),
+    );
+    const names = bodies[0].tools.map((tool) => tool.function.name);
+    for (const name of [
+      "bash",
+      "edit",
+      "find",
+      "grep",
+      "ls",
+      "powershell",
+      "read",
+      "write",
+    ])
+      assert.ok(names.includes(name), name);
+    assert.match(
+      JSON.stringify(bodies[1].messages),
+      /visible fixture \[redacted\]/u,
+    );
+    assert.doesNotMatch(JSON.stringify(bodies[1].messages), /PRIVATE_MARKER/u);
+  };
+}
 for (const loseCleanupReply of [false, true])
   test(
     loseCleanupReply
       ? "native session retains both writers after loss of shell cleanup proof"
       : "native session dispatches workspace tools with channel metadata and waits for write approval",
     { timeout: 30000 },
-    async (t) => {
-      const bodies = [];
-      const server = createServer(async (req, res) => {
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
-        bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-        const turn = bodies.length;
-        const tool =
-          turn === 1
-            ? { name: "read", arguments: JSON.stringify({ path: "README.md" }) }
-            : turn === 2 || turn === 3
-              ? {
-                  name: "write<|channel|>commentary",
-                  arguments: JSON.stringify({
-                    path: turn === 2 ? "approved.txt" : "denied.txt",
-                    content: turn === 2 ? "approved" : "blocked",
-                  }),
-                }
-              : turn === 4 || turn === 6
-                ? {
-                    name: "powershell",
-                    arguments: JSON.stringify({
-                      command:
-                        turn === 4
-                          ? "Write-Output 'native-shell-ok'"
-                          : "Start-Sleep -Seconds 10",
-                    }),
-                  }
-                : null;
-        const delta = tool
-          ? {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: `call-${turn}`,
-                  type: "function",
-                  function: tool,
-                },
-              ],
-            }
-          : { role: "assistant", content: "done" };
-        const event = (delta, finish_reason) =>
-          `data: ${JSON.stringify({ id: "tools-fixture", object: "chat.completion.chunk", created: 0, model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
-        res.writeHead(200, { "content-type": "text/event-stream" });
-        res.end(
-          event(delta, tool ? "tool_calls" : "stop") + "data: [DONE]\n\n",
-        );
-      });
-      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-      t.after(async () => {
-        server.closeAllConnections();
-        await new Promise((resolve) => server.close(resolve));
-      });
-      const f = fixture(
-        t,
-        {
-          modelId: "fixture-model",
-          model: { contextWindow: 8192, maxOutputTokens: 1024 },
-        },
-        `http://127.0.0.1:${server.address().port}/v1`,
-        "openai-completions",
-        "loopback",
-        false,
-        true,
-      );
-      const workspace = join(f.dir, "workspace");
-      writeFileSync(
-        join(workspace, "README.md"),
-        "visible fixture PRIVATE_MARKER",
-      );
-      let control;
-      let longStartId,
-        longStart,
-        accepted = false,
-        confirmed;
-      const shellRequests = new Map();
-      const shell = shellPeer(
-        (frame) => {
-          const reply = frame.native,
-            request = shellRequests.get(reply.id);
-          shellRequests.delete(reply.id);
-          if (reply.id === longStartId && reply.ok) accepted = true;
-          if (
-            loseCleanupReply &&
-            reply.value?.state === "done" &&
-            request?.params.effectId === longStart?.effectId
-          ) {
-            // The native fixture observed settlement, but the engine loses its terminal reply.
-            confirmed = reply.value;
-            control.accept({
-              native: {
-                id: reply.id,
-                ok: false,
-                error: { code: "SHELL_CLEANUP_UNCERTAIN" },
-              },
-            });
-          } else control.accept(frame);
-        },
-        () => control.shutdown(),
-        {
-          onFrame: ({ native }) => {
-            shellRequests.set(native.id, native);
-            if (
-              native.method === "shell.start" &&
-              native.params.command === "Start-Sleep -Seconds 10"
-            ) {
-              longStartId = native.id;
-              longStart = native.params;
-            }
-          },
-        },
-      );
-      t.after(() => shell.close());
-      control = new NativeControl(async ({ native }, maySend) => {
-        if (native.method.startsWith("shell."))
-          return shell.send({ native }, maySend);
-        let value;
-        if (native.method === "credential.status") value = { present: true };
-        else if (native.method === "inventory.capture")
-          value = {
-            manifest: { tracked: [], untracked: [], links: [], excluded: [] },
-          };
-        else if (native.method === "credential.redact") {
-          const text = native.params.text.replaceAll(
-            "PRIVATE_MARKER",
-            "[redacted]",
-          );
-          value = { text, redactedCount: text === native.params.text ? 0 : 1 };
-        } else if (native.method === "credential.read")
-          value = { secret: "synthetic-loopback-credential" };
-        else if (
-          ["credential.scope.open", "credential.scope.close"].includes(
-            native.method,
-          )
-        )
-          value = {};
-        else throw new Error(`Unexpected native method: ${native.method}`);
-        control.accept({ native: { id: native.id, ok: true, value } });
-      });
-      const host = createNativeHost(f.appDataDir, control);
-      f.cleanup.push(async () => {
-        await host.shutdown();
-        control.shutdown();
-      });
-      const selected = await host.selectProfile(
-        {
-          requestId: "tools-select",
-          workspaceId: f.input.workspaceId,
-          profileId: f.input.profileId,
-          expectedProfileRevision: "p1",
-          expectedConfigRevision: "cfg-1",
-        },
-        "tools-select",
-      );
-      const started = await host.startSession(
-        {
-          requestId: "tools-start",
-          workspaceId: f.input.workspaceId,
-          profileId: selected.selectedProfileId,
-          expectedConfigRevision: selected.configRevision,
-        },
-        "tools-start",
-      );
-      host.subscribeSession(started.sessionId, 0);
-      const events = [];
-      let settle;
-      const terminal = new Promise((resolve) => {
-        settle = resolve;
-      });
-      const collect = () => {
-        events.push(...host.drainSessionEvents(started.sessionId).frames);
-        const result = events.find((event) =>
-          ["turn.completed", "turn.failed", "turn.canceled"].includes(
-            event.kind,
-          ),
-        );
-        if (result) settle(result);
-      };
-      f.cleanup.push(host.onSessionEvents(collect));
-      const command = {
-        protocolVersion: 2,
-        correlationId: "tools-prompt",
-        sessionId: started.sessionId,
-        scopeId: f.input.workspaceId,
-        expectedConfigRevision: selected.configRevision,
-        expectedProfileRevision: selected.profileRevision,
-        expectedPolicyRevision: started.policyRevision,
-      };
-      assert.equal(
-        (
-          await host.preparePrompt({
-            ...command,
-            op: "session.prompt",
-            payload: { text: "Read the workspace, then write a file" },
-          })
-        ).accepted,
-        true,
-      );
-      for (const [index, decision] of ["approve", "deny"].entries()) {
-        let approval;
-        const deadline = Date.now() + 15000;
-        while (
-          !approval &&
-          Date.now() < deadline &&
-          !events.some((event) =>
-            ["turn.completed", "turn.failed", "turn.canceled"].includes(
-              event.kind,
-            ),
-          )
-        ) {
-          collect();
-          approval = events.filter(
-            (event) => event.kind === "approval.requested",
-          )[index];
-          if (!approval)
-            await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-        assert.ok(
-          approval,
-          JSON.stringify({ events, requestCount: bodies.length }),
-        );
-        const target = join(
-          workspace,
-          index === 0 ? "approved.txt" : "denied.txt",
-        );
-        assert.equal(existsSync(target), false);
-        if (index === 1)
-          assert.equal(
-            readFileSync(join(workspace, "approved.txt"), "utf8"),
-            "approved",
-          );
-        await host.respondApproval({
-          ...command,
-          correlationId: `tools-${decision}`,
-          op: "approval.respond",
-          payload: {
-            approvalRequestId: approval.payload.approvalRequestId,
-            runId: approval.payload.runId,
-            actionId: approval.payload.actionId,
-            decision,
-          },
-        });
-      }
-      collect();
-      assert.equal((await terminal).kind, "turn.failed");
-      assert.equal(existsSync(join(workspace, "denied.txt")), false);
-      assert.equal(
-        readFileSync(join(workspace, "approved.txt"), "utf8"),
-        "approved",
-      );
-      const firstEventCount = events.length;
-      assert.equal(
-        (
-          await host.preparePrompt({
-            ...command,
-            correlationId: "shell-prompt",
-            op: "session.prompt",
-            payload: { text: "Run the shell command" },
-          })
-        ).accepted,
-        true,
-      );
-      let shellApproval;
-      const shellDeadline = Date.now() + 15000;
-      while (!shellApproval && Date.now() < shellDeadline) {
-        collect();
-        shellApproval = events
-          .slice(firstEventCount)
-          .find((event) => event.kind === "approval.requested");
-        if (!shellApproval)
-          await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      assert.ok(shellApproval, JSON.stringify(events.slice(firstEventCount)));
-      await host.respondApproval({
-        ...command,
-        correlationId: "shell-approve",
-        op: "approval.respond",
-        payload: {
-          approvalRequestId: shellApproval.payload.approvalRequestId,
-          runId: shellApproval.payload.runId,
-          actionId: shellApproval.payload.actionId,
-          decision: "approve",
-        },
-      });
-      // collect only the new turn's terminal event
-      while (
-        !events
-          .slice(firstEventCount)
-          .some((event) =>
-            ["turn.completed", "turn.failed", "turn.canceled"].includes(
-              event.kind,
-            ),
-          ) &&
-        Date.now() < shellDeadline
-      ) {
-        collect();
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      assert.equal(
-        events
-          .slice(firstEventCount)
-          .find((event) =>
-            ["turn.completed", "turn.failed", "turn.canceled"].includes(
-              event.kind,
-            ),
-          )?.kind,
-        "turn.completed",
-      );
-      assert.match(JSON.stringify(bodies[4].messages), /native-shell-ok/u);
-      const outcome = (id) =>
-        f.store
-          .list(f.input.workspaceId)
-          .records.filter(
-            ({ kind, record }) => kind === "outcome" && record.actionId === id,
-          )
-          .at(-1)?.record;
-      assert.equal(
-        outcome(shellApproval.payload.actionId)?.cleanupState,
-        "complete",
-      );
-      const cancelEventStart = events.length;
-      assert.equal(
-        (
-          await host.preparePrompt({
-            ...command,
-            correlationId: "cancel-prompt",
-            op: "session.prompt",
-            payload: { text: "Run the long shell command" },
-          })
-        ).accepted,
-        true,
-      );
-      let cancelApproval;
-      const cancelDeadline = Date.now() + 15000;
-      while (!cancelApproval && Date.now() < cancelDeadline) {
-        collect();
-        cancelApproval = events
-          .slice(cancelEventStart)
-          .find((event) => event.kind === "approval.requested");
-        if (!cancelApproval)
-          await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      assert.ok(cancelApproval, JSON.stringify(events.slice(cancelEventStart)));
-      await host.respondApproval({
-        ...command,
-        correlationId: "cancel-approve",
-        op: "approval.respond",
-        payload: {
-          approvalRequestId: cancelApproval.payload.approvalRequestId,
-          runId: cancelApproval.payload.runId,
-          actionId: cancelApproval.payload.actionId,
-          decision: "approve",
-        },
-      });
-      const intentDeadline = Date.now() + 5000;
-      while (
-        (!accepted ||
-          !events
-            .slice(cancelEventStart)
-            .some(
-              (event) =>
-                event.kind === "turn.tool_intent" &&
-                event.payload.actionId === cancelApproval.payload.actionId,
-            )) &&
-        Date.now() < intentDeadline
-      ) {
-        collect();
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      assert.ok(
-        events
-          .slice(cancelEventStart)
-          .some(
-            (event) =>
-              event.kind === "turn.tool_intent" &&
-              event.payload.actionId === cancelApproval.payload.actionId,
-          ),
-      );
-      assert.equal(accepted, true);
-      const cancellation = host.cancelSession({
-        sessionId: started.sessionId,
-        reason: "user",
-      });
-      if (loseCleanupReply) {
-        await assert.rejects(cancellation);
-        const actionId = cancelApproval.payload.actionId;
-        assert.equal(outcome(actionId)?.cleanupState, "uncertain");
-        assert.equal(longStart.actionId, actionId);
-        assert.equal(longStart.workspaceId, f.input.workspaceId);
-        assert.equal(longStart.sessionId, started.sessionId);
-        assert.equal(confirmed?.status, "aborted");
-        const owner = f.store.workspaceOwner(f.input.workspaceId);
-        assert.equal(owner.epoch, longStart.ownershipEpoch);
-        for (const id of [started.sessionId, "other"])
-          assert.throws(
-            () => f.store.acquireWorkspace(f.input.workspaceId, id),
-            { code: "OWNERSHIP_CONFLICT" },
-          );
-        await assert.rejects(host.shutdown(), {
-          code: "SHELL_CLEANUP_UNCERTAIN",
-        });
-        assert.throws(() => host.preparePrompt(command), {
-          code: "NATIVE_CONTEXT_CLOSED",
-        });
-        const sessionDir = join(
-          f.dir,
-          "sessions",
-          createHash("sha256").update(f.input.workspaceId).digest("hex"),
-        );
-        const file = readdirSync(sessionDir).find((n) =>
-          n.endsWith(started.sessionId + ".jsonl"),
-        );
-        assert.ok(file);
-        assert.throws(() => acquireNativeSessionWriter(join(sessionDir, file)));
-        // Only the separately retained terminal response for this exact live effect qualifies this test's cleanup record.
-        const prior = outcome(actionId);
-        f.store.append(
-          {
-            kind: "outcome",
-            record: {
-              ...prior,
-              recordId: "test-confirmed-shell-cleanup",
-              cleanupState: "complete",
-            },
-          },
-          {
-            ...f.caller,
-            sessionId: started.sessionId,
-            resolveReference: () => true,
-          },
-        );
-        await host.shutdown();
-        const lease = acquireNativeSessionWriter(join(sessionDir, file));
-        lease.close();
-        return;
-      }
-      assert.deepEqual(await cancellation, { canceled: true });
-      collect();
-      const canceledEvents = events.slice(cancelEventStart);
-      assert.ok(
-        canceledEvents.some((event) => event.kind === "turn.canceled"),
-        JSON.stringify(canceledEvents),
-      );
-      assert.ok(
-        canceledEvents.some(
-          (event) =>
-            event.kind === "turn.tool_outcome" &&
-            event.payload.actionId === cancelApproval.payload.actionId,
-        ),
-        JSON.stringify(canceledEvents),
-      );
-      const action = f.store
-        .list(f.input.workspaceId)
-        .records.filter(
-          ({ kind, record }) =>
-            kind === "action" &&
-            record.actionId === cancelApproval.payload.actionId,
-        )
-        .at(-1);
-      assert.ok(
-        action && action.record.state !== "running",
-        JSON.stringify(action),
-      );
-      assert.equal(
-        outcome(cancelApproval.payload.actionId)?.cleanupState,
-        "complete",
-      );
-      assert.equal(f.store.workspaceOwner(f.input.workspaceId), undefined);
-      assert.deepEqual(
-        events.map((event) => event.seq),
-        events.map((_, index) => index + 1),
-      );
-      assert.ok(
-        events.some(
-          (event) =>
-            event.kind === "turn.tool_outcome" &&
-            event.payload.status === "success" &&
-            event.payload.summary.preview.includes(
-              "visible fixture [redacted]",
-            ),
-        ),
-      );
-      const names = bodies[0].tools.map((tool) => tool.function.name);
-      for (const name of [
-        "bash",
-        "edit",
-        "find",
-        "grep",
-        "ls",
-        "powershell",
-        "read",
-        "write",
-      ])
-        assert.ok(names.includes(name), name);
-      assert.match(
-        JSON.stringify(bodies[1].messages),
-        /visible fixture \[redacted\]/u,
-      );
-      assert.doesNotMatch(
-        JSON.stringify(bodies[1].messages),
-        /PRIVATE_MARKER/u,
-      );
-    },
+    nativeToolSession(loseCleanupReply),
   );
