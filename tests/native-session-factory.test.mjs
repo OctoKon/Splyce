@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   existsSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -48,7 +49,12 @@ function fixture(
   seedCapability = true,
   nativeHostLayout = false,
 ) {
-  const appDataDir = mkdtempSync(join(tmpdir(), "splyce-session-selection-"));
+  // The admitted workspace must be the on-disk long form: native-host resolves it
+  // with realpathSync.native on every context read and fails NATIVE_WORKSPACE_CHANGED
+  // when the admitted spelling keeps an 8.3 short name (C:\Users\MOHAMM~1\...).
+  const appDataDir = realpathSync.native(
+    mkdtempSync(join(tmpdir(), "splyce-session-selection-")),
+  );
   const dir = nativeHostLayout ? join(appDataDir, "splyce") : appDataDir;
   mkdirSync(dir, { recursive: true });
   const cwd = join(dir, "workspace");
