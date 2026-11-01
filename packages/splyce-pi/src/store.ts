@@ -8,10 +8,14 @@ import {
   copyFileSync,
   existsSync,
   readFileSync,
+  realpathSync,
+  statSync,
+  lstatSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { dirname, basename, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   type ActionRecord,
@@ -544,6 +548,7 @@ export class Store {
   readonly path: string;
   /** @internal the underlying SQLite handle; reassigned only by restore(). */
   db: DatabaseSync;
+  private guard: DatabaseSync | undefined;
   private readonly busyTimeoutMs: number;
   private readonly maxInlineBytes: number;
   /** @internal closed flag; reset only by restore(). */
@@ -614,6 +619,18 @@ export class Store {
    * attribution; migrated rows never end up unreplayable-by-accident.
    */
   static migrateV1(path: string, attribution?: { sessionId: string }): void {
+    const writer = Store.writerGuard(path, 5000);
+    try {
+      Store.migrateLocked(writer.path, attribution);
+    } finally {
+      writer.guard.close();
+    }
+  }
+
+  private static migrateLocked(
+    path: string,
+    attribution?: { sessionId: string },
+  ): void {
     const db = new DatabaseSync(path, { timeout: 5000 });
     try {
       // Every precondition read runs inside the write transaction, so a
@@ -681,6 +698,72 @@ export class Store {
   /** Opens (or creates) the store; initialization is one atomic transaction
    * and an existing store must match the expected shape or we fail closed. */
   static open(path: string, options: StoreOptions = {}): Store {
+    if (options.readOnly === true || path === ":memory:")
+      return Store.openDatabase(path, options);
+    const writer = Store.writerGuard(path, options.busyTimeoutMs ?? 5000);
+    try {
+      const store = Store.openDatabase(writer.path, options);
+      store.guard = writer.guard;
+      return store;
+    } catch (error) {
+      writer.guard.close();
+      throw error;
+    }
+  }
+
+  private static writerGuard(
+    path: string,
+    timeout: number,
+  ): { path: string; guard: DatabaseSync } {
+    let guard: DatabaseSync | undefined;
+    try {
+      path = lstatSync(path, { throwIfNoEntry: false })
+        ? realpathSync.native(path)
+        : join(realpathSync.native(dirname(resolve(path))), basename(path));
+      const lockPath = path + ".restore-lock";
+      if (lstatSync(lockPath, { throwIfNoEntry: false })?.isSymbolicLink())
+        throw new StoreError("STORE_RESTORE_LOCK", "ambiguous lock path");
+      guard = new DatabaseSync(lockPath, { timeout });
+      if (statSync(lockPath).nlink !== 1)
+        throw new StoreError("STORE_RESTORE_LOCK", "ambiguous lock identity");
+      Store.holdWriter(guard);
+      Store.assertStorePath(path);
+      return { path, guard };
+    } catch (error) {
+      guard?.close();
+      throw mapSqliteError(error);
+    }
+  }
+
+  // An empty rollback-mode SQLite file supplies OS-backed, cross-process reader/writer
+  // locks. Never remove it: a second inode would split the admission domain.
+  private static holdWriter(guard: DatabaseSync): void {
+    if (
+      (
+        guard.prepare("PRAGMA journal_mode").get() as
+          { journal_mode?: string } | undefined
+      )?.journal_mode !== "delete"
+    )
+      throw new StoreError(
+        "STORE_RESTORE_LOCK",
+        "restore lock mode is ambiguous",
+      );
+    guard.exec("BEGIN; SELECT rootpage FROM sqlite_schema;");
+  }
+
+  private static assertStorePath(path: string): void {
+    if (
+      existsSync(path)
+        ? statSync(path).nlink !== 1
+        : existsSync(path + ".restore-original")
+    )
+      throw new StoreError(
+        "STORE_RESTORE_LOCK",
+        "ambiguous live store identity or recovery state",
+      );
+  }
+
+  private static openDatabase(path: string, options: StoreOptions = {}): Store {
     const busyTimeoutMs = options.busyTimeoutMs ?? 5000;
     const maxInlineBytes = options.maxInlineBytes ?? 65536;
     let db: DatabaseSync;
@@ -4208,6 +4291,52 @@ export class Store {
    */
   restore(backupPath: string): void {
     this.assertWritable();
+    const guard = this.guard;
+    if (!guard)
+      throw new StoreError(
+        "STORE_RESTORE_LOCK",
+        "restore requires a file-backed writer",
+      );
+    const options = {
+      busyTimeoutMs: this.busyTimeoutMs,
+      maxInlineBytes: this.maxInlineBytes,
+    };
+    // Close the live handle before changing lock modes. Another restorer can win
+    // either transition; always reopen the authoritative path under the new lock.
+    this.db.close();
+    this.closed = true;
+    try {
+      guard.exec("ROLLBACK; BEGIN EXCLUSIVE;");
+      Store.assertStorePath(this.path);
+      const exclusive = Store.openDatabase(this.path, options);
+      try {
+        exclusive.restoreExclusive(backupPath);
+      } finally {
+        exclusive.close();
+      }
+    } catch (error) {
+      throw mapSqliteError(error);
+    } finally {
+      try {
+        if (guard.isTransaction) guard.exec("ROLLBACK;");
+        Store.holdWriter(guard);
+        if (!existsSync(this.path))
+          throw new StoreError(
+            "STORE_RESTORE_FAILED",
+            "live store requires recovery",
+          );
+        Store.assertStorePath(this.path);
+        this.db = Store.openDatabase(this.path, options).db;
+        this.closed = false;
+      } catch (error) {
+        guard.close();
+        this.guard = undefined;
+        throw mapSqliteError(error);
+      }
+    }
+  }
+
+  private restoreExclusive(backupPath: string): void {
     this.assertShellCleanup();
     let backup: {
       deletionEpoch: number;
@@ -4316,14 +4445,18 @@ export class Store {
     let swapped = false;
     try {
       for (const suffix of ["-wal", "-shm"])
-        if (existsSync(this.path + suffix)) rmSync(this.path + suffix);
+        if (existsSync(this.path + suffix))
+          throw new StoreError(
+            "STORE_BUSY",
+            "a live SQLite reader still owns the journal",
+          );
       if (existsSync(this.path)) {
         renameSync(this.path, original);
         originalPreserved = true;
       }
       renameSync(staging, this.path);
       swapped = true;
-      reopened = Store.open(this.path, {
+      reopened = Store.openDatabase(this.path, {
         busyTimeoutMs: this.busyTimeoutMs,
         maxInlineBytes: this.maxInlineBytes,
       });
@@ -4342,7 +4475,7 @@ export class Store {
         if (swapped && originalPreserved) rmSync(this.path, { force: true });
         if (originalPreserved && !existsSync(this.path))
           renameSync(original, this.path);
-        const recoveredStore = Store.open(this.path, {
+        const recoveredStore = Store.openDatabase(this.path, {
           busyTimeoutMs: this.busyTimeoutMs,
           maxInlineBytes: this.maxInlineBytes,
         });
@@ -5199,6 +5332,8 @@ export class Store {
       this.db.close();
     } catch (error) {
       throw mapSqliteError(error);
+    } finally {
+      this.guard?.close();
     }
   }
 }

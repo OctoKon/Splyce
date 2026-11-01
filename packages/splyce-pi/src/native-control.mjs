@@ -60,6 +60,8 @@ const shellDone = (v) =>
   v.data.length <= 65536 &&
   /^(?:[0-9a-f]{2})*$/u.test(v.data) &&
   typeof v.last === "boolean";
+const shellBinding = ({ actionId, workspaceId, sessionId, ownershipEpoch }) =>
+  JSON.stringify([actionId, workspaceId, sessionId, ownershipEpoch]);
 const bindingKeys = [
   "scopeId",
   "target",
@@ -72,7 +74,7 @@ export class NativeControl {
   #send;
   #pending = new Map();
   #scopes = new Map();
-  #shells = new Set();
+  #shells = new Map();
   #epoch = randomUUID();
   #sequence = 0;
   #closed = false;
@@ -244,11 +246,15 @@ export class NativeControl {
 
   async shell(request, signal, assertCurrent) {
     const effectId = randomUUID();
-    const key = { effectId };
+    const { actionId, workspaceId, sessionId, ownershipEpoch } = request;
+    const key = { effectId, actionId, workspaceId, sessionId, ownershipEpoch };
+    const binding = shellBinding(key);
     const start = { ...request, ...key };
     if (
       this.#closed ||
       this.#pending.size >= 8 ||
+      this.#shells.size >= 8 ||
+      this.#shells.has(binding) ||
       this.#sequence >= Number.MAX_SAFE_INTEGER ||
       !opaque(request.actionId) ||
       !opaque(request.sessionId) ||
@@ -284,7 +290,8 @@ export class NativeControl {
     assertCurrent();
     if (signal?.aborted)
       return { status: "aborted", code: 1, bytes: 0, stdout: "", stderr: "" };
-    this.#shells.add(effectId);
+    const effect = { key, proved: false };
+    this.#shells.set(binding, effect);
     let cleanupObserved = false;
     let rejectedBeforeWrite,
       canceledBeforeWrite = false;
@@ -303,7 +310,8 @@ export class NativeControl {
     try {
       try {
         const accepted = await started;
-        if (accepted.state === "done")
+        if (accepted.state === "done") {
+          this.#shells.delete(binding);
           return {
             status: "startFailed",
             code: accepted.code,
@@ -311,6 +319,7 @@ export class NativeControl {
             stdout: "",
             stderr: "",
           };
+        }
       } catch {
         if (rejectedBeforeWrite) throw rejectedBeforeWrite;
         if (canceledBeforeWrite)
@@ -330,7 +339,7 @@ export class NativeControl {
         if (canceling) await canceling;
         let reply;
         try {
-          reply = await this.#call("shell.poll", { ...key, offset });
+          reply = await this.#call("shell.poll", { key, offset });
         } catch {
           if (interrupted) throw shellError();
           cancel();
@@ -341,6 +350,7 @@ export class NativeControl {
           continue;
         }
         cleanupObserved = true;
+        effect.proved = true;
         const signature = [
           reply.code,
           reply.bytes,
@@ -383,9 +393,35 @@ export class NativeControl {
         };
       throw error;
     } finally {
-      this.#shells.delete(effectId);
+      if (rejectedBeforeWrite || canceledBeforeWrite)
+        this.#shells.delete(binding);
       signal?.removeEventListener("abort", cancel);
     }
+  }
+
+  hasShell(binding) {
+    return this.#shells.has(shellBinding(binding));
+  }
+
+  async proveShell(binding) {
+    const effect = this.#shells.get(shellBinding(binding));
+    if (!effect) throw shellError();
+    if (!effect.proved) {
+      const page = await this.#call("shell.poll", {
+        key: effect.key,
+        offset: 0,
+      });
+      if (!shellDone(page)) throw shellError();
+      effect.proved = true;
+    }
+  }
+
+  async acknowledgeShell(binding) {
+    const id = shellBinding(binding);
+    const effect = this.#shells.get(id);
+    if (!effect?.proved) throw shellError();
+    await this.#call("shell.ack", effect.key);
+    this.#shells.delete(id);
   }
 
   async inventory(workspace, signal) {
@@ -526,13 +562,13 @@ export class NativeControl {
   shutdown() {
     if (this.#closed) return;
     this.#closed = true;
-    for (const effectId of this.#shells) {
+    for (const { key } of this.#shells.values()) {
       if (this.#sequence >= Number.MAX_SAFE_INTEGER) break;
       const frame = {
         native: {
           id: this.#epoch + "-" + ++this.#sequence,
           method: "shell.cancel",
-          params: { effectId },
+          params: key,
         },
       };
       try {

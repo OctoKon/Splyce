@@ -1105,6 +1105,7 @@ export function createNativeSessionFactory({
         planMode: !state.activeRun,
       }),
       identity,
+      control,
     );
     let requests;
     const resolver = new NativeCredentialResolver({
@@ -1683,6 +1684,12 @@ export function createNativeSessionFactory({
       } catch (error) {
         failure = error;
       } finally {
+        // Cleanup remains authorized after ordinary session admission closes.
+        await state.runtime?.policy.reconcileShell(
+          state.key.scopeId,
+          state.activeRun?.runId,
+          state.activeRun?.ownership.epoch,
+        );
         // Keep the writer while the native registry cannot prove settlement.
         if (
           store.workspaceOwner(state.key.scopeId)?.ownerSessionId ===

@@ -81,6 +81,24 @@ export interface ExecuteEvents<T> {
   }) => SplyceEventDraft | Promise<SplyceEventDraft>;
 }
 
+interface ShellBinding {
+  actionId: string;
+  sessionId: string;
+  workspaceId: string;
+  ownershipEpoch: number;
+}
+interface ShellControl {
+  hasShell(binding: ShellBinding): boolean;
+  proveShell(binding: ShellBinding): Promise<void>;
+  acknowledgeShell(binding: ShellBinding): Promise<void>;
+}
+interface ShellReceipt {
+  binding: ShellBinding;
+  runId: string;
+  record: RecordByKind["outcome"];
+  committed: boolean;
+}
+
 /** Native read of the admitted workspace directory's current identity. */
 export interface WorkspaceIdentityPort {
   observe(workspaceId: string): DirectoryIdentity;
@@ -147,17 +165,21 @@ export class NativePolicy {
   private readonly pending = new Map<string, string>();
   private readonly ready = new Map<string, string>();
   private readonly reservations = new Map<string, ActionRecord>();
+  private readonly shellReceipts = new Map<string, ShellReceipt>();
+  private readonly shellControl: ShellControl | undefined;
 
   constructor(
     store: Store,
     caller: CallerContext,
     current: () => CurrentPolicy,
     identity: WorkspaceIdentityPort,
+    shellControl?: ShellControl,
   ) {
     this.store = store;
     this.caller = Object.freeze({ ...caller });
     this.current = current;
     this.identity = identity;
+    this.shellControl = shellControl;
   }
 
   authorize(permit: ActionPermit): void {
@@ -529,6 +551,44 @@ export class NativePolicy {
     };
   }
 
+  /** Only this session's live registry and original private receipt can qualify cleanup. */
+  async reconcileShell(
+    workspaceId: string,
+    runId?: string,
+    epoch?: number,
+  ): Promise<void> {
+    for (const receipt of this.shellReceipts.values()) {
+      const { binding } = receipt;
+      if (binding.workspaceId !== workspaceId) continue;
+      if (!receipt.committed) {
+        if (receipt.runId !== runId || binding.ownershipEpoch !== epoch)
+          continue;
+        await this.shellControl!.proveShell(binding);
+        const owner = this.store.workspaceOwner(workspaceId);
+        if (
+          owner?.ownerSessionId !== binding.sessionId ||
+          owner.epoch !== epoch
+        )
+          throw new AdmissionError("OWNERSHIP_STALE_EPOCH");
+        const record = {
+          ...receipt.record,
+          recordId: randomUUID(),
+          createdAt: new Date().toISOString(),
+          cleanupState: "complete" as const,
+        };
+        this.store.appendBatch(
+          [{ kind: "outcome", record }],
+          this.caller,
+          undefined,
+          { workspaceId, epoch: binding.ownershipEpoch },
+        );
+        receipt.committed = true;
+      }
+      await this.shellControl!.acknowledgeShell(binding);
+      this.shellReceipts.delete(binding.actionId);
+    }
+  }
+
   private async commitOutcome<T>(
     action: ActionRecord,
     uncertain: boolean,
@@ -555,6 +615,18 @@ export class NativePolicy {
       errorClass: uncertain ? "execution" : "none",
       ...(action.approvedBy ? { approvedBy: action.approvedBy } : {}),
     };
+    const binding = {
+      actionId: action.actionId,
+      sessionId: this.caller.sessionId,
+      workspaceId: action.scopeId,
+      ownershipEpoch:
+        typeof action.ownershipEpoch === "number" ? action.ownershipEpoch : 0,
+    };
+    const tracked =
+      events?.shellCleanup && this.shellControl?.hasShell(binding)
+        ? { binding, runId: action.runId, record, committed: false }
+        : undefined;
+    if (tracked) this.shellReceipts.set(action.actionId, tracked);
     const completion: ActionRecord = {
       ...action,
       recordId: randomUUID(),
@@ -586,6 +658,11 @@ export class NativePolicy {
         // an invalid event must never cost the receipts of an effect that already ran
         this.store.appendBatch(batch, this.caller);
       }
+    }
+    if (tracked && record.cleanupState === "complete") {
+      tracked.committed = true;
+      await this.shellControl!.acknowledgeShell(tracked.binding);
+      this.shellReceipts.delete(action.actionId);
     }
   }
 }

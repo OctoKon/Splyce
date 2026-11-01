@@ -19,6 +19,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
+import { PassThrough } from "node:stream";
+import {
+  runHost,
+  readFrames,
+  encodeFrame,
+} from "../packages/splyce-pi/src/engine-host.mjs";
 import { Store } from "../packages/splyce-pi/dist/store.js";
 import { ConfigAuthority } from "../packages/splyce-pi/dist/config.js";
 import { createProviderProfiles } from "../packages/splyce-pi/dist/provider-profiles.js";
@@ -1881,12 +1887,31 @@ function nativeToolSession(loseCleanupReply) {
       join(workspace, "README.md"),
       "visible fixture PRIVATE_MARKER",
     );
-    let control;
+    let host,
+      control,
+      stopped = false,
+      frameId = 0;
+    const input = new PassThrough(),
+      output = new PassThrough(),
+      replies = new Map();
+    const accept = (frame) => input.write(encodeFrame(frame));
+    const call = (method, params = {}) =>
+      new Promise((resolve) => {
+        const id =
+          method === "native.bootstrap"
+            ? "native-bootstrap"
+            : "fixture-" + ++frameId;
+        replies.set(id, resolve);
+        accept({ id, method, params });
+      });
     let longStartId,
       longStart,
       accepted = false,
       confirmed;
     const shellRequests = new Map();
+    let deliverCleanup = !loseCleanupReply,
+      proofRetries = 0,
+      terminalAcks = 0;
     const shell = shellPeer(
       (frame) => {
         const reply = frame.native,
@@ -1896,23 +1921,38 @@ function nativeToolSession(loseCleanupReply) {
         if (
           loseCleanupReply &&
           reply.value?.state === "done" &&
-          request?.params.effectId === longStart?.effectId
+          request?.params.key?.effectId === longStart?.effectId &&
+          !deliverCleanup
         ) {
           // The native fixture observed settlement, but the engine loses its terminal reply.
           confirmed = reply.value;
-          control.accept({
+          accept({
             native: {
               id: reply.id,
               ok: false,
               error: { code: "SHELL_CLEANUP_UNCERTAIN" },
             },
           });
-        } else control.accept(frame);
+        } else {
+          if (
+            loseCleanupReply &&
+            deliverCleanup &&
+            request?.params.key?.effectId === longStart?.effectId &&
+            reply.value?.state === "done"
+          )
+            ++proofRetries;
+          accept(frame);
+        }
       },
       () => control.shutdown(),
       {
         onFrame: ({ native }) => {
           shellRequests.set(native.id, native);
+          if (
+            native.method === "shell.ack" &&
+            native.params.effectId === longStart?.effectId
+          )
+            ++terminalAcks;
           if (
             native.method === "shell.start" &&
             native.params.command === "Start-Sleep -Seconds 10"
@@ -1924,9 +1964,8 @@ function nativeToolSession(loseCleanupReply) {
       },
     );
     t.after(() => shell.close());
-    control = new NativeControl(async ({ native }, maySend) => {
-      if (native.method.startsWith("shell."))
-        return shell.send({ native }, maySend);
+    const nativeRequest = async ({ native }) => {
+      if (native.method.startsWith("shell.")) return shell.send({ native });
       let value;
       if (native.method === "credential.status") value = { present: true };
       else if (native.method === "inventory.capture")
@@ -1948,12 +1987,36 @@ function nativeToolSession(loseCleanupReply) {
       )
         value = {};
       else throw new Error(`Unexpected native method: ${native.method}`);
-      control.accept({ native: { id: native.id, ok: true, value } });
-    });
-    const host = createNativeHost(f.appDataDir, control);
+      accept({ native: { id: native.id, ok: true, value } });
+    };
+    const pump = runHost(input, output, (dir, native) => {
+      control = native;
+      host = createNativeHost(dir, native);
+      return host;
+    }).finally(() => output.end());
+    const reading = (async () => {
+      for await (const frame of readFrames(output)) {
+        if (frame.native) await nativeRequest(frame);
+        else {
+          const reply = replies.get(frame.id);
+          assert.ok(reply);
+          replies.delete(frame.id);
+          reply(frame);
+        }
+      }
+    })();
+    assert.equal(
+      (await call("native.bootstrap", { appDataDir: f.appDataDir })).value
+        .state,
+      "initialized",
+    );
     f.cleanup.push(async () => {
-      await host.shutdown();
-      control.shutdown();
+      if (!stopped) {
+        const reply = await call("shutdown");
+        input.end();
+        assert.equal(reply.value?.state, "stopped");
+      }
+      await Promise.all([pump, reading]);
     });
     const selected = await host.selectProfile(
       {
@@ -2205,9 +2268,11 @@ function nativeToolSession(loseCleanupReply) {
         assert.throws(() => f.store.acquireWorkspace(f.input.workspaceId, id), {
           code: "OWNERSHIP_CONFLICT",
         });
-      await assert.rejects(host.shutdown(), {
-        code: "SHELL_CLEANUP_UNCERTAIN",
-      });
+      assert.equal((await call("shutdown")).error?.code, "UNCERTAIN_EFFECT");
+      assert.equal(
+        (await call("handshake", { protocolVersion: 2 })).error?.code,
+        "POLICY_DENIED",
+      );
       assert.throws(() => host.preparePrompt(command), {
         code: "NATIVE_CONTEXT_CLOSED",
       });
@@ -2221,24 +2286,30 @@ function nativeToolSession(loseCleanupReply) {
       );
       assert.ok(file);
       assert.throws(() => acquireNativeSessionWriter(join(sessionDir, file)));
-      // Only the separately retained terminal response for this exact live effect qualifies this test's cleanup record.
       const prior = outcome(actionId);
-      f.store.append(
-        {
-          kind: "outcome",
-          record: {
-            ...prior,
-            recordId: "test-confirmed-shell-cleanup",
-            cleanupState: "complete",
-          },
-        },
-        {
-          ...f.caller,
-          sessionId: started.sessionId,
-          resolveReference: () => true,
-        },
+      deliverCleanup = true;
+      // The real Store rejects the first reconciliation write. Its receipt and the
+      // native terminal result must both remain available on the existing retry.
+      f.store.db.exec(
+        "CREATE TRIGGER reject_cleanup BEFORE INSERT ON records WHEN NEW.kind='outcome' AND json_extract(NEW.payload,'$.cleanupState')='complete' BEGIN SELECT RAISE(ABORT,'fixture write unavailable'); END",
       );
-      await host.shutdown();
+      try {
+        assert.equal((await call("shutdown")).error?.code, "UNCERTAIN_EFFECT");
+        assert.ok(proofRetries > 0);
+        assert.equal(terminalAcks, 0);
+        assert.equal(outcome(actionId)?.cleanupState, "uncertain");
+        assert.throws(() => acquireNativeSessionWriter(join(sessionDir, file)));
+      } finally {
+        f.store.db.exec("DROP TRIGGER reject_cleanup");
+      }
+      assert.equal((await call("shutdown")).value?.state, "stopped");
+      stopped = true;
+      assert.equal(terminalAcks, 1);
+      const reconciled = outcome(actionId);
+      assert.equal(reconciled.cleanupState, "complete");
+      assert.equal(reconciled.effectState, "uncertain");
+      assert.deepEqual(reconciled.sourceIds, prior.sourceIds);
+      assert.equal(f.store.workspaceOwner(f.input.workspaceId), undefined);
       const lease = acquireNativeSessionWriter(join(sessionDir, file));
       lease.close();
       return;

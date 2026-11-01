@@ -8,6 +8,8 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import {
   chmodSync,
   copyFileSync,
@@ -1367,6 +1369,116 @@ test("action reservation fence rejects competing terminal history atomically", (
     second.close();
     first.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("restore excludes existing writers and preserves their committed shell intent", () => {
+  const dir = freshDir(),
+    path = join(dir, "store.db"),
+    backup = join(dir, "backup.db");
+  const first = Store.open(path, { busyTimeoutMs: 0 }),
+    second = Store.open(path);
+  try {
+    const ownershipEpoch = first.acquireWorkspace(
+      "w-demo",
+      caller.sessionId,
+    ).epoch;
+    first.backup(backup);
+    assert.throws(() => first.restore(backup), { code: "STORE_BUSY" });
+    const intent = record("action", {
+      capabilityId: "workspace.powershell",
+      state: "running",
+      ownershipEpoch,
+    });
+    second.append({ kind: "action", record: intent }, caller);
+    second.close();
+    assert.throws(() => first.restore(backup), { code: "OWNERSHIP_CONFLICT" });
+    assert.equal(first.get(String(intent.recordId)).record.state, "running");
+  } finally {
+    second.close();
+    first.close();
+  }
+});
+
+test("restore denies writers through staging across processes while read and export remain available", () => {
+  const dir = freshDir(),
+    path = join(dir, "store.db"),
+    backup = join(dir, "backup.db"),
+    exported = join(dir, "exported.db");
+  const store = Store.open(path);
+  const ownershipEpoch = store.acquireWorkspace(
+    "w-demo",
+    caller.sessionId,
+  ).epoch;
+  const intent = record("action", {
+    capabilityId: "workspace.powershell",
+    state: "running",
+    ownershipEpoch,
+  });
+  store.backup(backup);
+  let checked = false;
+  const copy = fs.copyFileSync;
+  try {
+    fs.copyFileSync = (src, dest, ...args) => {
+      if (dest === path + ".restore-staging") {
+        const reader = Store.open(path, { readOnly: true });
+        try {
+          reader.backup(exported);
+        } finally {
+          reader.close();
+        }
+        const write = () => {
+          const concurrent = Store.open(path, { busyTimeoutMs: 0 });
+          try {
+            concurrent.append({ kind: "action", record: intent }, caller);
+          } finally {
+            concurrent.close();
+          }
+        };
+        assert.throws(write, { code: "STORE_BUSY" });
+        const child = spawnSync(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            "import {Store} from " +
+              JSON.stringify(
+                new URL(
+                  "../../packages/splyce-pi/dist/store.js",
+                  import.meta.url,
+                ).href,
+              ) +
+              '; try { const writer=Store.open(process.argv[1],{busyTimeoutMs:0}); writer.close(); process.stdout.write("admitted"); } catch(e) { process.stdout.write(String(e.code)); }',
+            path,
+          ],
+          { windowsHide: true, encoding: "utf8" },
+        );
+        assert.equal(child.status, 0, child.stderr);
+        assert.equal(child.stdout, "STORE_BUSY");
+        checked = true;
+      }
+      return copy(src, dest, ...args);
+    };
+    syncBuiltinESMExports();
+    store.restore(backup);
+    assert.equal(checked, true);
+    const reader = Store.open(exported, { readOnly: true });
+    try {
+      assert.equal(reader.workspaceOwner("w-demo")?.epoch, ownershipEpoch);
+    } finally {
+      reader.close();
+    }
+    const after = Store.open(path, { busyTimeoutMs: 0 });
+    try {
+      after.append({ kind: "action", record: intent }, caller);
+    } finally {
+      after.close();
+    }
+    assert.throws(() => store.restore(backup), { code: "OWNERSHIP_CONFLICT" });
+  } finally {
+    fs.copyFileSync = copy;
+    syncBuiltinESMExports();
+    store.close();
   }
 });
 

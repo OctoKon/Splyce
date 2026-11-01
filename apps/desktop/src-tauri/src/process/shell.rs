@@ -30,13 +30,28 @@ struct Start {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Poll {
-    effect_id: String,
+    key: Key,
     offset: usize,
 }
-#[derive(Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Key {
     effect_id: String,
+    action_id: String,
+    workspace_id: String,
+    session_id: String,
+    ownership_epoch: u64,
+}
+impl From<&Start> for Key {
+    fn from(s: &Start) -> Self {
+        Self {
+            effect_id: s.effect_id.clone(),
+            action_id: s.action_id.clone(),
+            workspace_id: s.workspace_id.clone(),
+            session_id: s.session_id.clone(),
+            ownership_epoch: s.ownership_epoch,
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(tag = "method", deny_unknown_fields)]
@@ -47,6 +62,8 @@ enum Op {
     Poll { id: String, params: Poll },
     #[serde(rename = "shell.cancel")]
     Cancel { id: String, params: Key },
+    #[serde(rename = "shell.ack")]
+    Ack { id: String, params: Key },
 }
 fn effect_id(id: &str) -> bool {
     id.len() == 36
@@ -103,6 +120,7 @@ enum Outcome {
     Ready(Result<Output, EngineError>),
 }
 struct Effect {
+    key: Key,
     cancel: Arc<AtomicBool>,
     outcome: Outcome,
 }
@@ -183,8 +201,15 @@ impl Registry {
                             Outcome::Ready(Ok(result))
                         }
                     };
-                    self.effects
-                        .insert(params.effect_id, Effect { cancel, outcome });
+                    let key = Key::from(params.as_ref());
+                    self.effects.insert(
+                        params.effect_id,
+                        Effect {
+                            key,
+                            cancel,
+                            outcome,
+                        },
+                    );
                     (id, Ok(serde_json::json!({"state":"pending"})))
                 }
             }
@@ -196,6 +221,7 @@ impl Registry {
                     id,
                     self.effects
                         .get(&params.effect_id)
+                        .filter(|e| e.key == params)
                         .ok_or_else(uncertain)
                         .map(|e| {
                             e.cancel.store(true, Ordering::Release);
@@ -203,8 +229,23 @@ impl Registry {
                         }),
                 )
             }
-            Op::Poll { id, params } => {
+            Op::Ack { id, params } => {
                 if !opaque_id(&id) || !effect_id(&params.effect_id) {
+                    return Err(invalid());
+                }
+                let result =
+                    if self.effects.get(&params.effect_id).is_some_and(|e| {
+                        e.key == params && matches!(e.outcome, Outcome::Ready(Ok(_)))
+                    }) {
+                        self.effects.remove(&params.effect_id);
+                        Ok(serde_json::json!({"state":"pending"}))
+                    } else {
+                        Err(uncertain())
+                    };
+                (id, result)
+            }
+            Op::Poll { id, params } => {
+                if !opaque_id(&id) || !effect_id(&params.key.effect_id) {
                     return Err(invalid());
                 }
                 let result = self.poll(&params);
@@ -223,7 +264,8 @@ impl Registry {
     fn poll(&mut self, params: &Poll) -> Result<Value, EngineError> {
         let effect = self
             .effects
-            .get_mut(&params.effect_id)
+            .get_mut(&params.key.effect_id)
+            .filter(|e| e.key == params.key)
             .ok_or_else(uncertain)?;
         if matches!(&effect.outcome,Outcome::Worker(w) if w.is_finished()) {
             let Outcome::Worker(w) =
@@ -236,13 +278,7 @@ impl Registry {
         match &effect.outcome {
             Outcome::Worker(_) => Ok(serde_json::json!({"state":"pending"})),
             Outcome::Ready(Err(_)) => Err(uncertain()),
-            Outcome::Ready(Ok(output)) => {
-                let page = output.page(params.offset)?;
-                if page["last"] == true {
-                    self.effects.remove(&params.effect_id);
-                }
-                Ok(page)
-            }
+            Outcome::Ready(Ok(output)) => output.page(params.offset),
         }
     }
 }

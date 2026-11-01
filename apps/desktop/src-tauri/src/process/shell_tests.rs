@@ -103,17 +103,35 @@ fn disconnect_reaps_only_its_own_shell_registry() {
     );
     assert_eq!(active_count(&job).unwrap(), 1);
     assert!(owner.reply(start).is_err());
-    for (method, params) in [
-        ("shell.poll", serde_json::json!({"effectId":id,"offset":0})),
-        ("shell.cancel", serde_json::json!({"effectId":id})),
+    let key = serde_json::json!({"effectId":id,"actionId":"action","workspaceId":"w","sessionId":"s","ownershipEpoch":1});
+    let denied = |registry: &mut Registry, key: &Value| {
+        for method in ["shell.poll", "shell.cancel", "shell.ack"] {
+            let params = if method == "shell.poll" {
+                serde_json::json!({"key":key,"offset":0})
+            } else {
+                key.clone()
+            };
+            let response = registry.reply(serde_json::json!({"native":{"id":"fixture-2","method":method,"params":params}})).unwrap();
+            assert_eq!(
+                read_frame(&mut response.as_slice()).unwrap().0["native"]["error"]["code"],
+                "SHELL_CLEANUP_UNCERTAIN"
+            );
+        }
+    };
+    denied(&mut stranger, &key);
+    for (field, value) in [
+        (
+            "effectId",
+            serde_json::json!("00000000-0000-0000-0000-000000000003"),
+        ),
+        ("actionId", serde_json::json!("other")),
+        ("workspaceId", serde_json::json!("other")),
+        ("sessionId", serde_json::json!("other")),
+        ("ownershipEpoch", serde_json::json!(2)),
     ] {
-        let response = stranger
-            .reply(serde_json::json!({"native":{"id":"fixture-2","method":method,"params":params}}))
-            .unwrap();
-        assert_eq!(
-            read_frame(&mut response.as_slice()).unwrap().0["native"]["error"]["code"],
-            "SHELL_CLEANUP_UNCERTAIN"
-        );
+        let mut wrong = key.clone();
+        wrong[field] = value;
+        denied(&mut owner, &wrong);
     }
     drop(stranger);
     assert_eq!(active_count(&job).unwrap(), 1);
