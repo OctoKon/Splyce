@@ -92,6 +92,7 @@ export type ErrorCode =
   | "RECEIPT_FAILED"
   | "REDACTION_UNAVAILABLE"
   | "ABORTED"
+  | "SHELL_CLEANUP_UNCERTAIN"
   | "IO_ERROR";
 
 export class WorkspaceToolError extends Error {
@@ -139,7 +140,41 @@ export interface WorkspaceTool {
   ): Promise<ToolResult>;
 }
 
+export interface ShellRequest {
+  actionId: string;
+  workspaceId: string;
+  sessionId: string;
+  ownershipEpoch: number;
+  kind: "bash" | "powershell";
+  command: string;
+  cwd: string;
+  temp: string;
+  timeoutMs: number;
+  systemRoot: string;
+}
+export interface ShellOutcome {
+  status:
+    | "exit"
+    | "timeout"
+    | "aborted"
+    | "overflow"
+    | "startFailed"
+    | "resultUnavailable";
+  code: number;
+  bytes: number;
+  stdout: string;
+  stderr: string;
+}
+export type ShellExecutor = (
+  request: ShellRequest,
+  signal: AbortSignal | undefined,
+  assertCurrent: () => void,
+) => Promise<ShellOutcome>;
+
 export interface WorkspaceToolsOptions {
+  shellExecutor?: ShellExecutor;
+  ownershipEpoch?: () => number;
+  shellCleanup?: (actionId: string, complete: boolean) => void;
   workspaces: WorkspacePort;
   grants: GrantPort;
   receipts: ReceiptPort;
@@ -602,83 +637,125 @@ export function createWorkspaceTools(
     kind: "bash" | "powershell",
     command: string,
     ms: number,
+    actionId: string,
     assertCurrent: () => void,
     signal?: AbortSignal,
   ) {
     const cwd = root();
-    const systemRoot = process.env.SystemRoot;
-    if (win && (!systemRoot || !isAbsolute(systemRoot)))
-      fail(
-        "SHELL_START_FAILED",
-        "The Windows system shell location is unavailable.",
-      );
-    const system32 = join(systemRoot ?? "", "System32");
-    const powershellDir = join(system32, "WindowsPowerShell", "v1.0");
-    let file = win ? join(powershellDir, "powershell.exe") : "pwsh";
-    let args = [
-      "-NoProfile",
-      "-NonInteractive",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      command,
-    ];
-    if (kind === "bash") {
-      file = "bash";
-      args = ["--noprofile", "--norc", "-c", command];
-      if (win) {
-        // Resolve Git Bash without PATH; the engine receives only SystemRoot.
-        file = "";
-        for (const programs of ["Program Files", "Program Files (x86)"]) {
-          const candidate = join(
-            systemRoot!,
-            "..",
-            programs,
-            "Git",
-            "bin",
-            "bash.exe",
-          );
+    if (win) {
+      const systemRoot = process.env.SystemRoot;
+      if (!systemRoot || !isAbsolute(systemRoot))
+        return fail(
+          "SHELL_START_FAILED",
+          "The Windows system shell location is unavailable.",
+        );
+      if (!opts.shellExecutor || !opts.ownershipEpoch)
+        fail("SHELL_START_FAILED", "Native shell executor unavailable.");
+      if (signal?.aborted) fail("ABORTED", "aborted");
+      assertCurrent();
+      const started = Date.now();
+      const temp = await mkdtemp(join(cwd, ".splyce-shell-"));
+      let settled = true;
+      try {
+        if (signal?.aborted) fail("ABORTED", "aborted");
+        assertCurrent();
+        const request = {
+          actionId,
+          workspaceId,
+          sessionId,
+          ownershipEpoch: opts.ownershipEpoch!(),
+          kind,
+          command,
+          cwd,
+          temp,
+          timeoutMs: ms,
+          systemRoot,
+        };
+        settled = false;
+        opts.shellCleanup?.(actionId, false);
+        const r = await opts.shellExecutor!(request, signal, () => {
           try {
-            if ((await lstat(candidate)).isFile()) {
-              file = candidate;
-              break;
-            }
-          } catch (e) {
-            if ((e as { code?: string }).code !== "ENOENT")
-              fail(
-                "SHELL_START_FAILED",
-                "Cannot access the Git Bash installation.",
-              );
+            assertCurrent();
+          } catch (error) {
+            // The native executor checks immediately before sending shell.start.
+            settled = true;
+            opts.shellCleanup?.(actionId, true);
+            throw error;
           }
+        }).catch((error: unknown) => {
+          if ((error as { code?: string })?.code === "SHELL_CLEANUP_UNCERTAIN")
+            return fail(
+              "SHELL_CLEANUP_UNCERTAIN",
+              "Shell cleanup requires reconciliation.",
+            );
+          throw error;
+        });
+        settled = true;
+        opts.shellCleanup?.(actionId, true);
+        switch (r.status) {
+          case "timeout": {
+            const summary = (
+              await done("[unavailable]", started, r.bytes, false, null)
+            ).summary;
+            throw new WorkspaceToolError(
+              "SHELL_TIMEOUT",
+              `command exceeded ${String(ms)}ms and was killed`,
+              summary,
+            );
+          }
+          case "aborted":
+            return fail("ABORTED", "command aborted");
+          case "resultUnavailable":
+          case "overflow":
+            throw redactionUnavailable();
+          case "startFailed": {
+            const reason =
+              r.code === 2 || r.code === 3
+                ? "ENOENT"
+                : r.code === 5
+                  ? "EACCES"
+                  : "error";
+            return fail(
+              "SHELL_START_FAILED",
+              `Cannot start ${kind}: ${reason}. Check the system shell installation.`,
+            );
+          }
+          case "exit":
+            return {
+              code: r.code,
+              text: (await clean(r.stdout)) + (await clean(r.stderr)),
+              bytes: r.bytes,
+              truncated: false,
+            };
         }
-        if (!file)
-          fail(
-            "SHELL_START_FAILED",
-            "Git Bash is unavailable. Use powershell.",
+      } finally {
+        // An uncertain live tree still owns this directory.
+        if (settled)
+          await rm(temp, { recursive: true, force: true }).catch(
+            () => undefined,
           );
       }
     }
-    if (signal?.aborted) fail("ABORTED", "aborted");
-    assertCurrent();
-    const temp = win ? await mkdtemp(join(cwd, ".splyce-shell-")) : undefined;
-    try {
-      const env = win
-        ? {
-            SystemRoot: systemRoot!,
-            ComSpec: join(system32, "cmd.exe"),
-            PATHEXT: ".COM;.EXE;.BAT;.CMD",
-            PATH: [system32, systemRoot!, powershellDir].join(";"),
-            TEMP: temp!,
-            TMP: temp!,
-          }
-        : scrubbedEnv();
+    const file = kind === "bash" ? "bash" : "pwsh";
+    const args =
+      kind === "bash"
+        ? ["--noprofile", "--norc", "-c", command]
+        : [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+          ];
+    {
       if (signal?.aborted) fail("ABORTED", "aborted");
       assertCurrent();
       const child = spawn(file, args, {
         cwd,
-        env,
+        env: scrubbedEnv(),
+        detached: true,
         windowsHide: true,
-        detached: !win,
         stdio: ["ignore", "pipe", "pipe"],
       });
       const closed = new Promise<void>((complete) =>
@@ -686,24 +763,14 @@ export function createWorkspaceTools(
       );
       const killTree = () => {
         if (child.pid === undefined) return;
-        if (win)
-          spawn(
-            join(system32, "taskkill.exe"),
-            ["/pid", String(child.pid), "/T", "/F"],
-            {
-              env,
-              windowsHide: true,
-              stdio: ["ignore", "ignore", "ignore"],
-            },
-          ).on("error", () => child.kill("SIGKILL"));
-        else
-          try {
-            (
-              process as unknown as { kill(pid: number, sig: string): void }
-            ).kill(-child.pid, "SIGKILL");
-          } catch {
-            child.kill("SIGKILL");
-          }
+        try {
+          (process as unknown as { kill(pid: number, sig: string): void }).kill(
+            -child.pid,
+            "SIGKILL",
+          );
+        } catch {
+          child.kill("SIGKILL");
+        }
       };
       const started = Date.now();
       const output = { stdout: "", stderr: "" };
@@ -795,11 +862,6 @@ export function createWorkspaceTools(
         });
         if (signal?.aborted) onAbort();
       });
-    } finally {
-      // A surviving descendant can hold a file in the owned temp dir; a failed
-      // cleanup must not replace the command's own typed result with EBUSY.
-      if (temp)
-        await rm(temp, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -824,7 +886,14 @@ export function createWorkspaceTools(
       const target = `${kind}:${command}`;
       const grantId = gate("shell.run", target, a);
       const execute = async (assertCurrent: () => void) => {
-        const r = await exec(kind, command, ms, assertCurrent, signal);
+        const r = await exec(
+          kind,
+          command,
+          ms,
+          a.actionId,
+          assertCurrent,
+          signal,
+        );
         return { summary: `exit ${String(r.code)}`, ok: r.code === 0, r };
       };
       const { r } = await effect(

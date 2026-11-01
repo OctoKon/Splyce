@@ -4208,6 +4208,7 @@ export class Store {
    */
   restore(backupPath: string): void {
     this.assertWritable();
+    this.assertShellCleanup();
     let backup: {
       deletionEpoch: number;
       ownershipEpoch: number;
@@ -4368,6 +4369,47 @@ export class Store {
     }
   }
 
+  /** A shell intent outlives both its caller and an ownership row released by older hosts. */
+  assertShellCleanup(workspaceId?: string): void {
+    const scoped = workspaceId !== undefined;
+    const pending = this.db
+      .prepare(
+        `
+      WITH receipts AS (
+        SELECT a.seq, a.scope_id, a.session_id, json_extract(a.payload,'$.runId') AS run_id,
+          json_extract(a.payload,'$.ownershipEpoch') AS epoch, json_extract(a.payload,'$.actionId') AS action_id,
+          json_extract(a.payload,'$.capabilityId') AS capability, 1 AS intent, NULL AS cleanup
+        FROM records a WHERE a.kind = 'action' ${scoped ? "AND a.scope_id = ?" : ""}
+          AND json_extract(a.payload,'$.state') = 'running'
+          AND json_extract(a.payload,'$.capabilityId') IN ('workspace.bash','workspace.powershell')
+        UNION ALL
+        SELECT o.seq, o.scope_id, o.session_id, json_extract(src.payload,'$.runId'),
+          json_extract(src.payload,'$.ownershipEpoch'), json_extract(src.payload,'$.actionId'),
+          json_extract(src.payload,'$.capabilityId'), 0,
+          CASE WHEN d.record_id IS NULL THEN json_extract(o.payload,'$.cleanupState') END
+        FROM records o CROSS JOIN json_each(o.payload,'$.sourceIds') refs
+        CROSS JOIN records src ON src.record_id = refs.value AND src.kind = 'action'
+          AND src.scope_id = o.scope_id AND src.session_id IS o.session_id
+          AND json_extract(src.payload,'$.actionId') = json_extract(o.payload,'$.actionId')
+        LEFT JOIN deletions d ON d.record_id = o.record_id
+        WHERE o.kind = 'outcome' ${scoped ? "AND o.scope_id = ?" : ""}
+          AND json_extract(src.payload,'$.capabilityId') IN ('workspace.bash','workspace.powershell')
+      ), ranked AS (
+        SELECT cleanup, max(intent) OVER effect AS started,
+          row_number() OVER (effect ORDER BY seq DESC) AS rank FROM receipts
+        WINDOW effect AS (PARTITION BY scope_id,session_id,run_id,epoch,action_id,capability)
+      )
+      SELECT 1 FROM ranked WHERE rank = 1 AND started = 1 AND cleanup IS NOT 'complete' LIMIT 1
+    `,
+      )
+      .get(...(scoped ? [workspaceId, workspaceId] : []));
+    if (pending)
+      throw new StoreError(
+        "OWNERSHIP_CONFLICT",
+        "Workspace shell cleanup requires reconciliation",
+      );
+  }
+
   /**
    * Durable canonical-workspace ownership: at most one live writer per
    * workspace, keyed by canonical workspace id rather than session. The write
@@ -4378,6 +4420,7 @@ export class Store {
     this.assertWritable();
     try {
       this.db.exec("BEGIN IMMEDIATE;");
+      this.assertShellCleanup(workspaceId);
       const row = this.db
         .prepare(
           "SELECT owner_session_id, epoch FROM workspace_ownership WHERE workspace_id = ?",
@@ -4445,6 +4488,7 @@ export class Store {
     this.assertWritable();
     try {
       this.db.exec("BEGIN IMMEDIATE;");
+      this.assertShellCleanup(workspaceId);
       const row = this.db
         .prepare(
           "SELECT owner_session_id, epoch FROM workspace_ownership WHERE workspace_id = ?",
@@ -4506,6 +4550,7 @@ export class Store {
     this.assertOpen();
     try {
       this.db.exec("BEGIN IMMEDIATE;");
+      this.assertShellCleanup(workspaceId);
       const row = this.db
         .prepare(
           "SELECT owner_session_id, epoch FROM workspace_ownership WHERE workspace_id = ?",

@@ -32,6 +32,7 @@ import {
   type Act,
   type GrantPort,
   type ReceiptPort,
+  type ShellExecutor,
   type ToolSummary,
   type WorkspacePort,
   type WorkspaceTool,
@@ -217,6 +218,7 @@ const VERIFIED_PATHS = ["_setActiveTools", "_applyToolLoadout"] as const;
 
 export interface ToolDispatchDeps {
   store: Store;
+  shellExecutor?: ShellExecutor;
   policy: NativePolicy;
   caller: CallerContext;
   /** Run scope = permit.targetScopeId = event scope. */
@@ -285,6 +287,7 @@ interface Call {
   ownImpl: boolean;
   consumed: boolean;
   effectSummary?: string;
+  shellCleanup?: boolean;
 }
 
 const safeId = (value: string): string => value.replace(/[^\w.-]/gu, "_");
@@ -386,6 +389,13 @@ export function createToolDispatch(deps: ToolDispatchDeps): ToolDispatch {
     workspaceId: deps.workspaceId,
     ...(deps.limits ? { limits: deps.limits } : {}),
     redact: complete,
+    ...(deps.shellExecutor ? { shellExecutor: deps.shellExecutor } : {}),
+    ownershipEpoch: () => deps.ownership.epoch,
+    shellCleanup: (actionId, complete) => {
+      const call = byAction.get(actionId);
+      if (!call?.admitted) throw new AdmissionError("POLICY_DENIED");
+      call.shellCleanup = complete;
+    },
   });
   const root = workspaces.workspace(deps.workspaceId)?.canonicalPath;
   const contextTools: readonly ContextTool[] =
@@ -711,7 +721,11 @@ export function createToolDispatch(deps: ToolDispatchDeps): ToolDispatch {
         policy.discard(toolCallId, "denied");
         throw new AdmissionError("POLICY_DENIED");
       }
+      const shell = toolName === "bash" || toolName === "powershell";
       const events: ExecuteEvents<T> = {
+        ...(shell
+          ? { shellCleanup: () => call.ownImpl && call.shellCleanup !== false }
+          : {}),
         intent: (running) =>
           draft("turn.tool_intent", running.recordId, {
             runId: deps.runId,
@@ -726,9 +740,11 @@ export function createToolDispatch(deps: ToolDispatchDeps): ToolDispatch {
           const status: "success" | "error" | "uncertain" =
             executed === undefined
               ? "uncertain"
-              : executed.isError || uncertain
-                ? "error"
-                : "success";
+              : shell && !events.shellCleanup?.()
+                ? "uncertain"
+                : executed.isError || uncertain
+                  ? "error"
+                  : "success";
           const details = executed?.result?.details;
           const raw = details?.summary;
           // already redacted fail-closed in the tool wrapper

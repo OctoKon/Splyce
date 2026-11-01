@@ -29,3 +29,8 @@ windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Secu
 
 [patch.crates-io]
 glib = { path = '../../../vendor/glib' }
+
+[[test]]
+name = "shell_control_fixture"
+path = "tests/fixtures/shell_control.rs"
+harness = false

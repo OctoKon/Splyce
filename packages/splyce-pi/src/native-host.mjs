@@ -136,8 +136,11 @@ export function createNativeHost(appDataDir, nativeControl, sessionFactory) {
   const pendingContext = new Set();
   let contextClosed = false;
 
-  function contextWorkspace(workspaceId) {
+  function requireOpen() {
     if (contextClosed) fail("NATIVE_CONTEXT_CLOSED");
+  }
+  function contextWorkspace(workspaceId) {
+    requireOpen();
     opaqueId(workspaceId);
     const workspace = store
       .listWorkspaces()
@@ -579,6 +582,7 @@ export function createNativeHost(appDataDir, nativeControl, sessionFactory) {
       return store.listWorkspaceViews();
     },
     admitWorkspace(input) {
+      requireOpen();
       return workspaceView(
         store.admitWorkspace(input, {
           sessionId: "native-workspace-admission",
@@ -621,8 +625,14 @@ export function createNativeHost(appDataDir, nativeControl, sessionFactory) {
     },
     readPage,
     captureMemoryAfterTurn,
-    prepareProviderSetup: providerSetup.prepare,
-    commitProviderSetup: providerSetup.commit,
+    prepareProviderSetup(...args) {
+      requireOpen();
+      return providerSetup.prepare(...args);
+    },
+    commitProviderSetup(...args) {
+      requireOpen();
+      return providerSetup.commit(...args);
+    },
     readProviderSetup: providerSetup.read,
     readSetup(input, requestId, signal) {
       return sessions.handle("setup.read", input, requestId, signal);
@@ -643,6 +653,7 @@ export function createNativeHost(appDataDir, nativeControl, sessionFactory) {
       return sessions.handle("permission.read", input, requestId, signal);
     },
     preparePrompt(command, signal) {
+      requireOpen();
       if (!factory?.preparePrompt) fail("NATIVE_SESSION_UNAVAILABLE");
       return factory.preparePrompt(command, signal);
     },
@@ -651,6 +662,7 @@ export function createNativeHost(appDataDir, nativeControl, sessionFactory) {
       return factory.cancel(input);
     },
     respondApproval(command) {
+      requireOpen();
       if (!factory?.respondApproval) fail("NATIVE_SESSION_UNAVAILABLE");
       return factory.respondApproval(command);
     },
@@ -671,16 +683,28 @@ export function createNativeHost(appDataDir, nativeControl, sessionFactory) {
     },
     async shutdown() {
       contextClosed = true;
+      let failure;
       try {
         await sessions.close();
-      } finally {
-        await Promise.allSettled([...pendingContext]);
-        try {
-          closeContext();
-        } finally {
-          store.close();
+      } catch (error) {
+        failure = error;
+        if (error?.code === "SETUP_OUTCOME_UNKNOWN") {
+          try {
+            store.assertShellCleanup();
+          } catch (fence) {
+            if (fence?.code === "OWNERSHIP_CONFLICT")
+              fail("SHELL_CLEANUP_UNCERTAIN");
+            throw fence;
+          }
         }
       }
+      await Promise.allSettled([...pendingContext]);
+      try {
+        closeContext();
+      } finally {
+        store.close();
+      }
+      if (failure) throw failure;
     },
     close() {
       if (factory || pendingContext.size > 0)

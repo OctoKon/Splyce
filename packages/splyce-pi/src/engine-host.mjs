@@ -129,6 +129,7 @@ export async function runHost(
 ) {
   let host;
   let hostShutdown;
+  let closing = false;
   let stopped = false;
   let failure;
   let inputEnded = false;
@@ -145,11 +146,12 @@ export async function runHost(
     native?.shutdown();
     input.destroy?.();
   };
-  const write = (value) => {
+  const write = (value, maySend) => {
     const frame = encodeFrame(value);
     writes = writes.then(
       () =>
         new Promise((resolveWrite, rejectWrite) => {
+          if (maySend && !maySend()) return resolveWrite();
           const finish = (error) => {
             clearTimeout(timer);
             output.removeListener("close", closed);
@@ -243,6 +245,8 @@ export async function runHost(
   native = new NativeControl(write, fail);
   async function handle(request) {
     if (stopped || failure) return;
+    if (closing && request.method !== "shutdown")
+      return write(denied(request.id));
     let reply;
     let shutdown = false;
     if (host === undefined) {
@@ -348,10 +352,17 @@ export async function runHost(
       request.method === "shutdown" &&
       Object.keys(request.params).length === 0
     ) {
+      closing = true;
       hostShutdown = Promise.resolve().then(() =>
         host.shutdown ? host.shutdown() : host.close(),
       );
-      await hostShutdown;
+      try {
+        await hostShutdown;
+      } catch (error) {
+        if (error?.code !== "SHELL_CLEANUP_UNCERTAIN") throw error;
+        hostShutdown = undefined;
+        return write(denied(request.id, "UNCERTAIN_EFFECT"));
+      }
       reply = { id: request.id, ok: true, value: { state: "stopped" } };
       shutdown = true;
     } else if (request.method === "send" && request.params.frame === "setup") {

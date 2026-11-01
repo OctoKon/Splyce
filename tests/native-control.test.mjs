@@ -485,3 +485,123 @@ test("credential status hides transport errors and remote denial without a missi
     message: "Credential unavailable",
   });
 });
+
+test("shell cancel uses its own lifetime and requires a terminal cleanup acknowledgment", async () => {
+  const p = peer(),
+    controller = new AbortController();
+  const methods = [];
+  let cancelFrame, nextPoll;
+  p.bus.on("request", (frame) => {
+    const { method } = frame.native;
+    methods.push(method);
+    if (method === "shell.start") p.reply(frame, { state: "pending" });
+    if (method === "shell.cancel") {
+      cancelFrame = frame;
+      p.reply(frame, { state: "pending" });
+    }
+    if (method === "shell.poll" && cancelFrame) nextPoll = frame;
+    else if (method === "shell.poll") p.reply(frame, { state: "pending" });
+    if (method === "credential.status") p.reply(frame, { present: false });
+  });
+  const running = p.control.shell(
+    {
+      command: "fixture",
+      actionId: "a",
+      sessionId: "s",
+      workspaceId: "w",
+      ownershipEpoch: 1,
+      timeoutMs: 1000,
+    },
+    controller.signal,
+    () => {},
+  );
+  await tick();
+  await p.control.credentialStatus({ target: binding().target });
+  controller.abort();
+  while (!nextPoll) await new Promise((r) => setTimeout(r, 2));
+  let settled = false;
+  running.then(() => {
+    settled = true;
+  });
+  await tick();
+  assert.equal(settled, false);
+  p.reply(nextPoll, {
+    state: "done",
+    status: "aborted",
+    code: 1,
+    bytes: 0,
+    stdoutBytes: 0,
+    offset: 0,
+    data: "",
+    last: true,
+  });
+  assert.equal((await running).status, "aborted");
+  assert.equal(methods.filter((x) => x === "shell.cancel").length, 1);
+});
+test("lost shell acceptance and cleanup acknowledgment remain uncertain", async () => {
+  const p = peer();
+  let attempts = 0;
+  p.bus.on("request", (frame) => {
+    ++attempts;
+    if (frame.native.method === "shell.start")
+      throw new Error("lost acknowledgment");
+    p.control.accept({
+      native: {
+        id: frame.native.id,
+        ok: false,
+        error: { code: "SHELL_CLEANUP_UNCERTAIN" },
+      },
+    });
+  });
+  await assert.rejects(
+    p.control.shell(
+      {
+        command: "fixture",
+        actionId: "a",
+        sessionId: "s",
+        workspaceId: "w",
+        ownershipEpoch: 1,
+        timeoutMs: 1000,
+      },
+      undefined,
+      () => {},
+    ),
+    { code: "SHELL_CLEANUP_UNCERTAIN" },
+  );
+  assert.ok(attempts >= 3);
+});
+
+test("a verified terminal page preserves cleanup proof if the rest of the output is lost", async () => {
+  const p = peer();
+  let reads = 0;
+  p.bus.on("request", (frame) => {
+    if (frame.native.method !== "shell.poll")
+      return p.reply(frame, { state: "pending" });
+    if (++reads === 1)
+      return p.reply(frame, {
+        state: "done",
+        status: "exit",
+        code: 0,
+        bytes: 2,
+        stdoutBytes: 2,
+        offset: 0,
+        data: "61",
+        last: false,
+      });
+    p.control.shutdown();
+  });
+  const result = await p.control.shell(
+    {
+      actionId: "a",
+      sessionId: "s",
+      workspaceId: "w",
+      ownershipEpoch: 1,
+      command: "fixture",
+      timeoutMs: 1000,
+    },
+    undefined,
+    () => {},
+  );
+  assert.equal(result.status, "resultUnavailable");
+  assert.equal(result.stdout + result.stderr, "");
+});

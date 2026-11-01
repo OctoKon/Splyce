@@ -30,6 +30,12 @@ import {
   type Redactor,
 } from "../../packages/splyce-pi/dist/workspace-tools.js";
 
+import {
+  nativeShellFixture,
+  shellFixturePath,
+} from "../fixtures/native-shell.mjs";
+const nativeShell = nativeShellFixture();
+test.after(() => nativeShell.close());
 const win = process.platform === "win32";
 const base = mkdtempSync(join(tmpdir(), "splyce-wt-"));
 test.after(() => rmSync(base, { recursive: true, force: true }));
@@ -100,6 +106,8 @@ function harness(
     },
   };
   const tools = createWorkspaceTools({
+    shellExecutor: nativeShell.execute,
+    ownershipEpoch: () => 1,
     workspaces,
     grants,
     receipts,
@@ -390,6 +398,27 @@ test("shell without a grant is denied and nothing runs", async () => {
   assert.equal(h.log.length, 0);
 });
 
+test(
+  "Windows refuses an approved command without the native executor",
+  { skip: !win },
+  async () => {
+    const h = harness(),
+      command = "Write-Output fixture > proof.txt";
+    h.grants.approve("shell.run", sh + ":" + command);
+    const tools = createWorkspaceTools({
+      workspaces: { workspace: () => h.ws },
+      grants: h.grants,
+      receipts: h.receipts,
+      sessionId: "s1",
+      workspaceId: "w1",
+    });
+    await assert.rejects(tools.powershell!.execute({ command }), {
+      code: "SHELL_START_FAILED",
+    });
+    assert.deepEqual(readdirSync(h.root), []);
+  },
+);
+
 test("shell with a grant for the exact command runs in the root; one char off is denied", async () => {
   const h = harness();
   const cmd = win ? "(Get-Location).Path" : "pwd";
@@ -449,6 +478,8 @@ test(
     import { readdirSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
     import { join } from 'node:path';
     import { createWorkspaceTools } from ${JSON.stringify(new URL("../../packages/splyce-pi/dist/workspace-tools.js", import.meta.url).href)};
+    const {nativeShellFixture} = await import(${JSON.stringify(new URL("../fixtures/native-shell.mjs", import.meta.url).href)});
+    const nativeShell=nativeShellFixture({path:process.argv[2]});
     const root = process.argv[1];
     // Node's Windows spawn adds parent defaults; Rust's explicit block does not.
     for (const name of Object.keys(process.env)) if (name !== 'SystemRoot') delete process.env[name];
@@ -456,6 +487,7 @@ test(
     const receipts = [];
     let consumed = false;
     const tools = createWorkspaceTools({
+      shellExecutor:nativeShell.execute,ownershipEpoch:()=>1,
       workspaces: { workspace: () => ({ workspaceId: 'w1', canonicalPath: root, revision: 1 }) },
       grants: {
         check: () => consumed ? { ok: false, reason: 'GRANT_CONSUMED' } : { ok: true, grantId: 'g1', scope: 'once' },
@@ -517,11 +549,18 @@ test(
     consumed = false;
     await assert.rejects(tools.bash.result({ command: 'echo splyce', timeout: 3 }), { code: 'SHELL_START_FAILED' });
     assert.deepEqual(readdirSync(root), []);
+    nativeShell.close();
     console.log('restricted-shell: splyce; stdin-EOF; Git-Bash; pipes; tree-cleanup; child-env; cwd; temp-cleanup; typed-spawn-error passed');
   `;
     const child = spawnSync(
       process.execPath,
-      ["--input-type=module", "-e", script, h.ws.canonicalPath],
+      [
+        "--input-type=module",
+        "-e",
+        script,
+        h.ws.canonicalPath,
+        shellFixturePath(),
+      ],
       {
         env: { SystemRoot: process.env.SystemRoot! },
         encoding: "utf8",

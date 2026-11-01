@@ -1369,3 +1369,81 @@ test("action reservation fence rejects competing terminal history atomically", (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("shell ownership survives incomplete and legacy cleanup, reopen and backup", () => {
+  const dir = freshDir(),
+    path = join(dir, "store.db"),
+    scope = "w-demo";
+  let store = Store.open(path);
+  const denied = { code: "OWNERSHIP_CONFLICT" };
+  try {
+    const owner = store.acquireWorkspace(scope, caller.sessionId);
+    const shell = {
+      capabilityId: "workspace.powershell",
+      ownershipEpoch: owner.epoch,
+    };
+    const proposal = record("action", { ...shell, state: "proposed" });
+    store.append({ kind: "action", record: proposal }, caller);
+    assert.equal(
+      store.acquireWorkspace(scope, caller.sessionId).epoch,
+      owner.epoch,
+    );
+    const before = join(dir, "before.db");
+    store.backup(before);
+    const intent = record("action", { ...shell, state: "running" });
+    store.append({ kind: "action", record: intent }, caller);
+    const outcome = (cleanupState: string, effectState = "uncertain") =>
+      store.append(
+        {
+          kind: "outcome",
+          record: record("outcome", {
+            sourceIds: [intent.recordId],
+            cleanupState,
+            effectState,
+          }),
+        },
+        caller,
+      );
+    const assertFenced = () => {
+      assert.throws(
+        () => store.releaseWorkspace(scope, caller.sessionId, owner.epoch),
+        denied,
+      );
+      assert.throws(
+        () => store.renewWorkspace(scope, caller.sessionId, owner.epoch),
+        denied,
+      );
+      for (const session of [caller.sessionId, "other"])
+        assert.throws(() => store.acquireWorkspace(scope, session), denied);
+    };
+    assertFenced();
+    assert.throws(() => store.restore(before), denied);
+    outcome("uncertain");
+    assertFenced();
+    outcome("not-required", "observed-success");
+    // Simulate the old release by removing the row from an isolated copy, after closing SQLite.
+    const legacy = join(dir, "legacy.db");
+    store.backup(legacy);
+    const db = new DatabaseSync(legacy);
+    db.prepare("DELETE FROM workspace_ownership WHERE workspace_id=?").run(
+      scope,
+    );
+    db.close();
+    const old = Store.open(legacy);
+    try {
+      assert.equal(old.workspaceOwner(scope), undefined);
+      assert.throws(() => old.acquireWorkspace(scope, "new"), denied);
+      assert.ok(old.list(scope).records.length >= 4);
+    } finally {
+      old.close();
+    }
+    store.close();
+    store = Store.open(path);
+    assertFenced();
+    outcome("complete");
+    store.releaseWorkspace(scope, caller.sessionId, owner.epoch);
+    assert.ok(store.acquireWorkspace(scope, "other").epoch > owner.epoch);
+  } finally {
+    store.close();
+  }
+});

@@ -31,6 +31,35 @@ const opaque = (value) =>
   Buffer.byteLength(value) <= 128 &&
   value.length > 0 &&
   !/[\s\p{Cc}/\\]/u.test(value);
+const shellError = () =>
+  Object.assign(new Error("Shell cleanup requires reconciliation"), {
+    code: "SHELL_CLEANUP_UNCERTAIN",
+  });
+const shellPending = (v) => exact(v, ["state"]) && v.state === "pending";
+const shellDone = (v) =>
+  exact(v, [
+    "state",
+    "status",
+    "code",
+    "bytes",
+    "stdoutBytes",
+    "offset",
+    "data",
+    "last",
+  ]) &&
+  v.state === "done" &&
+  ["exit", "timeout", "aborted", "overflow", "startFailed"].includes(
+    v.status,
+  ) &&
+  Number.isSafeInteger(v.code) &&
+  [v.bytes, v.stdoutBytes, v.offset].every(
+    (n) => Number.isSafeInteger(n) && n >= 0,
+  ) &&
+  v.stdoutBytes <= v.bytes &&
+  typeof v.data === "string" &&
+  v.data.length <= 65536 &&
+  /^(?:[0-9a-f]{2})*$/u.test(v.data) &&
+  typeof v.last === "boolean";
 const bindingKeys = [
   "scopeId",
   "target",
@@ -43,6 +72,7 @@ export class NativeControl {
   #send;
   #pending = new Map();
   #scopes = new Map();
+  #shells = new Set();
   #epoch = randomUUID();
   #sequence = 0;
   #closed = false;
@@ -53,17 +83,17 @@ export class NativeControl {
     this.#onFatal = onFatal;
   }
 
-  #call(method, params, signal) {
+  #call(method, params, signal, maySend) {
     if (
       this.#closed ||
       signal?.aborted ||
-      this.#pending.size >= 8 ||
+      this.#pending.size >= (method === "shell.cancel" ? 16 : 8) ||
       this.#sequence >= Number.MAX_SAFE_INTEGER
     )
       return Promise.reject(unavailable());
     const id = `${this.#epoch}-${++this.#sequence}`;
     if (
-      method === "credential.redact" &&
+      (method === "credential.redact" || method.startsWith("shell.")) &&
       !fitsFrame({ native: { id, method, params } })
     )
       return Promise.reject(entryTooLarge());
@@ -80,12 +110,26 @@ export class NativeControl {
       timer.unref();
       this.#pending.set(id, { method, finish });
       signal?.addEventListener("abort", abort, { once: true });
-      Promise.resolve()
-        .then(() => {
-          if (this.#pending.has(id))
-            return this.#send({ native: { id, method, params } });
-        })
-        .catch(abort);
+      if (method === "shell.start") {
+        try {
+          const allowed = () => {
+            if (this.#pending.has(id) && maySend()) return true;
+            abort();
+            return false;
+          };
+          Promise.resolve(
+            this.#send({ native: { id, method, params } }, allowed),
+          ).catch(abort);
+        } catch {
+          abort();
+        }
+      } else
+        Promise.resolve()
+          .then(() => {
+            if (this.#pending.has(id))
+              return this.#send({ native: { id, method, params } });
+          })
+          .catch(abort);
     });
   }
 
@@ -122,14 +166,17 @@ export class NativeControl {
           "CREDENTIAL_UNAVAILABLE",
           "PERSIST_REDACTION_UNAVAILABLE",
           "INVENTORY_UNAVAILABLE",
+          "SHELL_CLEANUP_UNCERTAIN",
         ].includes(reply.error.code) ||
         (pending &&
           reply.error.code !==
-            (pending.method === "inventory.capture"
-              ? "INVENTORY_UNAVAILABLE"
-              : pending.method === "credential.redact"
-                ? "PERSIST_REDACTION_UNAVAILABLE"
-                : "CREDENTIAL_UNAVAILABLE"))
+            (pending.method.startsWith("shell.")
+              ? "SHELL_CLEANUP_UNCERTAIN"
+              : pending.method === "inventory.capture"
+                ? "INVENTORY_UNAVAILABLE"
+                : pending.method === "credential.redact"
+                  ? "PERSIST_REDACTION_UNAVAILABLE"
+                  : "CREDENTIAL_UNAVAILABLE"))
       )
         return fail();
       pending?.finish(true);
@@ -158,6 +205,27 @@ export class NativeControl {
       typeof reply.value.manifest === "object" &&
       fitsFrame(frame);
     if (
+      pending?.method.startsWith("shell.") ||
+      (!pending && (shellPending(reply.value) || shellDone(reply.value)))
+    ) {
+      if (
+        !shellPending(reply.value) &&
+        !(pending?.method === "shell.poll" && shellDone(reply.value)) &&
+        !(
+          pending?.method === "shell.start" &&
+          shellDone(reply.value) &&
+          reply.value.status === "startFailed" &&
+          reply.value.bytes === 0 &&
+          reply.value.data === "" &&
+          reply.value.last
+        ) &&
+        pending
+      )
+        return fail();
+      pending?.finish(false, reply.value);
+      return;
+    }
+    if (
       (!isEmpty && !isSecret && !isRedaction && !isStatus && !isInventory) ||
       (pending &&
         (pending.method === "inventory.capture"
@@ -172,6 +240,152 @@ export class NativeControl {
     )
       return fail();
     pending?.finish(false, reply.value);
+  }
+
+  async shell(request, signal, assertCurrent) {
+    const effectId = randomUUID();
+    const key = { effectId };
+    const start = { ...request, ...key };
+    if (
+      this.#closed ||
+      this.#pending.size >= 8 ||
+      this.#sequence >= Number.MAX_SAFE_INTEGER ||
+      !opaque(request.actionId) ||
+      !opaque(request.sessionId) ||
+      !opaque(request.workspaceId) ||
+      !Number.isSafeInteger(request.ownershipEpoch) ||
+      request.ownershipEpoch < 1 ||
+      !Number.isSafeInteger(request.timeoutMs) ||
+      request.timeoutMs < 0 ||
+      typeof request.command !== "string" ||
+      !request.command.isWellFormed() ||
+      request.command.includes("\0") ||
+      !fitsFrame({
+        native: {
+          id: this.#epoch + "-9007199254740991",
+          method: "shell.start",
+          params: start,
+        },
+      })
+    )
+      return {
+        status: "startFailed",
+        code: 1,
+        bytes: 0,
+        stdout: "",
+        stderr: "",
+      };
+    let interrupted = false;
+    let canceling;
+    const cancel = () => {
+      interrupted = true;
+      canceling ??= this.#call("shell.cancel", key).catch(() => {});
+    };
+    assertCurrent();
+    if (signal?.aborted)
+      return { status: "aborted", code: 1, bytes: 0, stdout: "", stderr: "" };
+    this.#shells.add(effectId);
+    let cleanupObserved = false;
+    let rejectedBeforeWrite,
+      canceledBeforeWrite = false;
+    const started = this.#call("shell.start", start, undefined, () => {
+      try {
+        assertCurrent();
+        canceledBeforeWrite = signal?.aborted === true;
+        return !canceledBeforeWrite;
+      } catch (error) {
+        rejectedBeforeWrite = error;
+        return false;
+      }
+    });
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
+    try {
+      try {
+        const accepted = await started;
+        if (accepted.state === "done")
+          return {
+            status: "startFailed",
+            code: accepted.code,
+            bytes: 0,
+            stdout: "",
+            stderr: "",
+          };
+      } catch {
+        if (rejectedBeforeWrite) throw rejectedBeforeWrite;
+        if (canceledBeforeWrite)
+          return {
+            status: "aborted",
+            code: 1,
+            bytes: 0,
+            stdout: "",
+            stderr: "",
+          };
+        cancel();
+      }
+      const chunks = [];
+      let offset = 0;
+      let meta;
+      while (!this.#closed) {
+        if (canceling) await canceling;
+        let reply;
+        try {
+          reply = await this.#call("shell.poll", { ...key, offset });
+        } catch {
+          if (interrupted) throw shellError();
+          cancel();
+          continue;
+        }
+        if (reply.state === "pending") {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          continue;
+        }
+        cleanupObserved = true;
+        const signature = [
+          reply.code,
+          reply.bytes,
+          reply.stdoutBytes,
+          reply.status,
+        ].join("|");
+        if (offset !== reply.offset || (meta && signature !== meta))
+          throw shellError();
+        meta = signature;
+        const bytes = Buffer.from(reply.data, "hex");
+        offset += bytes.length;
+        if (offset > 8 << 20 || (!reply.last && !bytes.length))
+          throw shellError();
+        chunks.push(bytes);
+        if (reply.last) {
+          if (reply.status === "exit" ? offset !== reply.bytes : offset !== 0)
+            throw shellError();
+          const all = Buffer.concat(chunks);
+          return {
+            status: reply.status,
+            code: reply.code,
+            bytes: reply.bytes,
+            stdout: new TextDecoder().decode(
+              all.subarray(0, reply.stdoutBytes),
+            ),
+            stderr: new TextDecoder().decode(all.subarray(reply.stdoutBytes)),
+          };
+        }
+      }
+      throw shellError();
+    } catch (error) {
+      if (!this.#closed && !rejectedBeforeWrite) cancel();
+      if (cleanupObserved)
+        return {
+          status: "resultUnavailable",
+          code: 1,
+          bytes: 0,
+          stdout: "",
+          stderr: "",
+        };
+      throw error;
+    } finally {
+      this.#shells.delete(effectId);
+      signal?.removeEventListener("abort", cancel);
+    }
   }
 
   async inventory(workspace, signal) {
@@ -312,6 +526,21 @@ export class NativeControl {
   shutdown() {
     if (this.#closed) return;
     this.#closed = true;
+    for (const effectId of this.#shells) {
+      if (this.#sequence >= Number.MAX_SAFE_INTEGER) break;
+      const frame = {
+        native: {
+          id: this.#epoch + "-" + ++this.#sequence,
+          method: "shell.cancel",
+          params: { effectId },
+        },
+      };
+      try {
+        Promise.resolve(this.#send(frame)).catch(() => {});
+      } catch {
+        /* The outer job owns disconnect cleanup. */
+      }
+    }
     for (const pending of this.#pending.values()) pending.finish(true);
     for (const scope of this.#scopes.values()) {
       scope.closed = true;

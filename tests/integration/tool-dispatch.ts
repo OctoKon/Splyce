@@ -3,7 +3,7 @@
 // sequence (reserve -> prepare -> finish -> execute). Only the host ports are
 // injected: approval, native redaction, native directory identity.
 import assert from "node:assert/strict";
-import childProcess from "node:child_process";
+import { nativeShellFixture } from "../fixtures/native-shell.mjs";
 import {
   mkdirSync,
   mkdtempSync,
@@ -111,6 +111,7 @@ type Options = {
   attachThrows?: boolean;
   approve?: (r: ApprovalRequest) => boolean;
   nativeRedact?: (text: string) => Promise<string | { text: string }>;
+  shellStarted?: () => void;
   registrationFails?: boolean;
   memory?: {
     capture(scopeId: string, sessionId: string): unknown[];
@@ -201,7 +202,14 @@ async function setup(
   const bound: object[] = [];
   const admissions = new Map<object, ToolAdmission>();
   let registered = 0;
+  const shell = nativeShellFixture({
+    onFrame: (frame) => {
+      if (frame.native.method === "shell.start") options.shellStarted?.();
+    },
+  });
+  t.after(() => shell.close());
   const dispatch = createToolDispatch({
+    shellExecutor: shell.execute,
     ...(options.permissionMode
       ? { permissionMode: options.permissionMode }
       : {}),
@@ -1612,7 +1620,12 @@ for (const mode of ["auto", "bypass", "manual"] as const) {
 
 for (const mode of ["bypass", "manual"] as const) {
   test(`permission ${mode}: shell rechecks after temporary directory creation and cleans up`, async (t) => {
-    const f = await setup(t);
+    let launches = 0;
+    const f = await setup(t, {
+      shellStarted: () => {
+        launches++;
+      },
+    });
     persistPermissionMode(f.store, caller, {
       requestId: "initial-shell-mode",
       workspaceId: f.workspaceId,
@@ -1620,12 +1633,6 @@ for (const mode of ["bypass", "manual"] as const) {
       mode,
     });
     const original = fsPromises.mkdtemp;
-    const originalSpawn = childProcess.spawn;
-    let launches = 0;
-    childProcess.spawn = (...args) => {
-      launches++;
-      return originalSpawn(...args);
-    };
     let revoked = false;
     fsPromises.mkdtemp = async (...args) => {
       const path = await original(...args);
@@ -1648,7 +1655,6 @@ for (const mode of ["bypass", "manual"] as const) {
       });
     } finally {
       fsPromises.mkdtemp = original;
-      childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
     }
     assert.equal(revoked, true);

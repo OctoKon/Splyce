@@ -332,7 +332,7 @@ fn read_frame(reader: &mut impl Read) -> Result<(Value, usize), EngineError> {
 pub use windows::{EngineChild, EngineEvents};
 
 #[cfg(windows)]
-mod windows {
+pub(crate) mod windows {
     use super::*;
     use std::collections::VecDeque;
     use std::ffi::{OsStr, c_void};
@@ -351,6 +351,61 @@ mod windows {
     use windows_sys::Win32::System::JobObjects::*;
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::*;
+
+    pub(crate) mod shell {
+        include!("process/shell.rs");
+    }
+
+    fn system_root() -> Result<PathBuf, EngineError> {
+        use std::os::windows::ffi::OsStringExt;
+        let mut system_root = vec![0u16; 32768];
+        // SAFETY: the writable UTF-16 buffer has the stated capacity.
+        let count = unsafe {
+            windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW(
+                system_root.as_mut_ptr(),
+                system_root.len() as u32,
+            )
+        } as usize;
+        if count == 0 || count >= system_root.len() {
+            return Err(invalid_manifest());
+        }
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(
+            &system_root[..count],
+        )))
+    }
+
+    pub(crate) fn create_job() -> Result<OwnedHandle, EngineError> {
+        // SAFETY: CreateJobObjectW creates a new unnamed job without borrowed arguments.
+        let job = own(unsafe { CreateJobObjectW(null(), null()) })?;
+        // SAFETY: zero is the documented initial state for these Win32 POD structures.
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: job and limits are valid and the size matches the selected information class.
+        unsafe {
+            checked(SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of_val(&limits) as u32,
+            ))?;
+        }
+        Ok(job)
+    }
+
+    fn active_count(job: &OwnedHandle) -> Result<u32, EngineError> {
+        // SAFETY: zero initializes the job accounting output and the query uses its exact size.
+        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+        unsafe {
+            checked(QueryInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                size_of_val(&accounting) as u32,
+                null_mut(),
+            ))?;
+        }
+        Ok(accounting.ActiveProcesses)
+    }
 
     fn wide(value: &OsStr) -> Result<Vec<u16>, EngineError> {
         let mut result: Vec<u16> = value.encode_wide().collect();
@@ -941,6 +996,7 @@ mod windows {
         events: EngineEvents,
         failed: Arc<AtomicBool>,
         workers: Vec<JoinHandle<()>>,
+        shell_cleanup_failed: Arc<AtomicBool>,
         stopped: bool,
         _verified_files: Vec<File>,
     }
@@ -956,19 +1012,9 @@ mod windows {
             let executable = launch_path(&root.join("node.exe"))?;
             let cwd = launch_path(&root)?;
             let mut command = wide(OsStr::new("node.exe host.mjs"))?;
-            let mut system_root = vec![0u16; 32768];
-            // SAFETY: the writable UTF-16 buffer has the stated capacity.
-            let count = unsafe {
-                windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW(
-                    system_root.as_mut_ptr(),
-                    system_root.len() as u32,
-                )
-            } as usize;
-            if count == 0 || count >= system_root.len() {
-                return Err(invalid_manifest());
-            }
+            let system_root = system_root()?;
             let mut environment: Vec<u16> = "SystemRoot=".encode_utf16().collect();
-            environment.extend_from_slice(&system_root[..count]);
+            environment.extend(system_root.as_os_str().encode_wide());
             environment.push(0);
             environment.push(0);
             let (stdin_read, stdin_write) = pipe(false)?;
@@ -987,20 +1033,7 @@ mod windows {
                 stdout_write.as_raw_handle(),
                 stderr.as_raw_handle(),
             ];
-            // SAFETY: CreateJobObjectW creates a new unnamed job without borrowed arguments.
-            let job = own(unsafe { CreateJobObjectW(null(), null()) })?;
-            // SAFETY: zero is the documented initial state for these Win32 POD structures.
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            // SAFETY: job and limits are valid and the size matches the selected information class.
-            unsafe {
-                checked(SetInformationJobObject(
-                    job.as_raw_handle(),
-                    JobObjectExtendedLimitInformation,
-                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                    size_of_val(&limits) as u32,
-                ))?;
-            }
+            let job = create_job()?;
             let jobs = [job.as_raw_handle()];
             let attributes = Attributes::new(&inherited, &jobs)?;
             // SAFETY: startup and process information are initialized according to Win32.
@@ -1071,6 +1104,8 @@ mod windows {
             let failed = Arc::new(AtomicBool::new(false));
             let reader_failed = failed.clone();
             let native_writes = writes.clone();
+            let mut shells = shell::Registry::new(job.try_clone().map_err(io_error)?);
+            let shell_cleanup_failed = shells.cleanup_failed.clone();
             let reader = std::thread::Builder::new()
                 .name("splyce-engine-read".into())
                 .spawn(move || {
@@ -1079,7 +1114,15 @@ mod windows {
                     loop {
                         match read_frame(&mut output) {
                             Ok((frame, _)) if frame.get("native").is_some() => {
-                                let result = native_reply(frame, &mut scopes).and_then(|frame| {
+                                let result = if frame["native"]["method"]
+                                    .as_str()
+                                    .is_some_and(|method| method.starts_with("shell."))
+                                {
+                                    shells.reply(frame)
+                                } else {
+                                    native_reply(frame, &mut scopes)
+                                }
+                                .and_then(|frame| {
                                     write_bounded(
                                         &native_writes,
                                         frame,
@@ -1226,6 +1269,7 @@ mod windows {
                 events,
                 failed,
                 workers: vec![reader, writer],
+                shell_cleanup_failed,
                 stopped: false,
                 _verified_files: verified_files,
             };
@@ -1358,19 +1402,7 @@ mod windows {
                 }
             }
             loop {
-                // SAFETY: zero initializes the job accounting output and the query uses its exact size.
-                let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
-                unsafe {
-                    checked(QueryInformationJobObject(
-                        self.job.as_raw_handle(),
-                        JobObjectBasicAccountingInformation,
-                        (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
-                        size_of_val(&accounting) as u32,
-                        null_mut(),
-                    ))?;
-                }
-                if accounting.ActiveProcesses == 0
-                    && self.workers.iter().all(JoinHandle::is_finished)
+                if active_count(&self.job)? == 0 && self.workers.iter().all(JoinHandle::is_finished)
                 {
                     break;
                 }
@@ -1389,6 +1421,12 @@ mod windows {
                         "Engine transport cleanup failed",
                     ));
                 }
+            }
+            if self.shell_cleanup_failed.load(Ordering::Acquire) {
+                return Err(EngineError::new(
+                    "ENGINE_CLEANUP",
+                    "Shell cleanup could not be confirmed",
+                ));
             }
             self.stopped = true;
             Ok(())

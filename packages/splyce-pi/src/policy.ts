@@ -69,6 +69,8 @@ export interface ActionPermit {
  * completion receipts. A callback that throws loses only its event, never a receipt.
  */
 export interface ExecuteEvents<T> {
+  /** Private executor observation; never derived from tool/model results. */
+  shellCleanup?: () => boolean;
   intent?: (running: ActionRecord) => SplyceEventDraft;
   outcome?: (done: {
     /** The completion (or uncertain) action receipt committed with the event. */
@@ -355,6 +357,7 @@ export class NativePolicy {
   ): Promise<T> {
     this.check(toolCallId, toolName, signal);
     const permit = this.permits.get(toolCallId)!;
+    this.store.assertShellCleanup(permit.ownership.workspaceId);
     const serialized = canonical(args);
     const preparedDigest = this.ready.get(toolCallId);
     if (!preparedDigest) throw new AdmissionError("PREPARATION_REQUIRED");
@@ -442,10 +445,14 @@ export class NativePolicy {
     }
     await this.commitOutcome(
       action,
-      result.isError || signal?.aborted === true,
+      result.isError ||
+        signal?.aborted === true ||
+        events?.shellCleanup?.() === false,
       events,
       result,
     );
+    if (events?.shellCleanup?.() === false)
+      throw new AdmissionError("EFFECT_UNCERTAIN");
     return result;
   }
 
@@ -538,7 +545,13 @@ export class NativePolicy {
       effectState: uncertain ? "uncertain" : "observed-success",
       observedAt: new Date().toISOString(),
       resultArtifactId: null,
-      cleanupState: uncertain ? "uncertain" : "not-required",
+      cleanupState: events?.shellCleanup
+        ? events.shellCleanup()
+          ? "complete"
+          : "uncertain"
+        : uncertain
+          ? "uncertain"
+          : "not-required",
       errorClass: uncertain ? "execution" : "none",
       ...(action.approvedBy ? { approvedBy: action.approvedBy } : {}),
     };

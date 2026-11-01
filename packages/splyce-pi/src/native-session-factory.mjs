@@ -1392,6 +1392,8 @@ export function createNativeSessionFactory({
       },
       redact: (text) => resolver.redact(text),
       nativeRedact: (text, signal) => control.redact(text, signal),
+      shellExecutor: (request, signal, assertCurrent) =>
+        control.shell(request, signal, assertCurrent),
       async argumentsArtifactId(actionId, digest, args, signal) {
         const run = active();
         const serialized = serializeActionArguments(args);
@@ -1672,11 +1674,28 @@ export function createNativeSessionFactory({
           active.controller.abort();
           await state.runtime.session.abort();
           await active.promise;
-          if (state.deliveryError) throw state.deliveryError;
+          if (
+            state.deliveryError &&
+            state.deliveryError !== active.releaseError
+          )
+            throw state.deliveryError;
         }
       } catch (error) {
         failure = error;
       } finally {
+        // Keep the writer while the native registry cannot prove settlement.
+        if (
+          store.workspaceOwner(state.key.scopeId)?.ownerSessionId ===
+          state.key.sessionId
+        ) {
+          store.assertShellCleanup(state.key.scopeId);
+          if (state.activeRun)
+            store.releaseWorkspace(
+              state.key.scopeId,
+              state.key.sessionId,
+              state.activeRun.ownership.epoch,
+            );
+        }
         sessions.delete(state.key.sessionId);
         state.sessionMap.dispose(state.key);
         try {
@@ -1699,7 +1718,10 @@ export function createNativeSessionFactory({
         }
       }
       if (failure) throw failure;
-    })();
+    })().catch((error) => {
+      state.disposing = undefined;
+      throw error;
+    });
     return state.disposing;
   }
   function onEvents(listener) {
@@ -1899,12 +1921,31 @@ export function createNativeSessionFactory({
           // Derived memory failure must not change the completed turn.
         }
       }
-      store.releaseWorkspace(
-        state.key.scopeId,
-        state.key.sessionId,
-        active.ownership.epoch,
-      );
-      state.activeRun = undefined;
+      let releaseError;
+      try {
+        store.releaseWorkspace(
+          state.key.scopeId,
+          state.key.sessionId,
+          active.ownership.epoch,
+        );
+        state.activeRun = undefined;
+      } catch (error) {
+        releaseError = error;
+        active.releaseError = error;
+        terminal = {
+          kind: "turn.failed",
+          state: "failed",
+          payload: {
+            runId: active.runId,
+            error: {
+              code: "UNCERTAIN_EFFECT",
+              message: "Workspace cleanup requires reconciliation.",
+              correlationId: active.correlationId,
+              retryable: false,
+            },
+          },
+        };
+      }
       const record = {
         ...active.run,
         recordId: randomUUID(),
@@ -1914,6 +1955,7 @@ export function createNativeSessionFactory({
         { kind: "run", record },
       ]);
       active.completed = terminal.kind;
+      if (releaseError) throw releaseError;
     } finally {
       state.finishing = false;
     }
@@ -2041,6 +2083,8 @@ export function createNativeSessionFactory({
         .then(() => runPrompt(state, active))
         .catch((error) => {
           state.deliveryError = error;
+          // runPrompt already published and notified the terminal failure before retaining ownership.
+          if (error === active.releaseError && active.completed) return;
           for (const listener of eventListeners) {
             try {
               listener(state.key.sessionId);
