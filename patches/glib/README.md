@@ -1,0 +1,5 @@
+# GLib 0.18.5 backport
+
+`vendor/glib` is the published [glib 0.18.5 crate](https://static.crates.io/crates/glib/glib-0.18.5.crate), SHA-256 `233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5`, with the two-line change from [gtk-rs/gtk-rs-core commit b5a4071e439bef2b5eea76c3aa25e5ae84839e34](https://github.com/gtk-rs/gtk-rs-core/commit/b5a4071e439bef2b5eea76c3aa25e5ae84839e34). The package retains its original name, version and MIT license. Its `COPYRIGHT` and `LICENSE` files are included.
+
+On Linux with Rust, pkg-config, Python 3 and GLib development headers installed, run `bash patches/glib/test-backport.sh`. It runs the upstream iterator test in release mode, then compiles and runs the same test with the backport reversed in a temporary copy. The latter must fail. Set `GLIB_REGRESSION_LOCKFILE` to save the standalone regression's resolved Cargo lockfile; CI uploads it as an artifact. This closure is separate from the desktop lockfile; CI also checks the desktop Linux dependency selection. The temporary copy and build artifacts are removed afterward. These checks have not yet been run successfully.
