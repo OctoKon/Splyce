@@ -24,7 +24,6 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: 1.99.1
       CARGO_BUILD_JOBS: 1
-      GLIB_REGRESSION_LOCKFILE: ${{ runner.temp }}/glib-regression-Cargo.lock
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,6 +43,8 @@ jobs:
           cargo tree --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu -i glib@0.18.5 | tee "$RUNNER_TEMP/glib-tree.txt"
           grep -F "glib v0.18.5 ($GITHUB_WORKSPACE/vendor/glib)" "$RUNNER_TEMP/glib-tree.txt"
       - name: Verify GLib backport and reversed fix
+        env:
+          GLIB_REGRESSION_LOCKFILE: ${{ runner.temp }}/glib-regression-Cargo.lock
         run: bash patches/glib/test-backport.sh
       - name: Preserve regression dependency lock
         if: always()
