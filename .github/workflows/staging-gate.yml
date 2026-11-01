@@ -102,13 +102,16 @@ jobs:
           npm run prepare:runtime
           echo "$GITHUB_WORKSPACE/apps/desktop/src-tauri/resources/engine" >> "$GITHUB_PATH"
           echo "$GITHUB_WORKSPACE/apps/desktop/src-tauri/target/build-tools" >> "$GITHUB_PATH"
+      - name: Check standard desktop launcher guards
+        shell: pwsh
+        run: ./tests/bootstrap/run-standard-desktop.ps1 -SelfCheck
+      - name: Attest the standard worker token before building
+        shell: pwsh
+        run: ./tests/bootstrap/run-standard-desktop.ps1 -Mode Token
       - name: Install locked Node dependencies
         run: npm ci --ignore-scripts
       - name: Hydrate pinned Pi model data
         run: node vendor/pi/scripts/update-model-catalog-pin.mjs --hydrate-pinned
-      - name: Check standard desktop launcher guards
-        shell: pwsh
-        run: ./tests/bootstrap/run-standard-desktop.ps1 -SelfCheck
       - name: Build the uninstrumented release app
         run: npm run build:desktop
       - name: Run Rust tests

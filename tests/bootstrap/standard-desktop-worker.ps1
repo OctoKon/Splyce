@@ -1,7 +1,7 @@
 param(
   [string]$RunDirectory,
   [ValidatePattern('^[0-9a-f]{32}$')][string]$Nonce,
-  [ValidateSet('Smoke', 'Gate')][string]$Mode,
+  [ValidateSet('Token', 'Smoke', 'Gate')][string]$Mode,
   [switch]$SelfCheck
 )
 
@@ -118,9 +118,9 @@ public static class StandardDesktopIntegrity {
     $env:SPLYCE_SMOKE_APP = $runConfig.smokeApp
   } else { Remove-Item Env:SPLYCE_SMOKE_APP -ErrorAction SilentlyContinue }
   $node = Join-Path $root 'apps/desktop/src-tauri/resources/engine/node.exe'
-  $command = if ($Mode -eq 'Smoke') { Join-Path $root 'tests/bootstrap/release-smoke.mjs' } else { Join-Path $root 'apps/desktop/src-tauri/target/build-tools/node_modules/npm/bin/npm-cli.js' }
+  $command = if ($Mode -eq 'Token') { $node } elseif ($Mode -eq 'Smoke') { Join-Path $root 'tests/bootstrap/release-smoke.mjs' } else { Join-Path $root 'apps/desktop/src-tauri/target/build-tools/node_modules/npm/bin/npm-cli.js' }
   if (-not (Test-Path -LiteralPath $node -PathType Leaf) -or -not (Test-Path -LiteralPath $command -PathType Leaf)) { throw 'Pinned command is missing.' }
-  $arguments = if ($Mode -eq 'Smoke') { @('"' + $command + '"') } else { @('"' + $command + '"', 'run', 'test:release-gate') }
+  $arguments = if ($Mode -eq 'Token') { @('--version') } elseif ($Mode -eq 'Smoke') { @('"' + $command + '"') } else { @('"' + $command + '"', 'run', 'test:release-gate') }
   $child = Start-Process -FilePath $node -ArgumentList $arguments -WorkingDirectory $root -RedirectStandardOutput (Join-Path $RunDirectory 'stdout.log') -RedirectStandardError (Join-Path $RunDirectory 'stderr.log') -Wait -PassThru -WindowStyle Hidden
   $exitCode = $child.ExitCode
   $status = 'completed'

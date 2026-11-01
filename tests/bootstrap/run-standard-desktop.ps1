@@ -1,17 +1,15 @@
 param(
-  [ValidateSet('Smoke', 'Gate')][string]$Mode = 'Smoke',
+  [ValidateSet('Token', 'Smoke', 'Gate')][string]$Mode = 'Smoke',
   [switch]$SelfCheck
 )
 
 $ErrorActionPreference = 'Stop'
 
-function Quote-TaskPath([string]$Path) {
-  if (-not [IO.Path]::IsPathFullyQualified($Path) -or $Path.Contains('"')) { throw 'Task paths must be absolute Windows paths.' }
-  '"' + $Path + '"'
-}
-
-function Assert-RunResult($Completion, $Attestation, $Expected, $TaskInfo, [datetime]$StartedAfter) {
+function Assert-RunResult($Completion, $Attestation, $Expected, $WorkerExit) {
   if ($null -eq $Completion -or $null -eq $Attestation -or
+      $Attestation.elevated -isnot [bool] -or $Attestation.profileWritable -isnot [bool] -or
+      ($Attestation.elevationType -isnot [int] -and $Attestation.elevationType -isnot [long]) -or
+      ($Attestation.session -isnot [int] -and $Attestation.session -isnot [long]) -or
       $Completion.nonce -ne $Expected.nonce -or $Attestation.nonce -ne $Expected.nonce -or
       $Attestation.sid -ne $Expected.sid -or $Attestation.session -ne $Expected.session -or
       $Attestation.userProfile -ne $Expected.userProfile -or $Attestation.profileWritable -ne $true -or
@@ -23,9 +21,8 @@ function Assert-RunResult($Completion, $Attestation, $Expected, $TaskInfo, [date
       $Completion.exitCode -lt 0 -or $Completion.exitCode -gt 255) {
     throw 'Worker attestation, nonce, or completion failed.'
   }
-  if ($null -ne $TaskInfo -and ($TaskInfo.LastRunTime.ToUniversalTime() -lt $StartedAfter.AddSeconds(-1) -or
-      $TaskInfo.LastTaskResult -ne $Completion.exitCode)) {
-    throw 'Scheduled task freshness or exact exit result failed.'
+  if ($null -eq $WorkerExit -or $WorkerExit -ne $Completion.exitCode) {
+    throw 'Worker exit differed from completion.'
   }
   [int]$Completion.exitCode
 }
@@ -35,122 +32,282 @@ function Get-FinalExitCode([int]$ChildExitCode, $LauncherFailure, $CleanupFailur
   return $ChildExitCode
 }
 
-function Get-RootTask([string]$Name, [scriptblock]$Enumerate = { Get-ScheduledTask -TaskPath '\' -ErrorAction Stop }) {
-  $matches = @(& $Enumerate | Where-Object { $_.TaskName -eq $Name -and $_.TaskPath -eq '\' })
-  if ($matches.Count -gt 1) { throw 'Duplicate root task identity.' }
-  if ($matches.Count -eq 1) { return $matches[0] }
-  return $null
-}
-
-function Resolve-TaskPrincipalSid([string]$Principal) {
-  if ([string]::IsNullOrWhiteSpace($Principal)) { throw 'Task principal could not be resolved.' }
-  try {
-    if ($Principal -match '^S-\d+(?:-\d+)+$') {
-      return [Security.Principal.SecurityIdentifier]::new($Principal).Value
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+public static class StandardDesktopLauncher {
+  [StructLayout(LayoutKind.Sequential)] struct Label { public IntPtr Sid; public uint Attributes; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
+    public int Size; public string Reserved, Desktop, Title;
+    public uint X, Y, Width, Height, XChars, YChars, Fill, Flags;
+    public ushort Show, ReservedSize; public IntPtr ReservedBytes, Input, Output, Error;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr Process, Thread; public uint Id, ThreadId; }
+  [StructLayout(LayoutKind.Sequential)] struct BasicLimits {
+    public long ProcessTime, JobTime; public uint Flags; public UIntPtr MinWorkingSet, MaxWorkingSet;
+    public uint ActiveLimit; public UIntPtr Affinity; public uint Priority, Scheduling;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct ExtendedLimits {
+    public BasicLimits Basic; public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes;
+    public UIntPtr ProcessMemory, JobMemory, PeakProcessMemory, PeakJobMemory;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct Accounting {
+    public long UserTime, KernelTime, PeriodUserTime, PeriodKernelTime;
+    public uint PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses;
+  }
+  public sealed class Observation {
+    public string Sid { get; internal set; } public int Session { get; internal set; }
+    public int ElevationType { get; internal set; } public bool Elevated { get; internal set; }
+    public string Integrity { get; internal set; }
+  }
+  public static Observation Controller { get; private set; }
+  public static Observation Derived { get; private set; }
+  public static bool CleanupSucceeded { get; private set; } = true;
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr buffer, int size, out int returned);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool DuplicateTokenEx(IntPtr token, uint access, IntPtr attributes, int level, int type, out IntPtr primary);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool CreateRestrictedToken(IntPtr token, uint flags, uint disabled, IntPtr sids, uint deleted, IntPtr privileges, uint restricted, IntPtr restricting, out IntPtr result);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertStringSidToSidW(string text, out IntPtr sid);
+  [DllImport("advapi32.dll")] static extern uint GetLengthSid(IntPtr sid);
+  [DllImport("advapi32.dll")] static extern bool IsValidSid(IntPtr sid);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool SetTokenInformation(IntPtr token, int kind, IntPtr label, int size);
+  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessAsUserW(IntPtr token, string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref Startup startup, out ProcessInfo process);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessW(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref Startup startup, out ProcessInfo process);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObjectW(IntPtr attributes, string name);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int kind, ref ExtendedLimits limits, int size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint exit);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int kind, out Accounting info, int size, IntPtr returned);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr process, uint exit);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process, out uint exit);
+  static void Check(bool success, string operation) { if (!success) throw new Win32Exception(Marshal.GetLastWin32Error(), operation); }
+  static IntPtr Info(IntPtr token, int kind, int expectedSize = 0) {
+    int length;
+    bool probe = GetTokenInformation(token, kind, IntPtr.Zero, 0, out length);
+    int error = Marshal.GetLastWin32Error();
+    if (probe || (error != 122 && error != 24) || length <= 0 || length > 65536 || (expectedSize != 0 && length != expectedSize)) throw new InvalidOperationException("Invalid token information length: kind=" + kind + "; bytes=" + length + "; error=" + error);
+    IntPtr buffer = Marshal.AllocHGlobal(length);
+    try { int returned; Check(GetTokenInformation(token, kind, buffer, length, out returned), "Read token information");
+      if (returned != length) throw new InvalidOperationException("Incomplete token information."); return buffer;
+    } catch { Marshal.FreeHGlobal(buffer); throw; }
+  }
+  static int Scalar(IntPtr token, int kind) {
+    IntPtr buffer = Info(token, kind, 4);
+    try { return Marshal.ReadInt32(buffer); } finally { Marshal.FreeHGlobal(buffer); }
+  }
+  static Observation Inspect(IntPtr token) {
+    IntPtr user = Info(token, 1), label = IntPtr.Zero;
+    try {
+      IntPtr sid = Marshal.ReadIntPtr(user); if (!IsValidSid(sid)) throw new InvalidOperationException("Invalid user SID.");
+      label = Info(token, 25); IntPtr integritySid = Marshal.ReadIntPtr(label);
+      if (!IsValidSid(integritySid)) throw new InvalidOperationException("Invalid integrity SID.");
+      byte count = Marshal.ReadByte(integritySid, 1);
+      if (count == 0) throw new InvalidOperationException("Missing integrity RID.");
+      int rid = Marshal.ReadInt32(integritySid, 8 + 4 * (count - 1));
+      int elevated = Scalar(token, 20), type = Scalar(token, 18);
+      if ((elevated != 0 && elevated != 1) || type < 1 || type > 3 || Scalar(token, 8) != 1) throw new InvalidOperationException("Malformed primary token.");
+      return new Observation { Sid = new SecurityIdentifier(sid).Value, Session = Scalar(token, 12), Elevated = elevated == 1, ElevationType = type, Integrity = rid >= 8192 && rid < 12288 ? "Medium" : "OtherOrUnknown" };
+    } finally { Marshal.FreeHGlobal(user); if (label != IntPtr.Zero) Marshal.FreeHGlobal(label); }
+  }
+  static void RequireWorker(Observation candidate, Observation owner) {
+    if (candidate.Sid != owner.Sid || candidate.Session != owner.Session || candidate.Session <= 0 || candidate.Elevated || candidate.Integrity != "Medium" ||
+        (candidate.ElevationType != 1 && candidate.ElevationType != 3) || (owner.ElevationType == 2 && candidate.ElevationType != 3))
+      throw new InvalidOperationException("Derived token failed current-user medium-session validation.");
+  }
+  static IntPtr Restrict(IntPtr source) {
+    IntPtr restricted = IntPtr.Zero, mediumSid = IntPtr.Zero, buffer = IntPtr.Zero;
+    try {
+      // Only the new token is restricted; policy enforcement stays enabled.
+      Check(CreateRestrictedToken(source, 0x5, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero, out restricted), "Restrict current-user token");
+      Check(ConvertStringSidToSidW("S-1-16-8192", out mediumSid), "Create medium integrity SID");
+      int labelSize = Marshal.SizeOf<Label>(), sidSize = checked((int)GetLengthSid(mediumSid)), size = checked(labelSize + sidSize);
+      buffer = Marshal.AllocHGlobal(size);
+      var bytes = new byte[sidSize]; Marshal.Copy(mediumSid, bytes, 0, sidSize);
+      IntPtr copiedSid = IntPtr.Add(buffer, labelSize); Marshal.Copy(bytes, 0, copiedSid, sidSize);
+      Marshal.StructureToPtr(new Label { Sid = copiedSid, Attributes = 0x20 }, buffer, false);
+      Check(SetTokenInformation(restricted, 25, buffer, size), "Set derived token integrity");
+      return restricted;
+    } catch { if (restricted != IntPtr.Zero) CloseHandle(restricted); throw; }
+    finally { if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer); if (mediumSid != IntPtr.Zero) LocalFree(mediumSid); }
+  }
+  static string Quote(string path) {
+    if (!Path.IsPathFullyQualified(path) || path.IndexOfAny(new char[] {'"', '\r', '\n', '\0'}) >= 0) throw new ArgumentException("Expected absolute path.");
+    int trailing = path.Length - path.TrimEnd('\\').Length;
+    return "\"" + path + new string('\\', trailing) + "\"";
+  }
+  static int Launch(string shell, string root, string runDirectory, string nonce, string mode, bool failBeforeResume) {
+    if (!Regex.IsMatch(nonce, "\\A[0-9a-f]{32}\\z") || (mode != "Token" && mode != "Smoke" && mode != "Gate")) throw new ArgumentException("Invalid fixed worker invocation.");
+    string worker = Path.Combine(root, "tests", "bootstrap", "standard-desktop-worker.ps1");
+    string expectedDirectory = Path.Combine(root, "apps", "desktop", "src-tauri", "target", "bootstrap-standard-ci", nonce);
+    if (!String.Equals(Path.GetFullPath(runDirectory), Path.GetFullPath(expectedDirectory), StringComparison.OrdinalIgnoreCase) || !File.Exists(worker) || !File.Exists(shell) || !String.Equals(Path.GetFileName(shell), "pwsh.exe", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Invalid fixed worker paths.");
+    var command = new StringBuilder(Quote(shell) + " -NoProfile -NonInteractive -File " + Quote(worker) + " -RunDirectory " + Quote(runDirectory) + " -Nonce " + nonce + " -Mode " + mode);
+    IntPtr current = IntPtr.Zero, linked = IntPtr.Zero, primary = IntPtr.Zero, restricted = IntPtr.Zero, job = IntPtr.Zero;
+    ProcessInfo child = new ProcessInfo(); bool assigned = false;
+    CleanupSucceeded = true; Derived = null;
+    try {
+      Check(OpenProcessToken(GetCurrentProcess(), 0x8B, out current), "Open current primary token");
+      Controller = Inspect(current);
+      if (Controller.Session <= 0) throw new InvalidOperationException("Interactive current-user session required.");
+      if (Controller.Elevated) {
+        IntPtr source = current;
+        if (Controller.ElevationType == 2) {
+          IntPtr buffer = Info(current, 19, IntPtr.Size);
+          try { linked = Marshal.ReadIntPtr(buffer); } finally { Marshal.FreeHGlobal(buffer); }
+          if (linked == IntPtr.Zero) throw new InvalidOperationException("Linked token unavailable.");
+          Observation limited = Inspect(linked);
+          if (limited.Sid != Controller.Sid || limited.Session != Controller.Session || limited.Elevated || limited.ElevationType != 3) throw new InvalidOperationException("Linked token is not the current limited token.");
+          Check(DuplicateTokenEx(linked, 0x8B, IntPtr.Zero, 2, 1, out primary), "Duplicate linked primary token"); source = primary;
+        } else if (Controller.ElevationType != 1) throw new InvalidOperationException("Unexpected elevated token type.");
+        restricted = Restrict(source);
+        Derived = Inspect(restricted); RequireWorker(Derived, Controller);
+      } else { RequireWorker(Controller, Controller); Derived = Controller; }
+      job = CreateJobObjectW(IntPtr.Zero, null); Check(job != IntPtr.Zero, "Create owned worker job");
+      var limits = new ExtendedLimits { Basic = new BasicLimits { Flags = 0x2000 } };
+      Check(SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf<ExtendedLimits>()), "Set kill-on-close job");
+      var startup = new Startup { Size = Marshal.SizeOf<Startup>(), Desktop = "winsta0\\default", Flags = 1, Show = 0 };
+      const uint flags = 0x08000004; // No console; assign to the owned job before any worker code runs.
+      if (Controller.Elevated) Check(CreateProcessAsUserW(restricted, shell, command, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, root, ref startup, out child), "Create restricted worker");
+      else Check(CreateProcessW(shell, command, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, root, ref startup, out child), "Create standard worker");
+      Check(AssignProcessToJobObject(job, child.Process), "Assign suspended worker job"); assigned = true;
+      if (failBeforeResume) throw new InvalidOperationException("Selfcheck: before-resume failure.");
+      Check(ResumeThread(child.Thread) != 0xFFFFFFFF, "Resume owned worker");
+      uint waited = WaitForSingleObject(child.Process, mode == "Gate" ? 5700000u : mode == "Token" ? 120000u : 720000u);
+      if (waited == 258) throw new TimeoutException("Owned worker timed out.");
+      Check(waited == 0, "Wait for owned worker");
+      uint exit; Check(GetExitCodeProcess(child.Process, out exit), "Read exact worker exit");
+      if (exit > 255) throw new InvalidOperationException("Worker exit is outside completion range.");
+      return (int)exit;
+    } finally {
+      try {
+        if (assigned) {
+          Check(TerminateJobObject(job, 1), "Settle owned worker descendants");
+          var timer = Stopwatch.StartNew(); Accounting accounting;
+          do { Check(QueryInformationJobObject(job, 1, out accounting, Marshal.SizeOf<Accounting>(), IntPtr.Zero), "Verify owned job cleanup");
+            if (accounting.ActiveProcesses == 0) break; Thread.Sleep(20);
+          } while (timer.ElapsedMilliseconds < 5000);
+          if (accounting.ActiveProcesses != 0) throw new InvalidOperationException("Owned job still has active processes.");
+        } else if (child.Process != IntPtr.Zero) {
+          Check(TerminateProcess(child.Process, 1), "Terminate unstarted owned worker");
+          Check(WaitForSingleObject(child.Process, 5000) == 0, "Verify unstarted worker cleanup");
+        }
+      } catch { CleanupSucceeded = false; throw; }
+      finally {
+        if (job != IntPtr.Zero) CloseHandle(job);
+        if (child.Thread != IntPtr.Zero) CloseHandle(child.Thread);
+        if (child.Process != IntPtr.Zero) CloseHandle(child.Process);
+        if (restricted != IntPtr.Zero) CloseHandle(restricted);
+        if (primary != IntPtr.Zero) CloseHandle(primary);
+        if (linked != IntPtr.Zero) CloseHandle(linked);
+        if (current != IntPtr.Zero) CloseHandle(current);
+      }
     }
-    return ([Security.Principal.NTAccount]::new($Principal)).Translate([Security.Principal.SecurityIdentifier]).Value
-  } catch { throw 'Task principal could not be resolved.' }
-}
-
-function Assert-OwnedTask($Task, $Expected) {
-  if ($null -eq $Task -or $Task.TaskName -ne $Expected.name -or $Task.TaskPath -ne '\' -or
-      (Resolve-TaskPrincipalSid $Task.Principal.UserId) -ne $Expected.sid -or $Task.Principal.LogonType -ne 'Interactive' -or
-      $Task.Principal.RunLevel -ne 'Limited' -or @($Task.Actions | Where-Object { $null -ne $_ }).Count -ne 1 -or
-      $Task.Actions[0].Execute -ne $Expected.shell -or $Task.Actions[0].Arguments -ne $Expected.arguments -or
-      $Task.Actions[0].WorkingDirectory -ne $Expected.root -or
-      @($Task.Triggers | Where-Object { $null -ne $_ }).Count -ne 0) {
-    throw 'Task ownership, action, principal, or triggers differ.'
+  }
+  public static int RunWorker(string shell, string root, string directory, string nonce, string mode) { return Launch(shell, root, directory, nonce, mode, false); }
+  public static bool SelfCheck(string shell, string root) {
+    if (Quote(@"C:\Program Files\Splyce & CI\") != "\"C:\\Program Files\\Splyce & CI\\\\\"") throw new InvalidOperationException("Windows argument quoting failed.");
+    var owner = new Observation { Sid = "same", Session = 1, Elevated = true, ElevationType = 2, Integrity = "OtherOrUnknown" };
+    var valid = new Observation { Sid = "same", Session = 1, Elevated = false, ElevationType = 3, Integrity = "Medium" };
+    RequireWorker(valid, owner);
+    for (int change = 0; change < 7; change++) {
+      var invalid = new Observation { Sid = "same", Session = 1, Elevated = false, ElevationType = 3, Integrity = "Medium" };
+      if (change == 0) invalid.Sid = "other";
+      if (change == 1) invalid.Session = 2;
+      if (change == 2) invalid.Elevated = true;
+      if (change == 3) invalid.Integrity = "High";
+      if (change == 4) invalid.Integrity = "Low";
+      if (change == 5) invalid.Integrity = "OtherOrUnknown";
+      if (change == 6) invalid.ElevationType = 1;
+      bool refused = false;
+      try { RequireWorker(invalid, owner); } catch (InvalidOperationException) { refused = true; }
+      if (!refused) throw new InvalidOperationException("Native token guard selfcheck failed: case=" + change);
+    }
+    IntPtr current, derived = IntPtr.Zero;
+    Check(OpenProcessToken(GetCurrentProcess(), 0x8B, out current), "Inspect selfcheck current token");
+    try {
+      Observation observed = Inspect(current);
+      if (observed.Elevated) return false;
+      derived = Restrict(current); RequireWorker(Inspect(derived), observed);
+    } finally { if (derived != IntPtr.Zero) CloseHandle(derived); CloseHandle(current); }
+    string nonce = Guid.NewGuid().ToString("N"), directory = Path.Combine(root, "apps", "desktop", "src-tauri", "target", "bootstrap-standard-ci", nonce);
+    bool rejected = false;
+    try { Launch(shell, root, directory, nonce, "Token", true); }
+    catch (InvalidOperationException error) { if (error.Message != "Selfcheck: before-resume failure.") throw; rejected = true; }
+    if (!rejected || !CleanupSucceeded) throw new InvalidOperationException("Before-resume cleanup selfcheck failed.");
+    return true;
   }
 }
+'@
 
+$root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 if ($SelfCheck) {
-  $quoted = Quote-TaskPath 'C:\Program Files\Splyce & CI\worker.ps1'
-  if ($quoted -cne '"C:\Program Files\Splyce & CI\worker.ps1"') { throw 'Task argument quoting failed.' }
   $expected = [pscustomobject]@{ nonce = 'abc'; sid = 'same'; session = 1; userProfile = 'C:\Users\test'; controllerElevationType = 2 }
   $attestation = [pscustomobject]@{ nonce = 'abc'; sid = 'same'; session = 1; userProfile = 'C:\Users\test'; profileWritable = $true; integrity = 'Medium'; elevated = $false; elevationType = 3 }
   $completion = [pscustomobject]@{ nonce = 'abc'; status = 'completed'; exitCode = 7 }
-  $fresh = [pscustomobject]@{ LastRunTime = [datetime]::UtcNow; LastTaskResult = 7 }
-  $started = [datetime]::UtcNow.AddSeconds(-2)
-  if ((Assert-RunResult $completion $attestation $expected $fresh $started) -ne 7 -or (Get-FinalExitCode 7 $null $null) -ne 7 -or
-      (Get-FinalExitCode 7 $null 'cleanup failed') -ne 1) { throw 'Exit or cleanup decision failed.' }
-  foreach ($bad in @(
-    @{ completion = [pscustomobject]@{ nonce = 'wrong'; status = 'completed'; exitCode = 7 }; taskInfo = $fresh },
-    @{ completion = $completion; taskInfo = [pscustomobject]@{ LastRunTime = $started.AddMinutes(-1); LastTaskResult = 7 } },
-    @{ completion = [pscustomobject]@{ nonce = 'abc'; status = 'failed'; exitCode = 7 }; taskInfo = $fresh }
-  )) {
-    $rejected = $false
-    try { Assert-RunResult $bad.completion $attestation $expected $bad.taskInfo $started | Out-Null } catch { $rejected = $true }
-    if (-not $rejected) { throw 'Invalid nonce, stale run, or incomplete worker was accepted.' }
-  }
+  if ((Assert-RunResult $completion $attestation $expected 7) -ne 7 -or (Get-FinalExitCode 7 $null $null) -ne 7 -or
+      (Get-FinalExitCode 7 $null 'cleanup failed') -ne 1 -or (Get-FinalExitCode 7 'launch failed' $null) -ne 1) { throw 'Exit or cleanup decision failed.' }
+  $cases = 0
   foreach ($change in @(
-    @{ key = 'sid'; value = 'wrong' }, @{ key = 'session'; value = 2 },
+    @{ key = 'nonce'; value = 'wrong' }, @{ key = 'sid'; value = 'wrong' }, @{ key = 'session'; value = 2 },
     @{ key = 'userProfile'; value = 'C:\Users\wrong' }, @{ key = 'profileWritable'; value = $false },
     @{ key = 'elevated'; value = $true }, @{ key = 'integrity'; value = 'High' },
-    @{ key = 'elevationType'; value = 1 }
+    @{ key = 'integrity'; value = 'Low' }, @{ key = 'integrity'; value = 'OtherOrUnknown' },
+    @{ key = 'elevationType'; value = 1 }, @{ key = 'elevationType'; value = 9 },
+    @{ key = 'elevationType'; value = '3' }, @{ key = 'elevated'; value = 'false' },
+    @{ key = 'session'; value = '1' }, @{ key = 'profileWritable'; value = 'true' }
   )) {
-    $badToken = $attestation | ConvertTo-Json | ConvertFrom-Json
-    $badToken.($change.key) = $change.value
+    $bad = $attestation | ConvertTo-Json | ConvertFrom-Json
+    $bad.($change.key) = $change.value
     $rejected = $false
-    try { Assert-RunResult $completion $badToken $expected $fresh $started | Out-Null } catch { $rejected = $true }
+    try { Assert-RunResult $completion $bad $expected 7 | Out-Null } catch { $rejected = $true }
     if (-not $rejected) { throw "Invalid token field $($change.key) was accepted." }
+    $cases++
   }
-  $lookupFailed = $false
-  try { Get-RootTask 'selfcheck' { throw 'lookup unavailable' } | Out-Null } catch { $lookupFailed = $true }
-  if (-not $lookupFailed -or (Get-FinalExitCode 0 $null $(if ($lookupFailed) { 'lookup failed' })) -ne 1) {
-    throw 'Task lookup errors must block success.'
-  }
-  $taskIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
-  $taskAction = New-ScheduledTaskAction -Execute 'C:\Program Files\Splyce & CI\pwsh.exe' -Argument $quoted -WorkingDirectory 'C:\repo'
-  $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskIdentity.User.Value -LogonType Interactive -RunLevel Limited
-  $taskDefinition = New-ScheduledTask -Action $taskAction -Principal $taskPrincipal
-  $taskExpected = [pscustomobject]@{ name = 'selfcheck'; user = $taskIdentity.Name; sid = $taskIdentity.User.Value; shell = $taskAction.Execute; arguments = $taskAction.Arguments; root = $taskAction.WorkingDirectory }
-  $taskObserved = [pscustomobject]@{ TaskName = 'selfcheck'; TaskPath = '\'; Principal = $taskDefinition.Principal; Actions = $taskDefinition.Actions; Triggers = $taskDefinition.Triggers }
-  $materializedPrincipalSid = if ($taskObserved.Principal.UserId -match '^S-\d+(?:-\d+)+$') {
-    [Security.Principal.SecurityIdentifier]::new($taskObserved.Principal.UserId).Value
-  } else {
-    ([Security.Principal.NTAccount]::new($taskObserved.Principal.UserId)).Translate([Security.Principal.SecurityIdentifier]).Value
-  }
-  if ($materializedPrincipalSid -ne $taskExpected.sid) { throw 'Principal representation regression setup failed.' }
-  $nativeLiteralExpected = [pscustomobject]@{ name = $taskExpected.name; user = $taskObserved.Principal.UserId; sid = $taskExpected.sid; shell = $taskExpected.shell; arguments = $taskExpected.arguments; root = $taskExpected.root }
-  try { Assert-OwnedTask $taskObserved $nativeLiteralExpected } catch { throw 'Native principal fixture failed its literal-positive control.' }
-  try { Assert-OwnedTask $taskObserved $taskExpected } catch { throw 'Equivalent current-account native principal representation was rejected.' }
-  $sidTaskObserved = [pscustomobject]@{ TaskName = $taskObserved.TaskName; TaskPath = $taskObserved.TaskPath; Principal = [pscustomobject]@{ UserId = $taskExpected.sid; LogonType = $taskDefinition.Principal.LogonType; RunLevel = $taskDefinition.Principal.RunLevel }; Actions = $taskObserved.Actions; Triggers = $taskObserved.Triggers }
-  if ($sidTaskObserved.Principal.UserId -eq $taskExpected.user) { throw 'SID representation regression setup failed.' }
-  $sidLiteralExpected = [pscustomobject]@{ name = $taskExpected.name; user = $taskExpected.sid; sid = $taskExpected.sid; shell = $taskExpected.shell; arguments = $taskExpected.arguments; root = $taskExpected.root }
-  try { Assert-OwnedTask $sidTaskObserved $sidLiteralExpected } catch { throw 'SID fixture failed its literal-positive control.' }
-  try { Assert-OwnedTask $sidTaskObserved $taskExpected } catch { throw 'Equivalent current-account SID representation was rejected.' }
-  $sidTaskObserved.Principal.UserId = $taskIdentity.Name
-  Assert-OwnedTask $sidTaskObserved $taskExpected
-  $wrongSid = if ($taskExpected.sid -ne 'S-1-0-0') { 'S-1-0-0' } else { 'S-1-5-18' }
-  $unknownPrincipal = $env:COMPUTERNAME + '\splyce-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
-  foreach ($change in @(
-    @{ key = 'UserId'; value = $wrongSid; label = 'wrong SID' },
-    @{ key = 'UserId'; value = $unknownPrincipal; label = 'unresolved principal' },
-    @{ key = 'Execute'; value = 'C:\other.exe'; label = 'executable' },
-    @{ key = 'Trigger'; value = [pscustomobject]@{ enabled = $true }; label = 'trigger' }
+  foreach ($bad in @(
+    $null, [pscustomobject]@{ nonce = 'wrong'; status = 'completed'; exitCode = 7 },
+    [pscustomobject]@{ nonce = 'abc'; status = 'failed'; exitCode = 7 },
+    [pscustomobject]@{ nonce = 'abc'; status = 'completed'; exitCode = '7' },
+    [pscustomobject]@{ nonce = 'abc'; status = 'completed'; exitCode = -1 },
+    [pscustomobject]@{ nonce = 'abc'; status = 'completed'; exitCode = 256 }
   )) {
-    $badTask = [pscustomobject]@{ TaskName = 'selfcheck'; TaskPath = '\'; Principal = [pscustomobject]@{ UserId = $taskExpected.user; LogonType = 'Interactive'; RunLevel = 'Limited' }; Actions = @([pscustomobject]@{ Execute = $taskExpected.shell; Arguments = $taskExpected.arguments; WorkingDirectory = $taskExpected.root }); Triggers = $null }
-    if ($change.key -eq 'UserId') { $badTask.Principal.UserId = $change.value }
-    elseif ($change.key -eq 'Execute') { $badTask.Actions[0].Execute = $change.value }
-    else { $badTask.Triggers = @($change.value) }
     $rejected = $false
-    try { Assert-OwnedTask $badTask $taskExpected } catch { $rejected = $true }
-    if (-not $rejected) { throw "Invalid task $($change.label) was accepted." }
+    try { Assert-RunResult $bad $attestation $expected 7 | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Invalid or missing completion was accepted.' }
+    $cases++
   }
-  & (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'standard-desktop-worker.ps1') -SelfCheck
+  foreach ($workerExit in @($null, 0)) {
+    $rejected = $false
+    try { Assert-RunResult $completion $attestation $expected $workerExit | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Missing or mismatched native exit was accepted.' }
+    $cases++
+  }
+  $expected.controllerElevationType = 1
+  $attestation.elevationType = 1
+  if ((Assert-RunResult $completion $attestation $expected 7) -ne 7) { throw 'Non-split standard token was rejected.' }
+  $shell = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+  $cleanupTested = [StandardDesktopLauncher]::SelfCheck($shell, $root)
+  if (-not $cleanupTested) { Write-Output 'Suspended-process cleanup fixture requires an already standard controller; early Token mode tests the elevated route.' }
+  & $shell -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'standard-desktop-worker.ps1') -SelfCheck
   if ($LASTEXITCODE -ne 0) { throw 'Profile probe collision selfcheck failed.' }
-  Write-Output 'Standard desktop validation selfcheck passed.'
+  Write-Output "Standard desktop validation selfcheck passed; rejection cases=$cases; suspended cleanup tested=$cleanupTested."
   return
 }
-
-$root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $node = Join-Path $root 'apps/desktop/src-tauri/resources/engine/node.exe'
 $npm = Join-Path $root 'apps/desktop/src-tauri/target/build-tools/node_modules/npm/bin/npm-cli.js'
 $worker = Join-Path $PSScriptRoot 'standard-desktop-worker.ps1'
 $nonce = [guid]::NewGuid().ToString('N')
-$taskName = "Splyce-Standard-CI-$nonce"
 $runDirectory = Join-Path $root "apps/desktop/src-tauri/target/bootstrap-standard-ci/$nonce"
-$registrationAttempted = $false
 $launcherFailure = $null
 $cleanupFailure = $null
 $childExitCode = 1
@@ -198,54 +355,15 @@ try {
     nonce = $nonce; sid = $identity.User.Value; session = $session
     userProfile = $env:USERPROFILE; controllerElevationType = $controllerElevation.elevationType
   }
-  $startedAfter = [datetime]::UtcNow
-  $taskInfo = $null
-  $arguments = '-NoProfile -NonInteractive -File {0} -RunDirectory {1} -Nonce {2} -Mode {3}' -f (Quote-TaskPath $worker), (Quote-TaskPath $runDirectory), $nonce, $Mode
-  $taskExpected = [pscustomobject]@{ name = $taskName; sid = $identity.User.Value; shell = $shell; arguments = $arguments; root = $root }
-  if ($controllerElevation.elevated -eq $false) {
-    $workerProcess = Start-Process -FilePath $shell -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden -Wait -PassThru
-    $workerExit = $workerProcess.ExitCode
-  } else {
-    if (Get-RootTask $taskName) { throw 'Task nonce collision.' }
-    $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Limited
-    $action = New-ScheduledTaskAction -Execute $shell -Argument $arguments -WorkingDirectory $root
-    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes $(if ($Mode -eq 'Gate') { 100 } else { 15 }))
-    $task = New-ScheduledTask -Action $action -Principal $principal -Settings $settings
-    $registrationAttempted = $true
-    Register-ScheduledTask -TaskName $taskName -InputObject $task -ErrorAction Stop | Out-Null
-    $registeredTask = Get-RootTask $taskName
-    Assert-OwnedTask $registeredTask $taskExpected
-    $startedAfter = [datetime]::UtcNow
-    Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-    $deadline = [datetime]::UtcNow.AddMinutes($(if ($Mode -eq 'Gate') { 95 } else { 12 }))
-    do {
-      Start-Sleep -Seconds 2
-      $state = Get-RootTask $taskName
-      Assert-OwnedTask $state $taskExpected
-      $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
-      if ($state.State -ne 'Running' -and (Test-Path -LiteralPath (Join-Path $runDirectory 'completion.json') -PathType Leaf)) { break }
-    } while ([datetime]::UtcNow -lt $deadline)
-    if ($state.State -eq 'Running') { throw 'Scheduled worker timed out.' }
-  }
+  $workerExit = [StandardDesktopLauncher]::RunWorker($shell, $root, $runDirectory, $nonce, $Mode)
   $completion = Get-Content -LiteralPath (Join-Path $runDirectory 'completion.json') -Raw | ConvertFrom-Json
   $attestation = Get-Content -LiteralPath (Join-Path $runDirectory 'attestation.json') -Raw | ConvertFrom-Json
-  $childExitCode = Assert-RunResult $completion $attestation $expected $taskInfo $startedAfter
-  if ($null -ne $workerExit -and $workerExit -ne $childExitCode) { throw 'Direct worker exit differed from completion.' }
+  $childExitCode = Assert-RunResult $completion $attestation $expected $workerExit
   $attestationValidated = $true
 } catch {
   $launcherFailure = $_
 } finally {
-  if ($registrationAttempted) {
-    try {
-      $ownedTask = Get-RootTask $taskName
-      if ($ownedTask) {
-        Assert-OwnedTask $ownedTask $taskExpected
-        if ($ownedTask.State -eq 'Running') { Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop }
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
-      }
-      if (Get-RootTask $taskName) { throw 'Task remains registered.' }
-    } catch { $cleanupFailure = $_ }
-  }
+  if (-not [StandardDesktopLauncher]::CleanupSucceeded) { $cleanupFailure = 'Owned worker cleanup failed.' }
   $finalExitCode = Get-FinalExitCode $childExitCode $launcherFailure $cleanupFailure
   try {
     if ($null -eq $receiptStream) { throw 'Diagnostic receipt handle was not opened.' }
@@ -260,7 +378,17 @@ try {
         elevationType = if ($attestation.elevationType -in @(1, 2, 3)) { [int]$attestation.elevationType } else { $null }
         profileWritable = if ($attestation.profileWritable -is [bool]) { $attestation.profileWritable } else { $null }
       }
-      taskCleanupSucceeded = $null -eq $cleanupFailure
+      ownedProcessCleanupSucceeded = $null -eq $cleanupFailure
+      controllerToken = @{
+        integrity = if ([StandardDesktopLauncher]::Controller.Integrity -in @('Medium', 'OtherOrUnknown')) { [StandardDesktopLauncher]::Controller.Integrity } else { $null }
+        elevated = if ($controllerElevation.elevated -is [bool]) { $controllerElevation.elevated } else { $null }
+        elevationType = if ($controllerElevation.elevationType -in @(1, 2, 3)) { [int]$controllerElevation.elevationType } else { $null }
+      }
+      derivedToken = @{
+        integrity = if ([StandardDesktopLauncher]::Derived.Integrity -in @('Medium', 'OtherOrUnknown')) { [StandardDesktopLauncher]::Derived.Integrity } else { $null }
+        elevated = if ($null -ne [StandardDesktopLauncher]::Derived) { [StandardDesktopLauncher]::Derived.Elevated } else { $null }
+        elevationType = if ([StandardDesktopLauncher]::Derived.ElevationType -in @(1, 2, 3)) { [StandardDesktopLauncher]::Derived.ElevationType } else { $null }
+      }
       completion = @{
         status = if ($completion.status -in @('completed', 'failed')) { $completion.status } else { $null }
         exitCode = if (($completion.exitCode -is [int] -or $completion.exitCode -is [long]) -and
@@ -285,7 +413,7 @@ foreach ($name in @('stdout.log', 'stderr.log', 'worker-error.txt')) {
   }
 }
 if ($launcherFailure) { Write-Output "Launcher failed: $launcherFailure" }
-if ($cleanupFailure) { Write-Output "Task cleanup failed: $cleanupFailure" }
+if ($cleanupFailure) { Write-Output "Owned process cleanup failed: $cleanupFailure" }
 if ($receiptFailure) { Write-Output "Diagnostic receipt failed: $receiptFailure" }
 if ($finalExitCode -eq 0) { Write-Output "Standard desktop $Mode passed; nonce=$nonce" }
 exit $finalExitCode
