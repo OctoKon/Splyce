@@ -42,7 +42,7 @@ struct Key {
 #[serde(tag = "method", deny_unknown_fields)]
 enum Op {
     #[serde(rename = "shell.start")]
-    Start { id: String, params: Start },
+    Start { id: String, params: Box<Start> },
     #[serde(rename = "shell.poll")]
     Poll { id: String, params: Poll },
     #[serde(rename = "shell.cancel")]

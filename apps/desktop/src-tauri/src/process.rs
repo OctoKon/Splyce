@@ -1766,12 +1766,15 @@ pub(crate) mod windows {
             ] {
                 assert!(native_reply(call("credential.redact", params), &mut scopes).is_err());
             }
-            let copies = MAX_FRAME_BYTES / "redaction-private-lane".len() + 1;
-            let text = "redaction-private-lane".repeat(copies);
-            assert!(text.len() > MAX_FRAME_BYTES);
-            let value = reply(
-                native_reply(call("credential.redact", json!({"text":text})), &mut scopes).unwrap(),
-            );
+            let marker = "redaction-private-lane";
+            let overhead = encode_frame(&call("credential.redact", json!({"text":""})))
+                .unwrap()
+                .len();
+            let copies = (MAX_FRAME_BYTES - overhead) / marker.len();
+            let frame = call("credential.redact", json!({"text":marker.repeat(copies)}));
+            assert!(redaction_frame_fits(&frame));
+            assert!(encode_frame(&frame).unwrap().len() <= MAX_FRAME_BYTES);
+            let value = reply(native_reply(frame, &mut scopes).unwrap());
             assert_eq!(
                 value,
                 json!({"native":{"id":"native1","ok":true,"value":{
@@ -1784,7 +1787,14 @@ pub(crate) mod windows {
                     .unwrap()
                     .contains("redaction-private-lane")
             );
+            let oversized = marker.repeat(MAX_FRAME_BYTES / marker.len() + 1);
+            assert!(oversized.len() > MAX_FRAME_BYTES);
+            assert!(!redaction_frame_fits(&call(
+                "credential.redact",
+                json!({"text":oversized})
+            )));
             for text in [
+                oversized,
                 "x".repeat(crate::credentials::MAX_REDACTION_TEXT_BYTES + 1),
                 "redaction-private-lane".repeat(MAX_FRAME_BYTES / 21),
             ] {
