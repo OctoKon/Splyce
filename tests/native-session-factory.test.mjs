@@ -1814,10 +1814,6 @@ for (const mode of ["auto", "bypass"])
     composedHostSession(false, mode),
   );
 
-// Cargo's test artifact is built before any measured session deadline starts.
-test.before(() => {
-  if (process.platform === "win32") shellFixturePath();
-});
 function nativeToolSession(loseCleanupReply) {
   return async (t) => {
     const bodies = [];
@@ -2377,11 +2373,17 @@ function nativeToolSession(loseCleanupReply) {
     assert.doesNotMatch(JSON.stringify(bodies[1].messages), /PRIVATE_MARKER/u);
   };
 }
-for (const loseCleanupReply of [false, true])
-  test(
-    loseCleanupReply
-      ? "native session retains both writers after loss of shell cleanup proof"
-      : "native session dispatches workspace tools with channel metadata and waits for write approval",
-    { timeout: 30000 },
-    nativeToolSession(loseCleanupReply),
-  );
+test.describe("native shell sessions", () => {
+  // Only these sessions use the Cargo host; unrelated filtered tests never build it.
+  test.before(() => {
+    if (process.platform === "win32") shellFixturePath();
+  });
+  for (const loseCleanupReply of [false, true])
+    test(
+      loseCleanupReply
+        ? "native session retains both writers after loss of shell cleanup proof"
+        : "native session dispatches workspace tools with channel metadata and waits for write approval",
+      { timeout: 30000 },
+      nativeToolSession(loseCleanupReply),
+    );
+});
