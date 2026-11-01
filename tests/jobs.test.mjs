@@ -703,3 +703,92 @@ test("resume continues from now and reports, not replays, the paused gap", () =>
     "INVALID_JOB",
   );
 });
+
+test("a clock moved backwards replays nothing and is signalled", () => {
+  const { plans, states } = run(
+    [interval()],
+    [HOUR - 1, 3 * HOUR, HOUR - 1, 2 * HOUR, 3 * HOUR],
+  );
+  assert.deepEqual(plans.map(ids), [[], ["job-i@r1#3"], [], [], []]);
+  assert.deepEqual(plans[2].clockRegressed, ["job-i"]);
+  assert.deepEqual(plans[3].clockRegressed, ["job-i"]);
+  assert.deepEqual(plans[4].clockRegressed, []);
+  assert.equal(states[0].cursorUtcMs, 3 * HOUR);
+});
+
+test("a clock jumping forward is a late window: one run at most", () => {
+  const { plans } = run(
+    [interval({ catchUp: "latest" })],
+    [HOUR - 1, 48 * HOUR + 7],
+  );
+  assert.equal(plans[1].dispatch.length, 1);
+  assert.deepEqual(
+    plans[1].missed.map((m) => [m.reason, m.count]),
+    [["late", 47]],
+  );
+});
+
+test("daily jobs across a DST weekend dispatch each local day exactly once", () => {
+  const job = daily({
+    timeZone: "America/New_York",
+    schedule: { kind: "daily", localTime: "01:30" },
+  });
+  const ticks = [];
+  for (
+    let t = Date.UTC(2026, 9, 30);
+    t <= Date.UTC(2026, 10, 3);
+    t += 15 * 60_000
+  )
+    ticks.push(t);
+  let states = [];
+  const dispatched = [];
+  for (const now of ticks) {
+    const plan = planTick({
+      nowUtcMs: now,
+      schedulingEnabled: true,
+      jobs: [job],
+      states,
+    });
+    states = plan.states;
+    for (const d of plan.dispatch) {
+      dispatched.push(d.occurrenceId);
+      states = [completeOccurrence(states[0], d.occurrenceId, "succeeded")];
+    }
+  }
+  assert.deepEqual(dispatched, [
+    "job-a@r1#2026-10-30",
+    "job-a@r1#2026-10-31",
+    "job-a@r1#2026-11-01",
+    "job-a@r1#2026-11-02",
+  ]);
+});
+
+test("a changed revision starts fresh and never runs old slots", () => {
+  const v1 = interval({ catchUp: "latest" });
+  const v2 = interval({
+    revision: "r2",
+    catchUp: "latest",
+    schedule: { kind: "interval", everyMs: 2 * HOUR, anchorUtcMs: 0 },
+  });
+  let { states } = run([v1], [HOUR - 1, HOUR]);
+  states = [completeOccurrence(states[0], "job-i@r1#1", "succeeded")];
+  const { plans, states: after } = run([v2], [5 * HOUR, 6 * HOUR], { states });
+  assert.deepEqual(plans.map(ids), [[], ["job-i@r2#3"]]);
+  assert.deepEqual(
+    plans[0].missed.map((m) => [m.reason, m.count]),
+    [["superseded", 2]],
+  );
+  assert.equal(after[0].revision, "r2");
+});
+
+test("a revision change keeps a running occurrence recorded", () => {
+  const { states } = run([interval()], [HOUR - 1, HOUR]);
+  const plan = planTick({
+    nowUtcMs: 2 * HOUR,
+    schedulingEnabled: true,
+    jobs: [interval({ revision: "r2" })],
+    states,
+  });
+  assert.equal(plan.states[0].running.occurrenceId, "job-i@r1#1");
+  assert.deepEqual(ids(plan), []);
+});
