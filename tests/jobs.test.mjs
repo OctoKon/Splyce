@@ -10,7 +10,10 @@ import {
   JobError,
   MIN_INTERVAL_MS,
   nextOccurrence,
+  completeOccurrence,
+  pauseJob,
   planTick,
+  resumeJob,
   resolveWallTime,
   scanOccurrences,
   validateJob,
@@ -619,4 +622,84 @@ test("a job created while disabled starts disarmed and re-arms on the first enab
   const { plans } = run([job], [{ now: 0, enabled: false }, HOUR, 2 * HOUR]);
   assert.deepEqual(plans.map(ids), [[], [], ["job-i@r1#2"]]);
   assert.equal(plans[1].missed[0].reason, "scheduler_disabled");
+});
+
+test("a slot never starts while the previous occurrence is running", () => {
+  const { plans, states } = run(
+    [interval()],
+    [HOUR - 1, HOUR, 2 * HOUR, 3 * HOUR],
+  );
+  assert.deepEqual(plans.map(ids), [[], ["job-i@r1#1"], [], []]);
+  assert.deepEqual(
+    plans.slice(2).map((p) => p.missed.map((m) => m.reason)),
+    [["overlap"], ["overlap"]],
+  );
+  assert.equal(states[0].running.occurrenceId, "job-i@r1#1");
+  assert.equal(states[0].running.startedUtcMs, HOUR);
+});
+
+test("completion frees the job for its next slot and records the outcome", () => {
+  let { states } = run([interval()], [HOUR - 1, HOUR]);
+  states = [completeOccurrence(states[0], "job-i@r1#1", "uncertain")];
+  assert.equal(states[0].running, undefined);
+  assert.deepEqual(states[0].lastOutcome, {
+    occurrenceId: "job-i@r1#1",
+    outcome: "uncertain",
+  });
+  assert.deepEqual(ids(run([interval()], [2 * HOUR], { states }).plans[0]), [
+    "job-i@r1#2",
+  ]);
+});
+
+test("a stale, duplicate or unknown completion is refused", () => {
+  const { states } = run([interval()], [HOUR - 1, HOUR]);
+  rejects(
+    () => completeOccurrence(states[0], "job-i@r1#0", "succeeded"),
+    "NOT_RUNNING",
+  );
+  rejects(
+    () => completeOccurrence(states[0], "job-i@r1#1", "done"),
+    "INVALID_OUTCOME",
+  );
+  const done = completeOccurrence(states[0], "job-i@r1#1", "succeeded");
+  rejects(
+    () => completeOccurrence(done, "job-i@r1#1", "succeeded"),
+    "NOT_RUNNING",
+  );
+});
+
+test("a paused job keeps its state and reports every skipped slot", () => {
+  let { states } = run([interval()], [HOUR - 1]);
+  states = [pauseJob(states[0], "user paused", HOUR - 1)];
+  assert.deepEqual(states[0].paused, {
+    reason: "user paused",
+    sinceUtcMs: HOUR - 1,
+  });
+  const { plans, states: after } = run([interval()], [HOUR, 3 * HOUR], {
+    states,
+  });
+  assert.deepEqual(plans.flatMap(ids), []);
+  assert.deepEqual(after[0].missed.byReason, { paused: 3 });
+  assert.equal(pauseJob(after[0], "again", 3 * HOUR), after[0]);
+  rejects(() => pauseJob(after[0], "  ", 3 * HOUR), "INVALID_PAUSE");
+});
+
+test("resume continues from now and reports, not replays, the paused gap", () => {
+  const job = interval({ catchUp: "latest" });
+  let { states } = run([job], [HOUR - 1]);
+  states = [pauseJob(states[0], "maintenance", HOUR - 1)];
+  // No tick runs while paused (the app was closed); resume ten hours later.
+  const resumed = resumeJob(job, states[0], 10 * HOUR + 1);
+  assert.equal(resumed.paused, undefined);
+  assert.equal(resumed.cursorUtcMs, 10 * HOUR + 1);
+  assert.deepEqual(resumed.missed.byReason, { paused: 10 });
+  const { plans } = run([job], [10 * HOUR + 2, 11 * HOUR], {
+    states: [resumed],
+  });
+  assert.deepEqual(plans.map(ids), [[], ["job-i@r1#11"]]);
+  assert.equal(resumeJob(job, resumed, 12 * HOUR), resumed);
+  rejects(
+    () => resumeJob(interval({ jobId: "other" }), states[0], HOUR),
+    "INVALID_JOB",
+  );
 });
