@@ -129,3 +129,13 @@ jobs:
             exit 1
           fi
           echo "Runtime E2E N/A: no test:release-gate script and no runtime source under apps/, packages/ or vendor/." >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve sanitized release-smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-smoke-diagnostics
+          path: |
+            apps/desktop/src-tauri/target/bootstrap-smoke/*/diagnostics/result.json
+            apps/desktop/src-tauri/target/bootstrap-smoke/*/diagnostics/driver.log
+          if-no-files-found: ignore
+          retention-days: 7

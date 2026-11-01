@@ -88,6 +88,7 @@
       "@puppeteer/browsers": "3.2.6"
     },
     "deepmerge-ts": "8.0.0",
+    "re2js": "2.8.7",
     "@wdio/config": {
       "glob": "14.0.2"
     },

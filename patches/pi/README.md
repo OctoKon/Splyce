@@ -214,3 +214,11 @@ production factory, installed GUI readiness, provider admission, resource
 selection, credential lifecycle or executor containment is qualified. Trusted
 in-process code retains OS authority. Reapply against the exact owned source
 and rerun these regressions after donor or wrapper changes.
+
+## Library maintenance
+
+- [Callback correlation](0013-oauth-callback-correlation.md) keeps unrelated callback requests from completing a pending login.
+- [Fixture roots](0014-test-fixture-roots.md) gives each test its own atomically allocated directory.
+- [Session repair](0015-session-repair.md) verifies the loaded file before appending its separator.
+- [Input boundaries](0016-input-boundaries.md) validates pinned refs and own JSON members.
+- [Selected minimatch](0017-selected-minimatch.md) records the updated dependency and workspace closure.
