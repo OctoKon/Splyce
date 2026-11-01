@@ -46,7 +46,7 @@ import {
   TRANSPORT_LIMITS,
   validateEvent,
 } from "./contracts.js";
-import { DesktopBridge, type Frame } from "./desktop-bridge.js";
+import { DesktopBridge, type ResyncFrame } from "./desktop-bridge.js";
 import { Receipts } from "./receipts.js";
 import {
   type Appended,
@@ -137,7 +137,7 @@ export interface Published {
   /** The committed envelope with its ledger seq. */
   readonly event: SplyceEvent;
   /** A follower's control frame (overflow resync) the caller must deliver. */
-  readonly frame: Frame | undefined;
+  readonly frame: ResyncFrame | undefined;
 }
 
 const SNAPSHOT_STATE = {
@@ -268,6 +268,8 @@ export class SessionMap {
       channel = Object.freeze({ ...bound.key, receipts, bridge });
       this.channels.set(keyOf(key), channel);
     }
+    // The follower has applied through afterSeq: later overflows resync from it.
+    channel.bridge.resubscribe(afterSeq);
     return { channel, replay };
   }
 

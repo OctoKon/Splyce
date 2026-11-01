@@ -12,5 +12,7 @@
     "**/node_modules/**",
     "apps/desktop/src-tauri/target/**",
     "vendor/pi/**",
+    "vendor/glib/**",
+    "vendor/mocha/**",
   ],
 }

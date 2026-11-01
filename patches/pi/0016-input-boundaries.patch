@@ -1,0 +1,88 @@
+diff --git a/vendor/pi/packages/coding-agent/src/core/package-manager.ts b/vendor/pi/packages/coding-agent/src/core/package-manager.ts
+index 2535b1f..77607f9 100644
+--- a/vendor/pi/packages/coding-agent/src/core/package-manager.ts
++++ b/vendor/pi/packages/coding-agent/src/core/package-manager.ts
+@@ -1525,6 +1525,7 @@ export class DefaultPackageManager implements PackageManager {
+ 		// Try parsing as git URL
+ 		const gitParsed = parseGitUrl(source);
+ 		if (gitParsed) {
++			if (gitParsed.ref?.startsWith("-")) throw new Error("Invalid git ref");
+ 			return gitParsed;
+ 		}
+ 
+diff --git a/vendor/pi/packages/durable/src/harness/json.ts b/vendor/pi/packages/durable/src/harness/json.ts
+index 0922fe4..309b742 100644
+--- a/vendor/pi/packages/durable/src/harness/json.ts
++++ b/vendor/pi/packages/durable/src/harness/json.ts
+@@ -26,7 +26,7 @@ export function assignJson<T extends object, K extends keyof T & (string | numbe
+ 	if (plan?.kind === "keep") return;
+ 	// Every target is a document container: JSON members or items, whatever its declared type names them.
+ 	const slots = target as Record<string | number, JsonValue>;
+-	const current: JsonValue | undefined = slots[key];
++	const current: JsonValue | undefined = Object.hasOwn(slots, key) ? slots[key] : undefined;
+ 	const fields = plan?.kind === "fields" ? plan.fields : undefined;
+ 	if (isRecord(current) && isRecord(value)) {
+ 		for (const name of Object.keys(current)) if (!Object.hasOwn(value, name)) delete current[name];
+diff --git a/vendor/pi/packages/coding-agent/test/package-manager-ref-boundary.test.ts b/vendor/pi/packages/coding-agent/test/package-manager-ref-boundary.test.ts
+new file mode 100644
+index 0000000..c0ace7e
+--- /dev/null
++++ b/vendor/pi/packages/coding-agent/test/package-manager-ref-boundary.test.ts
+@@ -0,0 +1,25 @@
++import { describe, expect, it } from "vitest";
++import { DefaultPackageManager } from "../src/core/package-manager.ts";
++import { SettingsManager } from "../src/core/settings-manager.ts";
++
++describe("git package ref boundary", () => {
++	const manager = new DefaultPackageManager({
++		cwd: process.cwd(),
++		agentDir: process.cwd(),
++		settingsManager: SettingsManager.inMemory(),
++	});
++	const parse = (source: string) =>
++		(manager as unknown as { parseSource(source: string): { type: string; ref?: string } }).parseSource(source);
++
++	it("rejects option-shaped pinned refs before command construction", () => {
++		for (const source of ["git:github.com/user/repo@--help", "git:https://example.com/user/repo@--help"]) {
++			expect(() => parse(source)).toThrow("Invalid git ref");
++		}
++	});
++
++	it("preserves ordinary branch and commit refs", () => {
++		for (const ref of ["main", "release-1", "a".repeat(40)]) {
++			expect(parse(`git:github.com/user/repo@${ref}`)).toMatchObject({ type: "git", ref });
++		}
++	});
++});
+diff --git a/vendor/pi/packages/durable/test/harness-json-boundary.test.ts b/vendor/pi/packages/durable/test/harness-json-boundary.test.ts
+new file mode 100644
+index 0000000..2c67b62
+--- /dev/null
++++ b/vendor/pi/packages/durable/test/harness-json-boundary.test.ts
+@@ -0,0 +1,26 @@
++import type { JsonValue } from "@earendil-works/chord";
++import { track } from "@earendil-works/chord/delta";
++import { describe, expect, it } from "vitest";
++import { assignJson } from "../src/harness/json.ts";
++
++describe("assignJson own JSON members", () => {
++	it("keeps special names as data through recursive tracked changes", () => {
++		const target = track<{ value: Record<string, JsonValue> }>({ value: {} });
++		const incoming = JSON.parse('{"__proto__":{"flag":1},"constructor":{"prototype":{"flag":2}}}') as Record<
++			string,
++			JsonValue
++		>;
++		try {
++			const change = target.beginChange();
++			assignJson(change.state, "value", incoming);
++			const prepared = change.prepare();
++			expect(Object.getOwnPropertyDescriptor(prepared.value.value, "__proto__")?.value).toEqual({ flag: 1 });
++			expect(Object.getOwnPropertyDescriptor(prepared.value.value, "constructor")?.value).toEqual({
++				prototype: { flag: 2 },
++			});
++			expect(({} as Record<string, unknown>).flag).toBeUndefined();
++		} finally {
++			delete (Object.prototype as Record<string, unknown>).flag;
++		}
++	});
++});

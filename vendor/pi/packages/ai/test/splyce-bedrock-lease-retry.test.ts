@@ -104,7 +104,7 @@ describe("TD-22 bedrock: a leased send does not retry past its lease", () => {
 		await stream({ ...bedrockModel(), baseUrl }, context, {
 			cacheRetention: "none",
 			env,
-		} as BedrockOptions).result();
+		} satisfies BedrockOptions).result();
 
 		// Without a lease the SDK's own retry policy must be observable, otherwise the leased assertion
 		// below could pass because no request reached the endpoint at all.
@@ -119,7 +119,7 @@ describe("TD-22 bedrock: a leased send does not retry past its lease", () => {
 			cacheRetention: "none",
 			env,
 			credentials: leasedCredentials(recorder),
-		} as BedrockOptions).result();
+		} satisfies BedrockOptions).result();
 
 		// A 503 is retryable: an unmediated SDK retry would be a second physical send after the lease died.
 		expect(recorder.requests).toHaveLength(1);

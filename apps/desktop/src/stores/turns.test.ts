@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
 import type {
   EventKind,
   EventPayloads,
   SplyceEventEnvelope,
 } from "@splyce/pi/contracts";
+import { describe, expect, it } from "vitest";
 import {
   approvalRequestIdFor,
   canRespondToApproval,
@@ -367,23 +367,6 @@ describe("ordering, replay and attribution", () => {
       actionId: "act_replay",
       status: "success",
     });
-  });
-
-  it("accepts an engine stream.resync and reconciles with the snapshot", () => {
-    const resynced = applyAll(createTurnsState(), [
-      started(),
-      delta(2, "before"),
-      event(3, "stream.resync", { fromSeq: 2 }),
-    ]);
-
-    expect(resynced.needsResync).toBe(true);
-    expect(resyncRequest(resynced)).toEqual({ afterSeq: 2 });
-    expect(resynced.runs.run_a.text).toBe("before");
-
-    const reconciled = reduceTurns(resynced, snapshot(4));
-    expect(reconciled.needsResync).toBe(false);
-    expect(reconciled.resyncCount).toBe(1);
-    expect(reconciled.runs.run_a.text).toBe("before");
   });
 
   it("keeps a late completion on its own run without completing the current run", () => {
@@ -997,5 +980,180 @@ describe("reducer event-id memory", () => {
     const again = reduceTurns(state, repeated);
     expect(again.duplicateCount).toBe(state.duplicateCount + 1);
     expect(again.runs.run_a?.text).toBe("x");
+  });
+});
+
+describe("TD-15 stream.resync control frame", () => {
+  const resyncControl = (fromSeq: number, extra: object = {}) =>
+    ({
+      frame: "control",
+      kind: "stream.resync",
+      sessionId: "ses_spec",
+      fromSeq,
+      ...extra,
+    }) as unknown as SplyceEventEnvelope;
+
+  function setup() {
+    const resyncs: number[] = [];
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: (task) => task(),
+      onResync: (fromSeq) => resyncs.push(fromSeq),
+    });
+    return { transport, resyncs };
+  }
+
+  const startedAt = (seq: number) =>
+    event(seq, "turn.started", { runId: "run_a", turnId: `turn_${seq}` });
+
+  it("R1 fresh client (M=0) requests replay after 0 and applies seq 1", () => {
+    const { transport, resyncs } = setup();
+    transport.enqueue(resyncControl(0));
+    expect(resyncs).toEqual([0]);
+    expect(transport.current().needsResync).toBe(true);
+    expect(transport.current().lastSeq).toBe(0);
+    expect(transport.current().lastDurableSeq).toBe(0);
+
+    transport.enqueue(snapshot(2));
+    transport.enqueue(startedAt(1));
+    const state = transport.flush();
+    expect(state.needsResync).toBe(false);
+    expect(state.runs.run_a?.status).toBe("streaming");
+    expect(state.lastDurableSeq).toBe(1);
+  });
+
+  it("R2 client at M>0 is not duplicate-rejected and keeps its cursors", () => {
+    const { transport, resyncs } = setup();
+    for (const seq of [1, 2, 3]) transport.enqueue(startedAt(seq));
+    const before = transport.flush();
+    transport.enqueue(resyncControl(3));
+    const after = transport.current();
+    expect(resyncs).toEqual([3]);
+    expect(after.duplicateCount).toBe(before.duplicateCount);
+    expect(after.protocolErrors).toBe(0);
+    expect(after.lastSeq).toBe(3);
+    expect(after.lastDurableSeq).toBe(3);
+    expect([...after.seenEventIds]).toEqual([...before.seenEventIds]);
+
+    // Replay from M+1 is still contiguous: the control moved no cursor.
+    transport.enqueue(snapshot(5));
+    transport.enqueue(startedAt(4));
+    const replayed = transport.flush();
+    expect(replayed.needsResync).toBe(false);
+    expect(replayed.lastDurableSeq).toBe(4);
+  });
+
+  it("R3 exact unsequenced shape is accepted; any extra key is rejected", () => {
+    const { transport, resyncs } = setup();
+    transport.enqueue(startedAt(1));
+    transport.flush();
+    transport.enqueue(resyncControl(1, { seq: 2 }));
+    transport.enqueue(resyncControl(1, { scopeId: "scope_spec" }));
+    expect(resyncs).toEqual([]);
+    expect(transport.current().needsResync).toBe(false);
+    expect(transport.current().protocolErrors).toBe(2);
+
+    transport.enqueue(resyncControl(1));
+    expect(resyncs).toEqual([1]);
+    expect(transport.current().protocolErrors).toBe(2);
+    expect(transport.rejectedCount()).toBe(0);
+  });
+
+  it("R4 replay request uses payload fromSeq, not the local durable cursor", () => {
+    const { transport, resyncs } = setup();
+    for (const seq of [1, 2, 3]) transport.enqueue(startedAt(seq));
+    transport.flush();
+    transport.enqueue(resyncControl(2));
+    expect(resyncs).toEqual([2]);
+    expect(transport.current().lastDurableSeq).toBe(3);
+  });
+
+  it("L7 control branch returns before data intake (no rejection, no cursor move)", () => {
+    const { transport } = setup();
+    transport.enqueue(startedAt(1));
+    const before = transport.flush();
+    transport.enqueue(resyncControl(1));
+    const after = transport.current();
+    expect(transport.rejectedCount()).toBe(0);
+    expect(after.protocolErrors).toBe(0);
+    expect(after.duplicateCount).toBe(before.duplicateCount);
+    expect(after.lastSeq).toBe(before.lastSeq);
+    expect(after.lastDurableSeq).toBe(before.lastDurableSeq);
+  });
+
+  it("B1 recovering accepts the plain durable replay at expectedNext (no snapshot)", () => {
+    const { transport, resyncs } = setup();
+    transport.enqueue(resyncControl(0));
+    expect(resyncs).toEqual([0]);
+    transport.enqueue(startedAt(1));
+    const state = transport.flush();
+    expect(state.needsResync).toBe(false);
+    expect(state.resyncCount).toBe(1);
+    expect(state.lastDurableSeq).toBe(1);
+    expect(state.runs.run_a?.turnId).toBe("turn_1");
+  });
+
+  it("B1 seq beyond expectedNext keeps waiting; seq <= applied is a duplicate", () => {
+    const { transport, resyncs } = setup();
+    transport.enqueue(startedAt(1));
+    transport.flush();
+    transport.enqueue(resyncControl(1));
+    transport.enqueue(startedAt(3));
+    expect(transport.current().needsResync).toBe(true);
+    transport.enqueue({ ...startedAt(1), eventId: "evt_1_replay" });
+    expect(transport.current().duplicateCount).toBe(1);
+    expect(transport.current().needsResync).toBe(true);
+    transport.enqueue(startedAt(2));
+    transport.enqueue(startedAt(3));
+    const state = transport.flush();
+    expect(resyncs).toEqual([1]);
+    expect(state.needsResync).toBe(false);
+    expect(state.lastDurableSeq).toBe(3);
+  });
+
+  it("B1 a reconnect snapshot at the applied cursor completes recovery", () => {
+    const { transport } = setup();
+    for (const seq of [1, 2]) transport.enqueue(startedAt(seq));
+    transport.flush();
+    transport.enqueue(resyncControl(2));
+    expect(transport.current().needsResync).toBe(true);
+    transport.enqueue({ ...snapshot(2), eventId: "evt_snap_2" });
+    const state = transport.flush();
+    expect(state.needsResync).toBe(false);
+    expect(state.duplicateCount).toBe(0);
+    transport.enqueue(startedAt(3));
+    expect(transport.flush().lastDurableSeq).toBe(3);
+  });
+
+  it("N1 clamps the replay request to the applied cursor (applied 1, fromSeq 3)", () => {
+    const { transport, resyncs } = setup();
+    transport.enqueue(startedAt(1));
+    transport.flush();
+    transport.enqueue(resyncControl(3));
+    expect(resyncs).toEqual([1]);
+    expect(transport.current().resyncAfterSeq).toBe(1);
+    transport.enqueue(startedAt(2));
+    const state = transport.flush();
+    expect(state.needsResync).toBe(false);
+    expect(state.lastDurableSeq).toBe(2);
+  });
+
+  it("N3 a malformed control counts on the named session's channel", () => {
+    const { transport } = setup();
+    transport.follow("ses_b", "scope_spec");
+    transport.enqueue(startedAt(1));
+    transport.flush();
+    transport.enqueue(resyncControl(-1, { sessionId: "ses_b" }));
+    expect(transport.current("ses_b").protocolErrors).toBe(1);
+    expect(transport.current().protocolErrors).toBe(0);
+    expect(transport.rejectedCount()).toBe(0);
+  });
+
+  it("rejects a control frame for an unfollowed session", () => {
+    const { transport, resyncs } = setup();
+    transport.enqueue(resyncControl(0, { sessionId: "ses_other" }));
+    expect(resyncs).toEqual([]);
+    expect(transport.rejectedCount()).toBe(1);
   });
 });
