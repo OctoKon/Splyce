@@ -38,6 +38,9 @@ export const config = {
   ],
   framework: 'mocha',
   before: async () => {
+    if (!external && browser.capabilities.browserName !== 'msedge') {
+      throw new Error('Expected the embedded Tauri driver, not a standalone browser');
+    }
     const handles = await browser.getWindowHandles();
     if (handles.length !== 1) throw new Error('Expected one prototype window');
     await browser.switchToWindow(handles[0]);

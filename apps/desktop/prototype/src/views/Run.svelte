@@ -228,7 +228,10 @@
 <svelte:window
   onkeydown={(event) => {
     if (event.key === 'Escape') {
-      if (!diffOpen && evidenceOpen) closeEvidence();
+      if (diffOpen) {
+        event.preventDefault();
+        closeDiff();
+      } else if (evidenceOpen) closeEvidence();
       menuOpen = false;
     }
   }}
