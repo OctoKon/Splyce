@@ -68,6 +68,20 @@
     diffTrigger?.focus();
   }
 
+  function trapDiffFocus(event: KeyboardEvent) {
+    if (event.key !== 'Tab') return;
+    const controls = diffDialog?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled])',
+    );
+    if (!controls?.length) return;
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (document.activeElement === (event.shiftKey ? first : last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  }
+
   onDestroy(() => {
     if (timer) clearTimeout(timer);
   });
@@ -743,6 +757,7 @@
       class="diff-overlay"
       bind:this={diffDialog}
       aria-label="Review changes"
+      onkeydown={trapDiffFocus}
       oncancel={(event) => {
         event.preventDefault();
         closeDiff();

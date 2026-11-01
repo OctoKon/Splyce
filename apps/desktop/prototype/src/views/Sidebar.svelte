@@ -231,7 +231,7 @@
     line-height: 14px;
     letter-spacing: 0.09em;
     text-transform: uppercase;
-    color: var(--text-faint);
+    color: var(--text-muted);
   }
   .recent-search {
     display: grid;
@@ -332,7 +332,7 @@
     overflow: hidden;
     font-size: 11px;
     line-height: 14px;
-    color: var(--text-faint);
+    color: var(--text-muted);
     text-overflow: ellipsis;
     white-space: nowrap;
   }

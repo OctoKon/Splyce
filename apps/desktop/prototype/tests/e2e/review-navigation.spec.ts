@@ -10,14 +10,14 @@ describe('review navigation recovery', () => {
     if (await reopen.isDisplayed()) await reopen.click();
     await $('button[aria-label="Collapse sidebar"]').click();
     await expect(reopen).toBeFocused();
-    await browser.keys('Enter');
+    // The embedded driver dispatches key events without native button activation.
+    if (process.env.SPLYCE_E2E_DRIVER === 'external') await browser.keys('Enter');
+    else await reopen.click();
     await expect($('button[aria-label="Collapse sidebar"]')).toBeFocused();
   });
 
   it('contains review focus, displays actual totals and restores the opener', async () => {
-    await setHash('#/work');
-    await $('.work-page textarea').setValue('Review navigation regression');
-    await browser.keys('Enter');
+    await setHash('#/run/r-1042');
     await $('.run').waitForDisplayed();
     await $('button[aria-label="Review changes and receipts"]').click();
     const file = await $('.diff-file');
@@ -26,6 +26,8 @@ describe('review navigation recovery', () => {
     const dialog = await $('dialog[aria-label="Review changes"]');
     await expect(dialog).toBeDisplayed();
     await expect($('.diff-modal-head span')).toHaveText('1 file · +18 −6');
+    await expect($('button[aria-label="Close review"]')).toBeFocused();
+    await browser.keys(['Shift', 'Tab']);
     await expect($('button[aria-label="Close review"]')).toBeFocused();
     for (let index = 0; index < 12; index++) {
       await browser.keys('Tab');

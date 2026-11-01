@@ -10,7 +10,10 @@ describe('greeting and settings search', () => {
     const initial = await button.getText();
     await button.click();
     const input = await $('input[aria-label="Greeting"]');
-    await input.setValue('Uncommitted greeting');
+    await expect(input).toBeFocused();
+    await browser.keys(['Control', 'a']);
+    await browser.keys('Uncommitted greeting');
+    await expect(input).toHaveValue('Uncommitted greeting');
     await browser.execute(() => {
       const field = document.querySelector<HTMLInputElement>('input[aria-label="Greeting"]')!;
       for (const key of ['Enter', 'Escape']) {
@@ -25,9 +28,9 @@ describe('greeting and settings search', () => {
       field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       field.dispatchEvent(new FocusEvent('blur'));
     });
-    await expect(button).toHaveText(initial);
+    await expect($('button.greeting')).toHaveText(initial);
     expect(await browser.execute(() => localStorage.getItem('splyce.greeting'))).toBe(original);
-    await button.click();
+    await $('button.greeting').click();
     await expect(await $('input[aria-label="Greeting"]')).toHaveValue(initial);
     await browser.keys('Escape');
   });
