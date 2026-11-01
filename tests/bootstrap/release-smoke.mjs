@@ -345,6 +345,13 @@ export function assertDriverProvenance(manifest, pin, actual) {
   assert.match(manifest.edgeDriver.version, version);
   assert.equal(manifest.edgeDriver.version, actual.edgeDriverVersion);
   assert.equal(manifest.edgeDriver.sourcePage, edgeWebDriverPage);
+  assert.ok(
+    [
+      edgeWebDriverPage,
+      `https://msedgedriver.microsoft.com/LATEST_RELEASE_${manifest.edgeDriver.version.split(".")[0]}_WINDOWS`,
+    ].includes(manifest.edgeDriver.versionSource),
+    "Microsoft Edge WebDriver version must come from a Microsoft driver record",
+  );
   assert.equal(
     manifest.edgeDriver.downloadUrl,
     `https://msedgedriver.microsoft.com/${manifest.edgeDriver.version}/edgedriver_win64.zip`,
