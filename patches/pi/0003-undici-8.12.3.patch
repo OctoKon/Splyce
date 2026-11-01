@@ -1,0 +1,13 @@
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index 616d6a4..0e452d9 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -61,7 +61,7 @@
+ 		"quickjs-wasi": "3.6.2",
+ 		"semver": "7.8.5",
+ 		"typebox": "1.3.27",
+-		"undici": "8.10.2",
++		"undici": "8.12.3",
+ 		"yaml": "2.9.0"
+ 	},
+ 	"overrides": {

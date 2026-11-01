@@ -226,7 +226,8 @@ describe("TurnStream component", () => {
       document.querySelector('[data-testid="approval-allow-button"]'),
     ).toBeNull();
     expect(document.body.textContent).toContain("Approval closed");
-    expect(document.body.textContent).toContain("Engine stopped");
+    expect(document.body.textContent).toContain("transcript may be incomplete");
+    expect(document.body.textContent).not.toContain("Engine stopped");
   });
 
   it("does not render approval controls without an authoritative command context", () => {

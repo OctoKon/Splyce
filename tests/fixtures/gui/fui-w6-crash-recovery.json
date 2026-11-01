@@ -16,7 +16,7 @@
       "delayMs": 0,
       "event": {
         "schemaVersion": 1,
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "recordId": "rec_w6_01",
         "eventId": "evt_01W6_01",
         "createdAt": "2026-10-26T12:00:00.000Z",
@@ -36,7 +36,7 @@
       "delayMs": 5,
       "event": {
         "schemaVersion": 1,
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "recordId": "rec_w6_02",
         "eventId": "evt_01W6_02",
         "createdAt": "2026-10-26T12:00:00.005Z",
@@ -56,7 +56,7 @@
       "delayMs": 15,
       "event": {
         "schemaVersion": 1,
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "recordId": "rec_w6_03",
         "eventId": "evt_01W6_03",
         "createdAt": "2026-10-26T12:00:00.015Z",
@@ -82,7 +82,7 @@
       "delayMs": 20,
       "event": {
         "schemaVersion": 1,
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "recordId": "rec_w6_04",
         "eventId": "evt_01W6_04",
         "createdAt": "2026-10-26T12:00:00.020Z",

@@ -1,0 +1,2112 @@
+diff --git a/vendor/pi/packages/ai/src/api/openai-codex-responses.ts b/vendor/pi/packages/ai/src/api/openai-codex-responses.ts
+index 5165e1c..f2802e3 100644
+--- a/vendor/pi/packages/ai/src/api/openai-codex-responses.ts
++++ b/vendor/pi/packages/ai/src/api/openai-codex-responses.ts
+@@ -7,6 +7,17 @@ import type {
+ } from "openai/resources/responses/responses.js";
+ import { clampThinkingLevel } from "../models.ts";
+ import { registerSessionResourceCleanup } from "../session-resources.ts";
++import {
++	assertCredentialApiIdentity,
++	assertCredentialOptions,
++	CredentialPreflightError,
++	createLeasedFetch,
++	redactEventWithLease,
++	redactResponseWithLease,
++	redactWithLease,
++	type SplyceCredentials,
++	withLeasedSecret,
++} from "../splyce-credentials.ts";
+ import type {
+ 	Api,
+ 	AssistantMessage,
+@@ -248,6 +259,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
+ 	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+ 
+ 	(async () => {
++		let credentials: SplyceCredentials | undefined;
+ 		const output: AssistantMessage = {
+ 			role: "assistant",
+ 			content: [],
+@@ -267,12 +279,24 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
+ 		};
+ 
+ 		try {
+-			const apiKey = options?.apiKey;
++			assertCredentialOptions(options ?? {}, model.headers);
++			assertCredentialApiIdentity(model.api, "openai-codex-responses", options);
++			const candidateCredentials = options?.credentials;
++			if (candidateCredentials && options?.transport !== "sse") {
++				throw new CredentialPreflightError("Native Codex credentials require explicit SSE transport");
++			}
++			credentials = candidateCredentials;
++			const apiKey = credentials ? "splyce-leased" : options?.apiKey;
+ 			if (!apiKey) {
+ 				throw new Error(`No API key for provider: ${model.provider}`);
+ 			}
+ 
+-			const accountId = extractAccountId(apiKey);
++			const accountId = credentials
++				? await withLeasedSecret(credentials, extractAccountId)
++				: extractAccountId(apiKey);
++			const fetch = credentials
++				? createLeasedFetch(credentials, "authorization", options?.fetch, (secret) => `Bearer ${secret}`)
++				: (options?.fetch ?? globalThis.fetch);
+ 			const grammarToolInputProperties = createGrammarToolInputProperties(
+ 				getDeclaredTools(normalizedContext.messages),
+ 				model.compat?.supportsOpenAIGrammarTools ?? false,
+@@ -306,7 +330,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
+ 			const bodyJson = JSON.stringify(body);
+ 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
+ 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
+-			const transport = options?.transport || "auto";
++			// Native SSE was admitted before the payload hook; mutable options cannot open another transport.
++			const transport = credentials ? "sse" : options?.transport || "auto";
+ 			let startEmitted = false;
+ 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(cacheSessionId);
+ 			if (websocketDisabledForSession) {
+@@ -412,7 +437,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
+ 						httpTimeoutMs !== undefined && httpTimeoutMs > 0 ? AbortSignal.timeout(httpTimeoutMs) : undefined;
+ 					const combinedSignal = combineAbortSignals([options?.signal, headerTimeoutSignal]);
+ 					try {
+-						response = await (options?.fetch ?? globalThis.fetch)(resolveCodexUrl(model.baseUrl), {
++						response = await fetch(resolveCodexUrl(model.baseUrl), {
+ 							method: "POST",
+ 							headers: sseHeaders,
+ 							body: sseBody,
+@@ -427,7 +452,10 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
+ 						combinedSignal.cleanup();
+ 					}
+ 					await options?.onResponse?.(
+-						{ status: response.status, headers: headersToRecord(response.headers) },
++						await redactResponseWithLease(credentials, {
++							status: response.status,
++							headers: headersToRecord(response.headers),
++						}),
+ 						model,
+ 					);
+ 
+@@ -487,7 +515,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
+ 				startEmitted = true;
+ 				stream.push({ type: "start", partial: output });
+ 			}
+-			await processStream(response, output, stream, model, grammarToolInputProperties, options);
++			await processStream(response, output, stream, model, grammarToolInputProperties, options, credentials);
+ 
+ 			if (options?.signal?.aborted) {
+ 				throw new Error("Request was aborted");
+@@ -497,8 +525,12 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
+ 			stream.push({ type: "done", reason: output.stopReason, message: output });
+ 			stream.end();
+ 		} catch (error) {
++			// Failed or cancelled output must not expose executable tool calls.
++			output.content = output.content.filter((block) => block.type !== "toolCall");
+ 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+-			output.errorMessage = formatProviderError(normalizeProviderError(error));
++			delete output.errorMessage;
++			const errorMessage = formatProviderError(normalizeProviderError(error));
++			output.errorMessage = await redactWithLease(credentials, errorMessage);
+ 			stream.push({ type: "error", reason: output.stopReason, error: output });
+ 			stream.end();
+ 		}
+@@ -513,7 +545,7 @@ export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStream
+ 	options?: SimpleStreamOptions,
+ ): AssistantMessageEventStream => {
+ 	const apiKey = options?.apiKey;
+-	if (!apiKey) {
++	if (!apiKey && !options?.credentials) {
+ 		throw new Error(`No API key for provider: ${model.provider}`);
+ 	}
+ 
+@@ -681,9 +713,10 @@ async function processStream(
+ 	model: Model<"openai-codex-responses">,
+ 	grammarToolInputProperties: ReadonlyMap<string, string>,
+ 	options?: OpenAICodexResponsesOptions,
++	credentials?: SplyceCredentials,
+ ): Promise<void> {
+ 	await processResponsesStream(
+-		mapCodexEvents(parseSSE(response, options?.signal), output, model, options?.onProviderStreamEvent),
++		mapCodexEvents(parseSSE(response, options?.signal), output, model, options?.onProviderStreamEvent, credentials),
+ 		output,
+ 		stream,
+ 		model,
+@@ -762,10 +795,13 @@ async function* mapCodexEvents(
+ 	output: AssistantMessage,
+ 	model: Model<"openai-codex-responses">,
+ 	onProviderStreamEvent: StreamOptions["onProviderStreamEvent"] | undefined,
++	credentials?: SplyceCredentials,
+ ): AsyncGenerator<ResponseStreamEvent> {
+ 	for await (const event of events) {
+ 		try {
+-			await onProviderStreamEvent?.(event, model);
++			if (onProviderStreamEvent) {
++				await onProviderStreamEvent(await redactEventWithLease(credentials, event), model);
++			}
+ 		} catch (error) {
+ 			// Keep callback failures out of Codex's WebSocket retry and SSE fallback path.
+ 			throw new ProviderStreamEventCallbackError(error);
+diff --git a/vendor/pi/packages/ai/src/api/openai-completions.ts b/vendor/pi/packages/ai/src/api/openai-completions.ts
+index 0e5b606..f13382c 100644
+--- a/vendor/pi/packages/ai/src/api/openai-completions.ts
++++ b/vendor/pi/packages/ai/src/api/openai-completions.ts
+@@ -12,6 +12,15 @@ import type {
+ 	ChatCompletionToolMessageParam,
+ } from "openai/resources/chat/completions.js";
+ import { calculateCost, clampThinkingLevel } from "../models.ts";
++import {
++	assertCredentialApiIdentity,
++	assertCredentialOptions,
++	createLeasedFetch,
++	redactEventWithLease,
++	redactResponseWithLease,
++	redactWithLease,
++	type SplyceCredentials,
++} from "../splyce-credentials.ts";
+ import type {
+ 	AssistantMessage,
+ 	CacheRetention,
+@@ -337,6 +346,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
+ 		// `reasoning_details` are replay metadata, not user-visible stream deltas.
+ 		// Keep them in memory during streaming and serialize once when the block is finalized.
+ 		let streamedReasoningDetails: OpenAIReasoningDetail[] | undefined;
++		let credentials: SplyceCredentials | undefined;
+ 		const applyStreamedReasoningDetails = (block: ThinkingContent): void => {
+ 			if (streamedReasoningDetails !== undefined) {
+ 				block.thinkingSignature = JSON.stringify(streamedReasoningDetails);
+@@ -344,7 +354,15 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
+ 		};
+ 
+ 		try {
+-			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
++			assertCredentialOptions(options ?? {}, model.headers);
++			assertCredentialApiIdentity(model.api, "openai-completions", options);
++			credentials = options?.credentials;
++			const apiKey = credentials
++				? "splyce-leased"
++				: getClientApiKey(model.provider, options?.apiKey, options?.headers);
++			const fetch = credentials
++				? createLeasedFetch(credentials, "authorization", options?.fetch, (secret) => `Bearer ${secret}`)
++				: options?.fetch;
+ 			const compat = getCompat(model);
+ 			const grammarToolInputProperties = createGrammarToolInputProperties(
+ 				getDeclaredTools(normalizedContext.messages),
+@@ -358,7 +376,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
+ 				apiKey,
+ 				options?.headers,
+ 				options?.identity,
+-				options?.fetch,
++				fetch,
+ 				cacheSessionId,
+ 				compat,
+ 			);
+@@ -387,7 +405,13 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
+ 					signal: options?.signal,
+ 				},
+ 			);
+-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
++			await options?.onResponse?.(
++				await redactResponseWithLease(credentials, {
++					status: response.status,
++					headers: headersToRecord(response.headers),
++				}),
++				model,
++			);
+ 			stream.push({ type: "start", partial: output });
+ 
+ 			// Stream state of a tool call, kept off the content block so it never reaches partials: JSON arguments, or
+@@ -540,7 +564,8 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
+ 			};
+ 
+ 			for await (const chunk of openaiStream) {
+-				await options?.onProviderStreamEvent?.(chunk, model);
++				const observe = options?.onProviderStreamEvent;
++				if (observe) await observe(await redactEventWithLease(credentials, chunk), model);
+ 				if (!chunk || typeof chunk !== "object") continue;
+ 
+ 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
+@@ -692,21 +717,25 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
+ 			stream.push({ type: "done", reason: output.stopReason, message: output });
+ 			stream.end();
+ 		} catch (error) {
++			// Failed or cancelled output must not expose executable tool calls.
++			output.content = output.content.filter((block) => block.type !== "toolCall");
+ 			for (const block of output.content) {
+ 				if (block.type === "thinking") {
+ 					applyStreamedReasoningDetails(block);
+ 				}
+ 			}
+ 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+-			output.errorMessage = formatProviderError(normalizeProviderError(error));
++			delete output.errorMessage;
++			let errorMessage = formatProviderError(normalizeProviderError(error));
+ 			// Some providers via OpenRouter give additional information in this field.
+ 			// normalizeProviderError already stringifies the parsed body (error.error)
+ 			// into errorMessage, so only append the raw metadata when it is not already
+ 			// present to avoid double-printing it.
+ 			const rawMetadata = (error as any)?.error?.metadata?.raw;
+-			if (rawMetadata && !output.errorMessage.includes(String(rawMetadata))) {
+-				output.errorMessage += `\n${rawMetadata}`;
++			if (rawMetadata && !errorMessage.includes(String(rawMetadata))) {
++				errorMessage += `\n${rawMetadata}`;
+ 			}
++			output.errorMessage = await redactWithLease(credentials, errorMessage);
+ 			stream.push({ type: "error", reason: output.stopReason, error: output });
+ 			stream.end();
+ 		}
+@@ -720,7 +749,7 @@ export const streamSimple: StreamFunction<"openai-completions", SimpleStreamOpti
+ 	context: TranscriptContext,
+ 	options?: SimpleStreamOptions,
+ ): AssistantMessageEventStream => {
+-	getClientApiKey(model.provider, options?.apiKey, options?.headers);
++	if (!options?.credentials) getClientApiKey(model.provider, options?.apiKey, options?.headers);
+ 
+ 	const base = {
+ 		...buildBaseOptions(model, context, options, options?.apiKey),
+@@ -775,6 +804,8 @@ function createClient(
+ 
+ 	return new OpenAI({
+ 		apiKey,
++		// Injected transports own diagnostics and account metadata; do not add ambient SDK values.
++		...(fetch ? { logLevel: "off" as const, organization: null, project: null } : {}),
+ 		baseURL: model.baseUrl,
+ 		dangerouslyAllowBrowser: true,
+ 		fetch,
+diff --git a/vendor/pi/packages/ai/src/api/openai-responses.ts b/vendor/pi/packages/ai/src/api/openai-responses.ts
+index c29e6ad..205abe2 100644
+--- a/vendor/pi/packages/ai/src/api/openai-responses.ts
++++ b/vendor/pi/packages/ai/src/api/openai-responses.ts
+@@ -1,6 +1,16 @@
+ import OpenAI from "openai";
+ import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+ import { clampThinkingLevel } from "../models.ts";
++import {
++	assertCredentialApiIdentity,
++	assertCredentialOptions,
++	createLeasedFetch,
++	redactEventWithLease,
++	redactResponseWithLease,
++	redactWithLease,
++	type SplyceCredentials,
++	withLeasedSecret,
++} from "../splyce-credentials.ts";
+ import type {
+ 	Api,
+ 	AssistantMessage,
+@@ -109,12 +119,13 @@ function getConfigurationUpdateEffort(
+ 	model: Model<"openai-responses">,
+ 	options: OpenAIResponsesOptions | undefined,
+ 	compat: Required<OpenAIResponsesCompat>,
++	chatGPTSignIn: boolean,
+ ): string | undefined {
+ 	if (
+ 		!compat.supportsMidConvoEffort ||
+ 		!options?.reasoningEffort ||
+ 		// Sign in with ChatGPT rejects configuration_update items.
+-		isChatGPTSignIn(model, options.apiKey)
++		chatGPTSignIn
+ 	) {
+ 		return undefined;
+ 	}
+@@ -162,14 +173,13 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions>
+ 	// Start async processing
+ 	(async () => {
+ 		const compat = getCompat(model);
+-		const configurationUpdateEffort = getConfigurationUpdateEffort(model, options, compat);
++		let credentials: SplyceCredentials | undefined;
+ 		const output: AssistantMessage = {
+ 			role: "assistant",
+ 			content: [],
+ 			api: model.api as Api,
+ 			provider: model.provider,
+ 			model: model.id,
+-			...(configurationUpdateEffort === undefined ? {} : { providerThinkingLevel: configurationUpdateEffort }),
+ 			usage: {
+ 				input: 0,
+ 				output: 0,
+@@ -184,7 +194,20 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions>
+ 
+ 		try {
+ 			// Create OpenAI client
+-			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
++			assertCredentialOptions(options ?? {}, model.headers);
++			assertCredentialApiIdentity(model.api, "openai-responses", options);
++			credentials = options?.credentials;
++			const chatGPTSignIn = credentials
++				? await withLeasedSecret(credentials, (secret) => isChatGPTSignIn(model, secret))
++				: isChatGPTSignIn(model, options?.apiKey);
++			const configurationUpdateEffort = getConfigurationUpdateEffort(model, options, compat, chatGPTSignIn);
++			if (configurationUpdateEffort !== undefined) output.providerThinkingLevel = configurationUpdateEffort;
++			const apiKey = credentials
++				? "splyce-leased"
++				: getClientApiKey(model.provider, options?.apiKey, options?.headers);
++			const fetch = credentials
++				? createLeasedFetch(credentials, "authorization", options?.fetch, (secret) => `Bearer ${secret}`)
++				: options?.fetch;
+ 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
+ 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+ 			const grammarToolInputProperties = createGrammarToolInputProperties(
+@@ -197,7 +220,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions>
+ 				apiKey,
+ 				options?.headers,
+ 				options?.identity,
+-				options?.fetch,
++				fetch,
+ 				cacheSessionId,
+ 			);
+ 			let params = buildParams(
+@@ -207,6 +230,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions>
+ 				compat,
+ 				grammarToolInputProperties,
+ 				configurationUpdateEffort,
++				chatGPTSignIn,
+ 			);
+ 			const nextParams = await options?.onPayload?.(params, model);
+ 			if (nextParams !== undefined) {
+@@ -225,11 +249,20 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions>
+ 					signal: options?.signal,
+ 				},
+ 			);
+-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
++			await options?.onResponse?.(
++				await redactResponseWithLease(credentials, {
++					status: response.status,
++					headers: headersToRecord(response.headers),
++				}),
++				model,
++			);
+ 			stream.push({ type: "start", partial: output });
+ 
++			const observe = options?.onProviderStreamEvent;
+ 			await processResponsesStream(openaiStream, output, stream, model, {
+-				onProviderStreamEvent: options?.onProviderStreamEvent,
++				onProviderStreamEvent: observe
++					? async (event, activeModel) => observe(await redactEventWithLease(credentials, event), activeModel)
++					: undefined,
+ 				serviceTier: options?.serviceTier,
+ 				grammarToolInputProperties,
+ 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+@@ -249,20 +282,22 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions>
+ 			stream.push({ type: "done", reason: output.stopReason, message: output });
+ 			stream.end();
+ 		} catch (error) {
++			// Failed or cancelled output must not expose executable tool calls.
++			output.content = output.content.filter((block) => block.type !== "toolCall");
+ 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+-			const errorMessage = formatProviderError(
++			delete output.errorMessage;
++			let errorMessage = formatProviderError(
+ 				normalizeProviderError(error),
+ 				`${model.provider === "openai" ? "OpenAI" : model.provider} API error`,
+ 			);
+ 			// Sign in with ChatGPT shares the subscription's usage limit with other apps.
+ 			// On ChatGPT Business plans, the workspace admin also sets a per-user limit.
+ 			if (errorMessage.includes("subscription_sharing_usage_limit_exceeded")) {
+-				output.errorMessage = `${errorMessage}\nCheck your ChatGPT usage: ${CHATGPT_USAGE_URL}`;
++				errorMessage = `${errorMessage}\nCheck your ChatGPT usage: ${CHATGPT_USAGE_URL}`;
+ 			} else if (errorMessage.includes("subscription_sharing_workplace_individual_usage_limit_exceeded")) {
+-				output.errorMessage = `${errorMessage}\n${CHATGPT_WORKSPACE_LIMIT_HINT}`;
+-			} else {
+-				output.errorMessage = errorMessage;
++				errorMessage = `${errorMessage}\n${CHATGPT_WORKSPACE_LIMIT_HINT}`;
+ 			}
++			output.errorMessage = await redactWithLease(credentials, errorMessage);
+ 			stream.push({ type: "error", reason: output.stopReason, error: output });
+ 			stream.end();
+ 		}
+@@ -276,7 +311,7 @@ export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOption
+ 	context: TranscriptContext,
+ 	options?: SimpleStreamOptions,
+ ): AssistantMessageEventStream => {
+-	getClientApiKey(model.provider, options?.apiKey, options?.headers);
++	if (!options?.credentials) getClientApiKey(model.provider, options?.apiKey, options?.headers);
+ 
+ 	const base = {
+ 		...buildBaseOptions(model, context, options, options?.apiKey),
+@@ -329,6 +364,8 @@ function createClient(
+ 
+ 	return new OpenAI({
+ 		apiKey,
++		// Injected transports own diagnostics and account metadata; do not add ambient SDK values.
++		...(fetch ? { logLevel: "off" as const, organization: null, project: null } : {}),
+ 		baseURL: model.baseUrl,
+ 		dangerouslyAllowBrowser: true,
+ 		fetch,
+@@ -343,6 +380,7 @@ function buildParams(
+ 	compat: Required<OpenAIResponsesCompat>,
+ 	grammarToolInputProperties: ReadonlyMap<string, string>,
+ 	configurationUpdateEffort: string | undefined,
++	chatGPTSignIn: boolean,
+ ) {
+ 	const transcriptTools = resolveTranscriptTools(context.messages, getResponsesToolSupport(compat));
+ 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
+@@ -359,7 +397,7 @@ function buildParams(
+ 
+ 	const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
+ 	// Sign in with ChatGPT rejects these request fields.
+-	const omitUnsupportedFields = isChatGPTSignIn(model, options?.apiKey);
++	const omitUnsupportedFields = chatGPTSignIn;
+ 	const params: ResponseCreateParamsStreaming = {
+ 		model: model.id,
+ 		input: messages,
+diff --git a/vendor/pi/packages/ai/src/utils/model-operations.ts b/vendor/pi/packages/ai/src/utils/model-operations.ts
+index c675d65..665f935 100644
+--- a/vendor/pi/packages/ai/src/utils/model-operations.ts
++++ b/vendor/pi/packages/ai/src/utils/model-operations.ts
+@@ -1,3 +1,4 @@
++import type { SplyceCredentials } from "../splyce-credentials.ts";
+ import type {
+ 	AnyModel,
+ 	Api,
+@@ -14,26 +15,28 @@ import type {
+ } from "../types.ts";
+ import { ModelsError } from "./models-error.ts";
+ 
+-/** The type of a model. Models without `type` are chat models. */
+-/**
+- * APIs whose adapters honour `credentials` (the shared Splyce lease option, see splyce-credentials.ts). Any other API must
+- * refuse the option rather than ignore it: ignoring it would let the adapter fall back to an ambient key. The owner of
+- * each adapter adds its API here when it is bound.
+- */
++/** Only adapters bound to native credentials may bypass ordinary provider auth. */
+ export const CREDENTIAL_APIS: ReadonlySet<string> = new Set([
+ 	"anthropic-messages",
+ 	"google-generative-ai",
+ 	"google-vertex",
++	"openai-completions",
++	"openai-responses",
++	"openai-codex-responses",
+ 	"mistral-conversations",
+ 	"pi-messages",
+ ]);
+ 
+-export function assertCredentialsSupported(api: string, options: { credentials?: unknown } | undefined): void {
++export function assertCredentialsSupported(
++	api: string,
++	options: { credentials?: SplyceCredentials | undefined } | undefined,
++): void {
+ 	if (options?.credentials && !CREDENTIAL_APIS.has(api)) {
+ 		throw new Error(`credentials are not supported for api ${api} yet`);
+ 	}
+ }
+ 
++/** The type of a model. Models without `type` are chat models. */
+ export function getModelType(model: AnyModel): ModelType {
+ 	return model.type ?? "chat";
+ }
+diff --git a/vendor/pi/packages/ai/test/splyce-anthropic-stream-safety.test.ts b/vendor/pi/packages/ai/test/splyce-anthropic-stream-safety.test.ts
+index 43b197a..456eabc 100644
+--- a/vendor/pi/packages/ai/test/splyce-anthropic-stream-safety.test.ts
++++ b/vendor/pi/packages/ai/test/splyce-anthropic-stream-safety.test.ts
+@@ -4,7 +4,7 @@ import type Anthropic from "@anthropic-ai/sdk";
+ import { Type } from "typebox";
+ import { describe, expect, it } from "vitest";
+ import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
+-import type { Context, Model } from "../src/types.ts";
++import type { Model } from "../src/types.ts";
+ import { normalizeContext } from "../src/utils/transcript.ts";
+ 
+ type Ev = { event: string; data: unknown };
+@@ -39,7 +39,7 @@ const delta = (stop_reason: string, usage: Record<string, number>): Ev => ({
+ });
+ const msgStop: Ev = { event: "message_stop", data: { type: "message_stop" } };
+ 
+-const model = {
++const model: Model<"anthropic-messages"> = {
+ 	id: "claude-haiku-4-5",
+ 	name: "Claude Haiku 4.5",
+ 	api: "anthropic-messages",
+@@ -50,12 +50,12 @@ const model = {
+ 	cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+ 	contextWindow: 200000,
+ 	maxTokens: 64000,
+-} as unknown as Model<"anthropic-messages">;
++};
+ const context = () =>
+ 	normalizeContext({
+ 		messages: [{ role: "user", content: "go", timestamp: 1 }],
+ 		tools: [{ name: "read", description: "read a file", parameters: Type.Object({ path: Type.String() }) }],
+-	} satisfies Context);
++	});
+ const run = async (events: Ev[]) => {
+ 	const s = streamAnthropic(model, context(), { client: client(sse(events)) });
+ 	const types: string[] = [];
+diff --git a/vendor/pi/packages/ai/test/splyce-codex-native-sse.test.ts b/vendor/pi/packages/ai/test/splyce-codex-native-sse.test.ts
+new file mode 100644
+index 0000000..d0a6523
+--- /dev/null
++++ b/vendor/pi/packages/ai/test/splyce-codex-native-sse.test.ts
+@@ -0,0 +1,444 @@
++// Splyce #70: actual Codex SSE parser and native resolver; only the remote service is replaced.
++// Adapter/public caller evidence only: native final-send authority remains a separate gate.
++import { afterEach, describe, expect, it, vi } from "vitest";
++import {
++	type CredentialBinding,
++	NativeCredentialResolver,
++} from "../../../../../packages/splyce-pi/src/credential-resolver.ts";
++import { type OpenAICodexResponsesOptions, stream, streamSimple } from "../src/api/openai-codex-responses.ts";
++import { streamSimple as compatSimple, stream as compatStream } from "../src/compat.ts";
++import { createModels } from "../src/models.ts";
++import { openaiCodexProvider } from "../src/providers/openai-codex.ts";
++import type { SplyceCredentials } from "../src/splyce-credentials.ts";
++import type { Model, SimpleStreamOptions } from "../src/types.ts";
++import { normalizeContext } from "../src/utils/transcript.ts";
++
++const TOKEN = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64")}.fixture`;
++const rawContext = { messages: [{ role: "user" as const, content: "fixture", timestamp: 0 }] };
++const context = normalizeContext(rawContext);
++const model: Model<"openai-codex-responses"> = {
++	api: "openai-codex-responses",
++	id: "fixture-model",
++	name: "Fixture",
++	provider: "openai-codex",
++	baseUrl: "https://provider.invalid/backend-api",
++	reasoning: false,
++	input: ["text"],
++	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++	contextWindow: 8192,
++	maxTokens: 1024,
++};
++const binding: CredentialBinding = {
++	providerConnectionId: "fixture-codex",
++	connectionRevision: "v1",
++	endpointRef: "fixture-endpoint",
++	egressPolicyRef: "fixture-egress",
++	source: { kind: "env", name: "FIXTURE_CODEX_KEY" },
++};
++async function native(secret = TOKEN) {
++	const resolver = new NativeCredentialResolver({ env: { FIXTURE_CODEX_KEY: secret } });
++	resolver.register(binding);
++	const lease = await resolver.resolve({
++		providerConnectionId: binding.providerConnectionId,
++		connectionRevision: binding.connectionRevision,
++		endpointRef: binding.endpointRef,
++		egressPolicyRef: binding.egressPolicyRef,
++		actionId: "fixture-action",
++	});
++	const state = { uses: 0, redactions: 0 };
++	const credentials = {
++		lease: {
++			use: <T>(consume: (secret: string) => T | Promise<T>) => {
++				state.uses++;
++				return lease.use(consume);
++			},
++		},
++		redact: (text: string) => {
++			state.redactions++;
++			return resolver.redact(text);
++		},
++	} satisfies SplyceCredentials;
++	return { resolver, lease, credentials, state };
++}
++function sse(event: Record<string, unknown>) {
++	return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } });
++}
++const completed = () =>
++	sse({
++		type: "response.completed",
++		response: {
++			id: "fixture-response",
++			status: "completed",
++			usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
++		},
++	});
++afterEach(() => {
++	vi.unstubAllGlobals();
++	vi.unstubAllEnvs();
++});
++
++const publicEntrypoints = ["compat stream", "compat simple", "Models stream", "Models simple"] as const;
++function publicStream(entrypoint: (typeof publicEntrypoints)[number], options: SimpleStreamOptions) {
++	if (entrypoint === "compat stream") return compatStream(model, rawContext, { ...options });
++	if (entrypoint === "compat simple") return compatSimple(model, rawContext, options);
++	const models = createModels({
++		authContext: {
++			env: async () => {
++				throw new Error("ambient auth must not be resolved");
++			},
++			fileExists: async () => false,
++		},
++	});
++	models.setProvider(openaiCodexProvider());
++	return entrypoint === "Models stream"
++		? models.stream(model, rawContext, options)
++		: models.streamSimple(model, rawContext, options);
++}
++
++// #70: exercise the real exported call paths, provider factory, parser and native lease together.
++describe("public native Codex SSE", () => {
++	for (const entrypoint of publicEntrypoints) {
++		it(`${entrypoint} uses explicit SSE with the leased bearer and admitted endpoint`, async () => {
++			vi.stubEnv("OPENAI_API_KEY", "fixture-ambient-key-must-not-be-used");
++			const { credentials } = await native();
++			let sends = 0;
++			const result = await publicStream(entrypoint, {
++				credentials,
++				transport: "sse",
++				maxRetries: 0,
++				fetch: async (input, init) => {
++					sends++;
++					expect(String(input)).toBe("https://provider.invalid/backend-api/codex/responses");
++					expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${TOKEN}`);
++					expect(init?.redirect).toBe("error");
++					return completed();
++				},
++			}).result();
++			expect(result.stopReason, result.errorMessage).toBe("stop");
++			expect(sends).toBe(1);
++		});
++		it.each([undefined, "auto", "websocket", "websocket-cached"] as const)(
++			`${entrypoint} refuses native transport %s without HTTP or socket effects`,
++			async (transport) => {
++				const { credentials, state } = await native();
++				let effects = 0;
++				let payloads = 0;
++				vi.stubGlobal(
++					"WebSocket",
++					class {
++						constructor() {
++							effects++;
++							throw new Error("must not connect");
++						}
++					},
++				);
++				const result = await publicStream(entrypoint, {
++					credentials,
++					transport,
++					onPayload: () => {
++						payloads++;
++					},
++					fetch: async () => {
++						effects++;
++						return completed();
++					},
++				}).result();
++				expect(result.stopReason).toBe("error");
++				expect(result.errorMessage).toMatch(/explicit SSE/i);
++				expect(state).toEqual({ uses: 0, redactions: 0 });
++				expect(payloads).toBe(0);
++				expect(effects).toBe(0);
++			},
++		);
++		it(`${entrypoint} rechecks connection revision after its payload hook`, async () => {
++			const { resolver, credentials } = await native();
++			let payloads = 0;
++			let sends = 0;
++			const result = await publicStream(entrypoint, {
++				credentials,
++				transport: "sse",
++				maxRetries: 0,
++				onPayload: () => {
++					payloads++;
++					resolver.register({ ...binding, connectionRevision: "v2" });
++				},
++				fetch: async () => {
++					sends++;
++					return completed();
++				},
++			}).result();
++			expect(payloads).toBe(1);
++			expect(sends).toBe(0);
++			expect(result.stopReason).toBe("error");
++		});
++		it(`${entrypoint} sanitizes structured observer data through the native lease`, async () => {
++			const { credentials } = await native();
++			const observed: unknown[] = [];
++			const result = await publicStream(entrypoint, {
++				credentials,
++				transport: "sse",
++				maxRetries: 0,
++				onProviderStreamEvent: (event) => {
++					observed.push(event);
++				},
++				fetch: async () =>
++					sse({ type: "error", message: `fixture error ${TOKEN}`, diagnostic: { [TOKEN]: [TOKEN] } }),
++			}).result();
++			expect(result.stopReason).toBe("error");
++			expect(observed).toHaveLength(1);
++			expect(observed[0]).toEqual({
++				type: "error",
++				message: "fixture error [REDACTED]",
++				diagnostic: { "[REDACTED]": ["[REDACTED]"] },
++			});
++			expect(JSON.stringify(result)).not.toContain(TOKEN);
++		});
++	}
++});
++
++describe("direct native Codex SSE", () => {
++	it.each([false, true])("protects response observer headers (revoked=%s)", async (revoked) => {
++		const { lease, credentials } = await native();
++		const observed: unknown[] = [];
++		const result = await stream(model, context, {
++			credentials,
++			transport: "sse",
++			maxRetries: 0,
++			onResponse: (response) => {
++				observed.push(response);
++			},
++			fetch: async () => {
++				const response = completed();
++				response.headers.set("x-fixture-secret", TOKEN);
++				if (revoked) lease.revoke();
++				return response;
++			},
++		}).result();
++		expect(JSON.stringify(observed)).not.toContain(TOKEN);
++		if (revoked) {
++			expect(observed).toHaveLength(0);
++			expect(result.stopReason).toBe("error");
++		} else {
++			expect(observed).toHaveLength(1);
++			expect(observed[0]).toMatchObject({ status: 200, headers: { "x-fixture-secret": "[REDACTED]" } });
++			expect(result.stopReason).toBe("stop");
++		}
++	});
++	// #70: a payload callback cannot replace the native transport after its preflight check.
++	it.each([undefined, "auto", "websocket", "websocket-cached"] as const)(
++		"keeps native SSE when the payload hook mutates transport to %s",
++		async (transport) => {
++			const { credentials } = await native();
++			let sockets = 0;
++			let sends = 0;
++			vi.stubGlobal(
++				"WebSocket",
++				class {
++					constructor() {
++						sockets++;
++						throw new Error("fixture socket must not be constructed");
++					}
++				},
++			);
++			const options: OpenAICodexResponsesOptions = {
++				credentials,
++				transport: "sse",
++				maxRetries: 0,
++				onPayload: () => {
++					options.transport = transport;
++				},
++				fetch: async () => {
++					sends++;
++					return completed();
++				},
++			};
++			const result = await stream(model, context, options).result();
++			expect(sockets).toBe(0);
++			expect(sends).toBe(1);
++			expect(result.stopReason, result.errorMessage).toBe("stop");
++		},
++	);
++	for (const [name, start] of [
++		["stream", stream],
++		["streamSimple", streamSimple],
++	] as const) {
++		it(`${name} sends the leased bearer through explicit SSE with redirects refused`, async () => {
++			const { credentials } = await native();
++			let sends = 0;
++			const options = {
++				credentials,
++				transport: "sse",
++				maxRetries: 0,
++				headers: { "x-trace": "fixture-trace" },
++				fetch: async (input, init) => {
++					sends++;
++					expect(String(input)).toBe("https://provider.invalid/backend-api/codex/responses");
++					const headers = new Headers(init?.headers);
++					expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
++					expect(headers.get("x-api-key")).toBeNull();
++					expect(headers.get("chatgpt-account-id")).toBe("fixture-account");
++					expect(init?.redirect).toBe("error");
++					return completed();
++				},
++			} satisfies OpenAICodexResponsesOptions;
++			const result = await start(model, context, options).result();
++			expect(result.stopReason, result.errorMessage).toBe("stop");
++			expect(sends).toBe(1);
++		});
++	}
++	// #70: a fixed transport refusal must not touch even a revoked native credential.
++	describe.each([false, true])("native lease revoked=%s", (revoked) => {
++		it.each([undefined, "auto", "websocket", "websocket-cached"] as const)(
++			"refuses native transport %s before credential, payload or transport effects",
++			async (transport) => {
++				const { credentials, lease, state } = await native();
++				if (revoked) lease.revoke();
++				let effects = 0;
++				let payloads = 0;
++				vi.stubGlobal(
++					"WebSocket",
++					class {
++						constructor() {
++							effects++;
++							throw new Error("must not connect");
++						}
++					},
++				);
++				const result = await stream(model, context, {
++					credentials,
++					transport,
++					onPayload: () => {
++						payloads++;
++					},
++					fetch: async () => {
++						effects++;
++						return completed();
++					},
++				}).result();
++				expect(result.stopReason).toBe("error");
++				expect(result.errorMessage).toMatch(/explicit SSE/i);
++				expect(state).toEqual({ uses: 0, redactions: 0 });
++				expect(payloads).toBe(0);
++				expect(effects).toBe(0);
++			},
++		);
++	});
++	it("rechecks connection revision after payload hooks and sends nothing stale", async () => {
++		const { resolver, credentials } = await native();
++		let payloads = 0;
++		let sends = 0;
++		const result = await stream(model, context, {
++			credentials,
++			transport: "sse",
++			maxRetries: 0,
++			onPayload: () => {
++				payloads++;
++				resolver.register({ ...binding, connectionRevision: "v2" });
++			},
++			fetch: async () => {
++				sends++;
++				return completed();
++			},
++		}).result();
++		expect(payloads).toBe(1);
++		expect(sends).toBe(0);
++		expect(result.stopReason).toBe("error");
++	});
++	it("a revoked lease before dispatch never sends", async () => {
++		const { lease, credentials } = await native();
++		lease.revoke();
++		let sends = 0;
++		const result = await stream(model, context, {
++			credentials,
++			transport: "sse",
++			fetch: async () => {
++				sends++;
++				return completed();
++			},
++		}).result();
++		expect(result.stopReason).toBe("error");
++		expect(sends).toBe(0);
++	});
++	it("rechecks the lease before a retry rather than reusing the first bearer", async () => {
++		const { lease, credentials } = await native();
++		let sends = 0;
++		const result = await stream(model, context, {
++			credentials,
++			transport: "sse",
++			maxRetries: 1,
++			fetch: async () => {
++				sends++;
++				lease.revoke();
++				return new Response("fixture unavailable", { status: 503, headers: { "retry-after-ms": "0" } });
++			},
++		}).result();
++		expect(result.stopReason).toBe("error");
++		expect(sends).toBe(1);
++	});
++	it.each([false, true])(
++		"redacts a provider error from terminal output and event observers (revoked=%s)",
++		async (revoked) => {
++			const { lease, credentials } = await native();
++			let sends = 0;
++			const observed: unknown[] = [];
++			const result = await stream(model, context, {
++				credentials,
++				transport: "sse",
++				maxRetries: 0,
++				onProviderStreamEvent: (event) => {
++					observed.push(event);
++				},
++				fetch: async () => {
++					sends++;
++					const body = new ReadableStream<Uint8Array>(
++						{
++							pull(controller) {
++								if (revoked) lease.revoke();
++								controller.enqueue(
++									new TextEncoder().encode(
++										`data: ${JSON.stringify({ type: "error", code: "fixture_error", message: `fixture error ${TOKEN}` })}\n\n`,
++									),
++								);
++								controller.close();
++							},
++						},
++						{ highWaterMark: 0 },
++					);
++					return new Response(body, { headers: { "content-type": "text/event-stream" } });
++				},
++			}).result();
++			expect(sends).toBe(1);
++			expect(result.stopReason).toBe("error");
++			expect(result.errorMessage).toBeTruthy();
++			expect(JSON.stringify(result)).not.toContain(TOKEN);
++			expect(JSON.stringify(observed)).not.toContain(TOKEN);
++			if (!revoked) expect(observed).toHaveLength(1);
++		},
++	);
++	it("redacts observer keys and values before JSON escaping can hide secret bytes", async () => {
++		const secret = TOKEN.replace("fixture.", 'fixture"\\.');
++		const { credentials } = await native(secret);
++		const observed: unknown[] = [];
++		const result = await stream(model, context, {
++			credentials,
++			transport: "sse",
++			maxRetries: 0,
++			onProviderStreamEvent: (event) => {
++				observed.push(event);
++			},
++			fetch: async () =>
++				sse({
++					type: "error",
++					message: `fixture error ${secret}`,
++					metadata: { [secret]: [secret, { nested: secret }] },
++				}),
++		}).result();
++		expect(result.stopReason).toBe("error");
++		expect(observed).toHaveLength(1);
++		const event = observed[0] as { message: string; metadata: Record<string, unknown> };
++		expect(event.message).toBe("fixture error [REDACTED]");
++		expect(event.metadata).toEqual({ "[REDACTED]": ["[REDACTED]", { nested: "[REDACTED]" }] });
++		expect(result.errorMessage).not.toContain(secret);
++		expect(result.errorMessage).not.toContain(JSON.stringify(secret).slice(1, -1));
++	});
++});
+diff --git a/vendor/pi/packages/ai/test/splyce-event-redaction.test.ts b/vendor/pi/packages/ai/test/splyce-event-redaction.test.ts
+new file mode 100644
+index 0000000..5f14318
+--- /dev/null
++++ b/vendor/pi/packages/ai/test/splyce-event-redaction.test.ts
+@@ -0,0 +1,45 @@
++// Shared helper handoff: actual native resolver, no SDK or provider network involved.
++import { describe, expect, it } from "vitest";
++import { NativeCredentialResolver } from "../../../../../packages/splyce-pi/src/credential-resolver.ts";
++import { redactEventWithLease, type SplyceCredentials } from "../src/splyce-credentials.ts";
++
++const SECRET = 'synthetic-event-key"\\';
++async function fixture() {
++	const resolver = new NativeCredentialResolver({ env: { EVENT_FIXTURE_KEY: SECRET } });
++	const request = {
++		providerConnectionId: "event-fixture",
++		connectionRevision: "v1",
++		endpointRef: "endpoint",
++		egressPolicyRef: "policy",
++		actionId: "action",
++	};
++	resolver.register({ ...request, source: { kind: "env", name: "EVENT_FIXTURE_KEY" } });
++	const lease = await resolver.resolve(request);
++	return { lease, credentials: { lease, redact: resolver.redact } satisfies SplyceCredentials };
++}
++
++describe("shared native event redaction", () => {
++	it("gives an observer a sanitized copy while preserving the parser input and JSON value shapes", async () => {
++		const { credentials } = await fixture();
++		const input = { [SECRET]: [SECRET, { nested: SECRET }, 42, true, null], clean: "kept" };
++		const original = structuredClone(input);
++		const observed = await redactEventWithLease(credentials, input);
++		expect(observed).toEqual({
++			"[REDACTED]": ["[REDACTED]", { nested: "[REDACTED]" }, 42, true, null],
++			clean: "kept",
++		});
++		expect(input).toEqual(original);
++		expect(observed).not.toBe(input);
++	});
++
++	it("revocation before the observer handoff prevents retention of an in-flight result", async () => {
++		const { lease, credentials } = await fixture();
++		const retained: unknown[] = [];
++		const pending = redactEventWithLease(credentials, { message: SECRET }).then((event) => {
++			retained.push(event);
++		});
++		lease.revoke();
++		await expect(pending).rejects.toThrow();
++		expect(retained).toHaveLength(0);
++	});
++});
+diff --git a/vendor/pi/packages/ai/test/splyce-google-stream-safety.test.ts b/vendor/pi/packages/ai/test/splyce-google-stream-safety.test.ts
+index e1887fe..5660449 100644
+--- a/vendor/pi/packages/ai/test/splyce-google-stream-safety.test.ts
++++ b/vendor/pi/packages/ai/test/splyce-google-stream-safety.test.ts
+@@ -39,22 +39,21 @@ import { Type } from "typebox";
+ import { stream as streamGoogle } from "../src/api/google-generative-ai.ts";
+ import { convertMessages } from "../src/api/google-shared.ts";
+ import { stream as streamVertex } from "../src/api/google-vertex.ts";
+-import type { Api, AssistantMessage, Context, Model } from "../src/types.ts";
++import type { Api, AssistantMessage, Model } from "../src/types.ts";
+ import { normalizeContext } from "../src/utils/transcript.ts";
+ 
+-const model = <TApi extends Api>(provider: string, api: TApi, id: string): Model<TApi> =>
+-	({
+-		id,
+-		name: id,
+-		api,
+-		provider,
+-		baseUrl: "https://example.invalid",
+-		reasoning: true,
+-		input: ["text"],
+-		cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+-		contextWindow: 100000,
+-		maxTokens: 8000,
+-	}) as unknown as Model<TApi>;
++const model = <TApi extends Api>(provider: string, api: TApi, id: string): Model<TApi> => ({
++	id,
++	name: id,
++	api,
++	provider,
++	baseUrl: "https://example.invalid",
++	reasoning: true,
++	input: ["text"],
++	cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
++	contextWindow: 100000,
++	maxTokens: 8000,
++});
+ const gemini = model("google", "google-generative-ai", "gemini-3-flash-preview");
+ const vertex = model("google-vertex", "google-vertex", "gemini-3-flash-preview");
+ 
+@@ -62,7 +61,7 @@ const context = () =>
+ 	normalizeContext({
+ 		messages: [{ role: "user", content: "go", timestamp: 1 }],
+ 		tools: [{ name: "read", description: "read a file", parameters: Type.Object({ path: Type.String() }) }],
+-	} satisfies Context);
++	});
+ const call = (extra: Record<string, unknown> = {}) => ({
+ 	functionCall: { id: "fc_1", name: "read", args: { path: "/workspace/a.txt" } },
+ 	...extra,
+@@ -86,10 +85,13 @@ describe("TD-20 Google families under the shared core contract", () => {
+ 		expect(original.thoughtSignature).toBe("c2lnbmF0dXJlLTE=");
+ 
+ 		const replay = (target: Model<"google-generative-ai">) =>
+-			convertMessages(target as Model<"google-generative-ai">, {
+-				...context(),
+-				messages: [...context().messages, result as AssistantMessage],
+-			});
++			convertMessages(
++				target,
++				normalizeContext({
++					...context(),
++					messages: [...context().messages, result as AssistantMessage],
++				}),
++			);
+ 		const sameModel = JSON.stringify(replay(gemini));
+ 		expect(sameModel).toContain("c2lnbmF0dXJlLTE=");
+ 		const otherModel = JSON.stringify(replay(model("google", "google-generative-ai", "gemini-2.5-flash")));
+diff --git a/vendor/pi/packages/ai/test/splyce-openai-api-identity.test.ts b/vendor/pi/packages/ai/test/splyce-openai-api-identity.test.ts
+new file mode 100644
+index 0000000..41483ed
+--- /dev/null
++++ b/vendor/pi/packages/ai/test/splyce-openai-api-identity.test.ts
+@@ -0,0 +1,108 @@
++// Splyce #70: real Models/provider factories may not change the API admitted with native credentials.
++import { describe, expect, it } from "vitest";
++import { NativeCredentialResolver } from "../../../../../packages/splyce-pi/src/credential-resolver.ts";
++import { openAICodexResponsesApi } from "../src/api/openai-codex-responses.lazy.ts";
++import { openAICompletionsApi } from "../src/api/openai-completions.lazy.ts";
++import { openAIResponsesApi } from "../src/api/openai-responses.lazy.ts";
++import { createModels, createProvider } from "../src/models.ts";
++import { openaiProvider } from "../src/providers/openai.ts";
++import type { SplyceCredentials } from "../src/splyce-credentials.ts";
++import type { Api, Model, StreamOptions } from "../src/types.ts";
++
++const apis = ["openai-completions", "openai-responses", "openai-codex-responses"] as const;
++const factories = {
++	"openai-completions": openAICompletionsApi,
++	"openai-responses": openAIResponsesApi,
++	"openai-codex-responses": openAICodexResponsesApi,
++};
++const context = { messages: [{ role: "user" as const, content: "fixture", timestamp: 0 }] };
++const secret = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64")}.fixture`;
++
++describe("native OpenAI API identity at the actual implementation", () => {
++	for (const implementation of apis) {
++		for (const declared of apis.filter((api) => api !== implementation)) {
++			for (const simple of [false, true]) {
++				it(`${implementation} refuses model API ${declared} through Models (simple=${simple}) before lease or effects`, async () => {
++					const resolver = new NativeCredentialResolver({ env: { FIXTURE_KEY: secret } });
++					resolver.register({
++						providerConnectionId: "fixture-connection",
++						connectionRevision: "v1",
++						endpointRef: "fixture-endpoint",
++						egressPolicyRef: "fixture-egress",
++						source: { kind: "env", name: "FIXTURE_KEY" },
++					});
++					const lease = await resolver.resolve({
++						providerConnectionId: "fixture-connection",
++						connectionRevision: "v1",
++						endpointRef: "fixture-endpoint",
++						egressPolicyRef: "fixture-egress",
++						actionId: "fixture-action",
++					});
++					let uses = 0;
++					let effects = 0;
++					let payloads = 0;
++					const credentials: SplyceCredentials = {
++						lease: {
++							use: (consume) => {
++								uses++;
++								return lease.use(consume);
++							},
++						},
++						redact: resolver.redact,
++					};
++					const model: Model<Api> = {
++						id: "fixture-model",
++						name: "Fixture",
++						api: declared,
++						provider: "fixture-provider",
++						baseUrl: "https://provider.invalid/v1",
++						reasoning: false,
++						input: ["text"],
++						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++						contextWindow: 8192,
++						maxTokens: 1024,
++					};
++					const models = createModels({
++						authContext: {
++							env: async () => {
++								throw new Error("must not resolve ambient auth");
++							},
++							fileExists: async () => false,
++						},
++					});
++					models.setProvider(
++						createProvider({
++							id: model.provider,
++							name: "Fixture",
++							baseUrl: model.baseUrl,
++							auth: openaiProvider().auth,
++							models: [model],
++							api: factories[implementation](),
++						}),
++					);
++					const options = {
++						credentials,
++						transport: "sse",
++						maxRetries: 0,
++						onPayload: () => {
++							payloads++;
++						},
++						fetch: async () => {
++							effects++;
++							throw new Error("fixture must not send");
++						},
++					} satisfies StreamOptions;
++					const result = await (simple
++						? models.streamSimple(model, context, options)
++						: models.stream(model, context, options)
++					).result();
++					expect(result.stopReason).toBe("error");
++					expect(result.errorMessage).toMatch(/native credential API identity/i);
++					expect(uses).toBe(0);
++					expect(effects).toBe(0);
++					expect(payloads).toBe(0);
++				});
++			}
++		}
++	}
++});
+diff --git a/vendor/pi/packages/ai/test/splyce-openai-credentials.test.ts b/vendor/pi/packages/ai/test/splyce-openai-credentials.test.ts
+new file mode 100644
+index 0000000..02c6806
+--- /dev/null
++++ b/vendor/pi/packages/ai/test/splyce-openai-credentials.test.ts
+@@ -0,0 +1,344 @@
++// Splyce #70: actual OpenAI SDK with a fake remote service; this is adapter evidence, not native-authority proof.
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { stream as codex } from "../src/api/openai-codex-responses.ts";
++import { openAICompletionsApi } from "../src/api/openai-completions.lazy.ts";
++import { stream as chat, streamSimple as simpleChat } from "../src/api/openai-completions.ts";
++import { stream as responses, streamSimple as simpleResponses } from "../src/api/openai-responses.ts";
++import { streamSimple as compatSimple, stream as compatStream } from "../src/compat.ts";
++import { createModels, createProvider } from "../src/models.ts";
++import { openaiProvider } from "../src/providers/openai.ts";
++import type { SplyceCredentials } from "../src/splyce-credentials.ts";
++import type { Api, Model, StreamOptions } from "../src/types.ts";
++import { normalizeContext } from "../src/utils/transcript.ts";
++
++const context = normalizeContext({ messages: [{ role: "user", content: "fixture", timestamp: 0 }] });
++const key = "sk-fixture-lease-only";
++afterEach(() => vi.unstubAllEnvs());
++function makeModel<T extends Api>(api: T): Model<T> {
++	return {
++		api,
++		id: "fixture-model",
++		name: "Fixture",
++		provider: "openai",
++		baseUrl: "https://provider.invalid/v1",
++		reasoning: false,
++		input: ["text"],
++		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++		contextWindow: 8192,
++		maxTokens: 1024,
++	};
++}
++function leaseFixture(secret = key) {
++	const state = { depth: 0, uses: 0, revoked: false };
++	const credentials: SplyceCredentials = {
++		lease: {
++			async use(consume) {
++				state.uses++;
++				if (state.revoked) throw new Error("fixture lease revoked");
++				state.depth++;
++				try {
++					return await consume(secret);
++				} finally {
++					state.depth--;
++				}
++			},
++		},
++		redact: (text) => text.replaceAll(secret, "[redacted]"),
++	};
++	return { state, credentials };
++}
++function payload(api: Api) {
++	const event =
++		api === "openai-completions"
++			? { id: "chat-fixture", choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] }
++			: {
++					type: "response.completed",
++					response: {
++						id: "resp-fixture",
++						status: "completed",
++						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
++					},
++				};
++	return `data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`;
++}
++
++for (const [api, start] of [
++	["openai-completions", (options: StreamOptions) => chat(makeModel("openai-completions"), context, options)],
++	["openai-responses", (options: StreamOptions) => responses(makeModel("openai-responses"), context, options)],
++] as const) {
++	describe(`Splyce leased ${api} through the actual SDK`, () => {
++		it.each([undefined, null, "invalid"])(
++			"terminates malformed native redactor %s before any lease or send",
++			async (redact) => {
++				const { state, credentials } = leaseFixture();
++				const malformed = { ...credentials, redact } as unknown as SplyceCredentials;
++				let sends = 0;
++				const result = await start({
++					credentials: malformed,
++					fetch: async () => {
++						sends++;
++						throw new Error("must not send");
++					},
++				}).result();
++				expect(result.stopReason).toBe("error");
++				expect(result.errorMessage).toContain("native redact function");
++				expect(state.uses).toBe(0);
++				expect(sends).toBe(0);
++			},
++		);
++		it("sends only inside the lease with the leased bearer and redirects refused", async () => {
++			const { state, credentials } = leaseFixture();
++			let sends = 0;
++			const fetch: typeof globalThis.fetch = async (_input, init) => {
++				sends++;
++				expect(state.depth).toBe(1);
++				expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${key}`);
++				expect(new Headers(init?.headers).get("x-api-key")).toBeNull();
++				expect(init?.redirect).toBe("error");
++				return new Response(payload(api), { headers: { "content-type": "text/event-stream" } });
++			};
++			const result = await start({
++				credentials,
++				fetch,
++				maxRetries: 0,
++				headers: { "x-trace": "fixture-trace" },
++			}).result();
++			expect(result.stopReason).toBe("stop");
++			expect(sends).toBe(1);
++			expect(state.depth).toBe(0);
++		});
++		it("refuses a revoked lease before any HTTP send", async () => {
++			const { state, credentials } = leaseFixture();
++			state.revoked = true;
++			let sends = 0;
++			const result = await start({
++				credentials,
++				fetch: async () => {
++					sends++;
++					throw new Error("must not send");
++				},
++				maxRetries: 0,
++			}).result();
++			expect(result.stopReason).toBe("error");
++			expect(state.uses).toBeGreaterThan(0);
++			expect(result.errorMessage).not.toContain(key);
++			expect(sends).toBe(0);
++		});
++		it("rechecks the lease before a retry and sends nothing after revocation", async () => {
++			const { state, credentials } = leaseFixture();
++			let sends = 0;
++			const result = await start({
++				credentials,
++				maxRetries: 1,
++				fetch: async () => {
++					sends++;
++					expect(state.depth).toBe(1);
++					state.revoked = true;
++					return new Response(JSON.stringify({ error: { message: "fixture unavailable" } }), {
++						status: 503,
++						headers: { "content-type": "application/json", "retry-after-ms": "0" },
++					});
++				},
++			}).result();
++			expect(result.stopReason).toBe("error");
++			expect(state.uses).toBeGreaterThanOrEqual(2);
++			expect(sends).toBe(1);
++		});
++		it("rejects an explicit key combined with native credentials", async () => {
++			const { state, credentials } = leaseFixture();
++			const result = await start({
++				credentials,
++				apiKey: "other-fixture",
++				fetch: async () => {
++					throw new Error("must not send");
++				},
++				maxRetries: 0,
++			}).result();
++			expect(result.stopReason).toBe("error");
++			expect(result.errorMessage).toContain("mutually exclusive");
++			expect(state.uses).toBe(0);
++		});
++		it("redacts service error text through the native redactor", async () => {
++			const { credentials } = leaseFixture();
++			const result = await start({
++				credentials,
++				fetch: async () =>
++					new Response(JSON.stringify({ error: { message: `fixture error ${key}` } }), {
++						status: 400,
++						headers: { "content-type": "application/json" },
++					}),
++				maxRetries: 0,
++			}).result();
++			expect(result.stopReason).toBe("error");
++			expect(result.errorMessage).toContain("[redacted]");
++			expect(result.errorMessage).not.toContain(key);
++		});
++	});
++}
++
++describe("Splyce simplified OpenAI entrypoints", () => {
++	for (const [api, start] of [
++		["openai-completions", (options: StreamOptions) => simpleChat(makeModel("openai-completions"), context, options)],
++		[
++			"openai-responses",
++			(options: StreamOptions) => simpleResponses(makeModel("openai-responses"), context, options),
++		],
++	] as const) {
++		it(`${api} preserves the credential option`, async () => {
++			const { credentials, state } = leaseFixture();
++			let sends = 0;
++			const result = await start({
++				credentials,
++				fetch: async () => {
++					sends++;
++					expect(state.depth).toBe(1);
++					return new Response(payload(api), { headers: { "content-type": "text/event-stream" } });
++				},
++			}).result();
++			expect(result.stopReason).toBe("stop");
++			expect(sends).toBe(1);
++		});
++	}
++});
++
++it("keeps ChatGPT sign-in request semantics without returning the leased token", async () => {
++	const { credentials } = leaseFixture("fixture-oauth-access-token");
++	let sent: Record<string, unknown> | undefined;
++	const result = await responses({ ...makeModel("openai-responses"), baseUrl: "https://api.openai.com/v1" }, context, {
++		credentials,
++		maxTokens: 128,
++		cacheRetention: "long",
++		onPayload: (body) => {
++			sent = body as Record<string, unknown>;
++		},
++		fetch: async () =>
++			new Response(payload("openai-responses"), { headers: { "content-type": "text/event-stream" } }),
++	}).result();
++	expect(result.stopReason).toBe("stop");
++	expect(sent).toBeDefined();
++	expect(sent?.max_output_tokens).toBeUndefined();
++	expect(sent?.prompt_cache_retention).toBeUndefined();
++});
++
++describe("Splyce OpenAI public call paths", () => {
++	for (const api of ["openai-completions", "openai-responses"] as const) {
++		for (const entrypoint of ["compat stream", "compat simple", "Models stream", "Models simple"] as const) {
++			it(`${api} ${entrypoint} preserves native credentials and the admitted endpoint`, async () => {
++				vi.stubEnv("OPENAI_API_KEY", "fixture-ambient-key");
++				const { state, credentials } = leaseFixture();
++				let sends = 0;
++				const options = {
++					credentials,
++					maxRetries: 0,
++					fetch: async (input, init) => {
++						sends++;
++						expect(String(input)).toMatch(/^https:\/\/provider\.invalid\/v1\//);
++						expect(state.depth).toBe(1);
++						expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${key}`);
++						return new Response(payload(api), { headers: { "content-type": "text/event-stream" } });
++					},
++				} satisfies StreamOptions;
++				const models = createModels({
++					authContext: {
++						env: async () => {
++							throw new Error("ambient auth must not be resolved");
++						},
++						fileExists: async () => false,
++					},
++				});
++				const selected = makeModel(api);
++				models.setProvider(
++					api === "openai-responses"
++						? openaiProvider()
++						: createProvider({
++								id: "openai",
++								name: "Fixture OpenAI-compatible",
++								baseUrl: selected.baseUrl,
++								auth: openaiProvider().auth,
++								models: [selected],
++								api: openAICompletionsApi(),
++							}),
++				);
++				const raw = { messages: [{ role: "user" as const, content: "fixture", timestamp: 0 }] };
++				const stream =
++					entrypoint === "compat stream"
++						? compatStream(selected, raw, options)
++						: entrypoint === "compat simple"
++							? compatSimple(selected, raw, options)
++							: entrypoint === "Models stream"
++								? models.stream(selected, raw, options)
++								: models.streamSimple(selected, raw, options);
++				const result = await stream.result();
++				expect(result.stopReason, result.errorMessage).toBe("stop");
++				expect(sends).toBe(1);
++			});
++		}
++	}
++});
++
++it("rejects conflicting native and explicit Codex credentials before any effect", async () => {
++	const { credentials, state } = leaseFixture();
++	let sends = 0;
++	const token = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64")}.fixture`;
++	const result = await codex(makeModel("openai-codex-responses"), context, {
++		credentials,
++		apiKey: token,
++		transport: "sse",
++		fetch: async () => {
++			sends++;
++			throw new Error("must not send");
++		},
++	}).result();
++	expect(result.stopReason).toBe("error");
++	expect(result.errorMessage).toContain("mutually exclusive");
++	expect(state.uses).toBe(0);
++	expect(sends).toBe(0);
++});
++
++// #70: the shared header contract must also reject auth carried by model configuration.
++for (const [api, start] of [
++	[
++		"openai-completions",
++		(options: StreamOptions, headers: Record<string, string>) =>
++			chat({ ...makeModel("openai-completions"), headers }, context, options),
++	],
++	[
++		"openai-responses",
++		(options: StreamOptions, headers: Record<string, string>) =>
++			responses({ ...makeModel("openai-responses"), headers }, context, options),
++	],
++	[
++		"openai-codex-responses",
++		(options: StreamOptions, headers: Record<string, string>) =>
++			codex({ ...makeModel("openai-codex-responses"), headers }, context, options),
++	],
++] as const) {
++	for (const source of ["options", "model"] as const) {
++		it.each(["Authorization", "Proxy-Authorization", "X-Api-Key", "api-key", "X-Goog-Api-Key", "Cookie"])(
++			`${api} rejects ${source} auth header %s before any lease or send`,
++			async (name) => {
++				const token = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64")}.fixture`;
++				const { credentials, state } = leaseFixture(token);
++				let sends = 0;
++				const headers = { [name]: "caller-override" };
++				const result = await start(
++					{
++						credentials,
++						transport: "sse",
++						maxRetries: 0,
++						headers: source === "options" ? headers : {},
++						fetch: async () => {
++							sends++;
++							return new Response(payload(api), { headers: { "content-type": "text/event-stream" } });
++						},
++					},
++					source === "model" ? headers : {},
++				).result();
++				expect(result.stopReason).toBe("error");
++				expect(result.errorMessage).toMatch(/caller-supplied.*header/);
++				expect(state.uses).toBe(0);
++				expect(sends).toBe(0);
++			},
++		);
++	}
++}
+diff --git a/vendor/pi/packages/ai/test/splyce-openai-native-resolver.test.ts b/vendor/pi/packages/ai/test/splyce-openai-native-resolver.test.ts
+new file mode 100644
+index 0000000..7971834
+--- /dev/null
++++ b/vendor/pi/packages/ai/test/splyce-openai-native-resolver.test.ts
+@@ -0,0 +1,207 @@
++// Splyce #70: actual credential resolver + actual OpenAI SDK. Only the remote service is a fixture.
++// These cases do not qualify native egress admission, receipts or the packaged app.
++import { describe, expect, it } from "vitest";
++import {
++	type CredentialBinding,
++	NativeCredentialResolver,
++} from "../../../../../packages/splyce-pi/src/credential-resolver.ts";
++import { stream as chat } from "../src/api/openai-completions.ts";
++import { stream as responses } from "../src/api/openai-responses.ts";
++import type { SplyceCredentials } from "../src/splyce-credentials.ts";
++import type { Api, Model, StreamOptions } from "../src/types.ts";
++import { normalizeContext } from "../src/utils/transcript.ts";
++
++const SECRET = "sk-synthetic-native-resolver-fixture";
++const context = normalizeContext({ messages: [{ role: "user", content: "fixture", timestamp: 0 }] });
++function model<T extends Api>(api: T): Model<T> {
++	return {
++		api,
++		id: "fixture-model",
++		name: "Fixture",
++		provider: "openai",
++		baseUrl: "https://provider.invalid/v1",
++		reasoning: false,
++		input: ["text"],
++		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++		contextWindow: 8192,
++		maxTokens: 1024,
++	};
++}
++const binding: CredentialBinding = {
++	providerConnectionId: "fixture-connection",
++	connectionRevision: "v1",
++	endpointRef: "fixture-endpoint",
++	egressPolicyRef: "fixture-policy",
++	source: { kind: "env", name: "FIXTURE_KEY" },
++};
++async function nativeCredentials() {
++	const resolver = new NativeCredentialResolver({ env: { FIXTURE_KEY: SECRET } });
++	resolver.register(binding);
++	const lease = await resolver.resolve({
++		providerConnectionId: binding.providerConnectionId,
++		connectionRevision: binding.connectionRevision,
++		endpointRef: binding.endpointRef,
++		egressPolicyRef: binding.egressPolicyRef,
++		actionId: "fixture-action",
++	});
++	return { resolver, lease, credentials: { lease, redact: resolver.redact } satisfies SplyceCredentials };
++}
++function successfulResponse(api: Api) {
++	const event =
++		api === "openai-completions"
++			? { id: "chat-fixture", choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] }
++			: {
++					type: "response.completed",
++					response: {
++						id: "resp-fixture",
++						status: "completed",
++						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
++					},
++				};
++	return new Response(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`, {
++		headers: { "content-type": "text/event-stream" },
++	});
++}
++
++for (const [api, start] of [
++	["openai-completions", (options: StreamOptions) => chat(model("openai-completions"), context, options)],
++	["openai-responses", (options: StreamOptions) => responses(model("openai-responses"), context, options)],
++] as const) {
++	describe(`${api} with the real native resolver`, () => {
++		// #70: response metadata is an observer boundary just like parsed stream events.
++		it.each([false, true])("protects response observer headers (revoked=%s)", async (revoked) => {
++			const { lease, credentials } = await nativeCredentials();
++			const observed: unknown[] = [];
++			const result = await start({
++				credentials,
++				maxRetries: 0,
++				onResponse: (response) => {
++					observed.push(response);
++				},
++				fetch: async () => {
++					const response = successfulResponse(api);
++					response.headers.set("x-fixture-secret", SECRET);
++					if (revoked) lease.revoke();
++					return response;
++				},
++			}).result();
++			expect(JSON.stringify(observed)).not.toContain(SECRET);
++			if (revoked) {
++				expect(observed).toHaveLength(0);
++				expect(result.stopReason).toBe("error");
++			} else {
++				expect(observed).toHaveLength(1);
++				expect(observed[0]).toMatchObject({ status: 200, headers: { "x-fixture-secret": "[REDACTED]" } });
++				expect(result.stopReason).toBe("stop");
++			}
++		});
++		it("sends nothing when the connection revision changes after the lease was issued", async () => {
++			const { resolver, credentials } = await nativeCredentials();
++			resolver.register({ ...binding, connectionRevision: "v2" });
++			let sends = 0;
++			const result = await start({
++				credentials,
++				maxRetries: 0,
++				fetch: async () => {
++					sends++;
++					return successfulResponse(api);
++				},
++			}).result();
++			expect(sends).toBe(0);
++			expect(result.stopReason).toBe("error");
++		});
++		it("does not expose a revoked credential in a late stream error", async () => {
++			const { lease, credentials } = await nativeCredentials();
++			let sends = 0;
++			const observed: unknown[] = [];
++			const result = await start({
++				credentials,
++				maxRetries: 0,
++				onProviderStreamEvent: (event) => {
++					observed.push(event);
++				},
++				fetch: async () => {
++					sends++;
++					const body = new ReadableStream<Uint8Array>(
++						{
++							pull(controller) {
++								lease.revoke();
++								const error = { message: `fixture failure ${SECRET}`, code: "fixture_error" };
++								const event = api === "openai-completions" ? { error } : { type: "error", ...error };
++								controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
++								controller.close();
++							},
++						},
++						{ highWaterMark: 0 },
++					);
++					return new Response(body, { headers: { "content-type": "text/event-stream" } });
++				},
++			}).result();
++			expect(sends).toBe(1);
++			expect(result.stopReason).toBe("error");
++			expect(result.errorMessage).toBeTruthy();
++			expect(result.errorMessage).not.toContain(SECRET);
++			expect(JSON.stringify(observed)).not.toContain(SECRET);
++		});
++		it("does not expose credential bytes to an error-event observer", async () => {
++			const { credentials } = await nativeCredentials();
++			const observed: unknown[] = [];
++			const error = { message: `fixture failure ${SECRET}`, code: "fixture_error" };
++			const event = api === "openai-completions" ? { error } : { type: "error", ...error };
++			const result = await start({
++				credentials,
++				maxRetries: 0,
++				onProviderStreamEvent: (value) => {
++					observed.push(value);
++				},
++				fetch: async () =>
++					new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } }),
++			}).result();
++			expect(result.stopReason).toBe("error");
++			expect(result.errorMessage).not.toContain(SECRET);
++			expect(JSON.stringify(observed)).not.toContain(SECRET);
++		});
++		it.each([false, true])(
++			"protects successful event metadata at the observer boundary (revoked=%s)",
++			async (revoked) => {
++				const { lease, credentials } = await nativeCredentials();
++				const observed: unknown[] = [];
++				const result = await start({
++					credentials,
++					maxRetries: 0,
++					onProviderStreamEvent: (event) => {
++						observed.push(event);
++					},
++					fetch: async () => {
++						const text = await successfulResponse(api).text();
++						const event = JSON.parse(text.split("\n")[0]!.slice(6)) as Record<string, unknown>;
++						const body = new ReadableStream<Uint8Array>(
++							{
++								pull(controller) {
++									if (revoked) lease.revoke();
++									controller.enqueue(
++										new TextEncoder().encode(
++											`data: ${JSON.stringify({ ...event, diagnostic: { [SECRET]: [SECRET] } })}\n\n`,
++										),
++									);
++									controller.close();
++								},
++							},
++							{ highWaterMark: 0 },
++						);
++						return new Response(body, { headers: { "content-type": "text/event-stream" } });
++					},
++				}).result();
++				expect(JSON.stringify(observed)).not.toContain(SECRET);
++				if (revoked) {
++					expect(observed).toHaveLength(0);
++					expect(result.stopReason).toBe("error");
++				} else {
++					expect(observed).toHaveLength(1);
++					expect(observed[0]).toMatchObject({ diagnostic: { "[REDACTED]": ["[REDACTED]"] } });
++					expect(result.stopReason).toBe("stop");
++				}
++			},
++		);
++	});
++}
+diff --git a/vendor/pi/packages/ai/test/splyce-openai-stream-safety.test.ts b/vendor/pi/packages/ai/test/splyce-openai-stream-safety.test.ts
+new file mode 100644
+index 0000000..5b7665c
+--- /dev/null
++++ b/vendor/pi/packages/ai/test/splyce-openai-stream-safety.test.ts
+@@ -0,0 +1,284 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { closeOpenAICodexWebSocketSessions, stream as streamCodex } from "../src/api/openai-codex-responses.ts";
++import { stream as streamChat } from "../src/api/openai-completions.ts";
++import { stream as streamResponses } from "../src/api/openai-responses.ts";
++import type { Api, Model } from "../src/types.ts";
++import { normalizeContext } from "../src/utils/transcript.ts";
++
++const fixture = vi.hoisted(() => ({
++	chat: [] as unknown[],
++	responses: [] as unknown[],
++	abortAtEnd: undefined as AbortController | undefined,
++}));
++
++// The remote SDK is the fixture; the actual adapter and stream parser run.
++vi.mock("openai", () => {
++	function responseFor(chunks: unknown[]) {
++		const data = {
++			async *[Symbol.asyncIterator]() {
++				for (const chunk of chunks) yield chunk;
++				fixture.abortAtEnd?.abort();
++			},
++		};
++		const result = Promise.resolve(data) as Promise<typeof data> & {
++			withResponse: () => Promise<{ data: typeof data; response: Response }>;
++		};
++		result.withResponse = async () => ({ data, response: new Response(null, { status: 200 }) });
++		return result;
++	}
++	class FakeOpenAI {
++		chat = { completions: { create: () => responseFor(fixture.chat) } };
++		responses = { create: () => responseFor(fixture.responses) };
++	}
++	return { default: FakeOpenAI };
++});
++
++const model = <T extends Api>(api: T): Model<T> => ({
++	id: "fixture-model",
++	name: "Fixture model",
++	api,
++	provider: api === "openai-codex-responses" ? "openai-codex" : "openai",
++	baseUrl: "https://provider.invalid/v1",
++	reasoning: false,
++	input: ["text"],
++	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++	contextWindow: 8192,
++	maxTokens: 1024,
++});
++
++const context = normalizeContext({ messages: [{ role: "user", content: "fixture", timestamp: 0 }] });
++const calls = (content: { type: string }[]) => content.filter((block) => block.type === "toolCall");
++
++function chatTool(finish: string | null) {
++	return [
++		{ id: "chat-fixture", choices: [{ index: 0, delta: { content: "Partial answer" }, finish_reason: null }] },
++		{
++			id: "chat-fixture",
++			choices: [
++				{
++					index: 0,
++					delta: {
++						tool_calls: [
++							{ index: 0, id: "call_a", type: "function", function: { name: "alpha", arguments: '{"a":1}' } },
++						],
++					},
++					finish_reason: null,
++				},
++			],
++		},
++		{ id: "chat-fixture", choices: [{ index: 0, delta: {}, finish_reason: finish }] },
++	];
++}
++
++function responsesTool(terminal: "completed" | "failed" | "error" | "eof") {
++	const item = { type: "function_call", id: "fc_1", call_id: "call_a", name: "alpha", arguments: '{"a":1}' };
++	const events: unknown[] = [
++		{
++			type: "response.output_item.added",
++			item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
++		},
++		{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
++		{ type: "response.output_text.delta", delta: "Partial answer" },
++		{
++			type: "response.output_item.done",
++			item: {
++				type: "message",
++				id: "msg_1",
++				role: "assistant",
++				status: "completed",
++				content: [{ type: "output_text", text: "Partial answer" }],
++			},
++		},
++		{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } },
++		{ type: "response.function_call_arguments.delta", output_index: 0, delta: '{"a":1}' },
++		{ type: "response.output_item.done", output_index: 0, item },
++	];
++	if (terminal === "error") events.push({ type: "error", code: "fixture_error", message: "fixture failure" });
++	else if (terminal !== "eof")
++		events.push({
++			type: `response.${terminal}`,
++			response: {
++				id: "resp_1",
++				status: terminal,
++				output: [item],
++				error: terminal === "failed" ? { code: "fixture_error", message: "fixture failure" } : null,
++				usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
++			},
++		});
++	return events;
++}
++
++beforeEach(() => {
++	fixture.chat = [];
++	fixture.responses = [];
++	fixture.abortAtEnd = undefined;
++});
++
++afterEach(() => {
++	closeOpenAICodexWebSocketSessions();
++	vi.restoreAllMocks();
++});
++
++// Splyce #70: incomplete or cancelled streams must not expose executable calls.
++describe("Splyce OpenAI Chat Completions stream safety", () => {
++	it.each(["content_filter", "network_error", null])(
++		"does not return executable tool calls after terminal %s",
++		async (terminal) => {
++			fixture.chat = chatTool(terminal);
++			const result = await streamChat(model("openai-completions"), context, {
++				apiKey: "fixture-key",
++				maxRetries: 0,
++			}).result();
++			expect(result.stopReason).toBe("error");
++			expect(calls(result.content)).toEqual([]);
++			expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Partial answer" }));
++		},
++	);
++	it("does not return executable tool calls after caller cancellation", async () => {
++		const controller = new AbortController();
++		fixture.chat = chatTool("tool_calls");
++		fixture.abortAtEnd = controller;
++		const result = await streamChat(model("openai-completions"), context, {
++			apiKey: "fixture-key",
++			signal: controller.signal,
++		}).result();
++		expect(result.stopReason).toBe("aborted");
++		expect(calls(result.content)).toEqual([]);
++		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Partial answer" }));
++	});
++	it("preserves successful interleaved argument fragments and call identities", async () => {
++		fixture.chat = [
++			{
++				id: "c",
++				choices: [
++					{
++						index: 0,
++						delta: {
++							tool_calls: [
++								{ index: 0, id: "call_a", type: "function", function: { name: "alpha", arguments: '{"a":' } },
++							],
++						},
++						finish_reason: null,
++					},
++				],
++			},
++			{
++				id: "c",
++				choices: [
++					{
++						index: 0,
++						delta: {
++							tool_calls: [
++								{ index: 1, id: "call_b", type: "function", function: { name: "beta", arguments: '{"b":' } },
++							],
++						},
++						finish_reason: null,
++					},
++				],
++			},
++			{
++				id: "c",
++				choices: [
++					{
++						index: 0,
++						delta: {
++							tool_calls: [
++								{ index: 0, function: { arguments: "1}" } },
++								{ index: 1, function: { arguments: "2}" } },
++							],
++						},
++						finish_reason: "tool_calls",
++					},
++				],
++			},
++		];
++		const result = await streamChat(model("openai-completions"), context, { apiKey: "fixture-key" }).result();
++		expect(result.stopReason).toBe("toolUse");
++		expect(
++			result.content
++				.filter((block) => block.type === "toolCall")
++				.map((block) => ({ id: block.id, name: block.name, arguments: block.arguments })),
++		).toEqual([
++			{ id: "call_a", name: "alpha", arguments: { a: 1 } },
++			{ id: "call_b", name: "beta", arguments: { b: 2 } },
++		]);
++	});
++});
++
++describe("Splyce OpenAI Responses stream safety", () => {
++	it.each(["failed", "error", "eof"] as const)("does not return executable tool calls after %s", async (terminal) => {
++		fixture.responses = responsesTool(terminal);
++		const result = await streamResponses(model("openai-responses"), context, {
++			apiKey: "fixture-key",
++			maxRetries: 0,
++		}).result();
++		expect(result.stopReason).toBe("error");
++		expect(calls(result.content)).toEqual([]);
++		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Partial answer" }));
++	});
++	it("does not return executable tool calls after cancellation", async () => {
++		const controller = new AbortController();
++		fixture.responses = responsesTool("completed");
++		fixture.abortAtEnd = controller;
++		const result = await streamResponses(model("openai-responses"), context, {
++			apiKey: "fixture-key",
++			signal: controller.signal,
++		}).result();
++		expect(result.stopReason).toBe("aborted");
++		expect(calls(result.content)).toEqual([]);
++		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Partial answer" }));
++	});
++	it("retains a complete tool call after a successful terminal response", async () => {
++		fixture.responses = responsesTool("completed");
++		const result = await streamResponses(model("openai-responses"), context, { apiKey: "fixture-key" }).result();
++		expect(result.stopReason).toBe("toolUse");
++		expect(calls(result.content)).toHaveLength(1);
++	});
++});
++
++describe("Splyce Codex Responses stream safety", () => {
++	const token = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64")}.fixture`;
++	const options = (events: unknown[], signal?: AbortSignal) => ({
++		apiKey: token,
++		transport: "sse" as const,
++		maxRetries: 0,
++		...(signal ? { signal } : {}),
++		fetch: async () =>
++			new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
++				headers: { "content-type": "text/event-stream" },
++			}),
++	});
++	it.each(["failed", "error", "eof"] as const)("does not return executable tool calls after %s", async (terminal) => {
++		const result = await streamCodex(
++			model("openai-codex-responses"),
++			context,
++			options(responsesTool(terminal)),
++		).result();
++		expect(result.stopReason).toBe("error");
++		expect(calls(result.content)).toEqual([]);
++		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Partial answer" }));
++	});
++	it("does not return executable tool calls after cancellation at the terminal event", async () => {
++		const controller = new AbortController();
++		const result = await streamCodex(model("openai-codex-responses"), context, {
++			...options(responsesTool("completed"), controller.signal),
++			onProviderStreamEvent: (event) => {
++				if (typeof event === "object" && event !== null && "type" in event && event.type === "response.completed") {
++					controller.abort();
++				}
++			},
++		}).result();
++		expect(result.stopReason).toBe("aborted");
++		expect(calls(result.content)).toEqual([]);
++		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Partial answer" }));
++	});
++	it("retains a complete tool call after successful SSE completion", async () => {
++		const result = await streamCodex(
++			model("openai-codex-responses"),
++			context,
++			options(responsesTool("completed")),
++		).result();
++		expect(result.stopReason).toBe("toolUse");
++		expect(calls(result.content)).toHaveLength(1);
++	});
++});
+diff --git a/vendor/pi/packages/ai/test/splyce-provider-e2e.test.ts b/vendor/pi/packages/ai/test/splyce-provider-e2e.test.ts
+index 6fdcbf0..0b82dbc 100644
+--- a/vendor/pi/packages/ai/test/splyce-provider-e2e.test.ts
++++ b/vendor/pi/packages/ai/test/splyce-provider-e2e.test.ts
+@@ -84,26 +84,25 @@ import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
+ import { stream as streamGoogle } from "../src/api/google-generative-ai.ts";
+ import { stream as streamVertex } from "../src/api/google-vertex.ts";
+ import type { SplyceCredentials } from "../src/splyce-credentials.ts";
+-import type { Api, Context, Model } from "../src/types.ts";
++import type { Api, Model } from "../src/types.ts";
+ import { normalizeContext } from "../src/utils/transcript.ts";
+ 
+ const SECRET = "e2e-secret-value-0123456789";
+ const ADMITTED = "endpoint-admitted";
+ 
+-const model = <TApi extends Api>(provider: string, api: TApi, baseUrl: string): Model<TApi> =>
+-	({
+-		id: "m-1",
+-		name: "m-1",
+-		api,
+-		provider,
+-		baseUrl,
+-		reasoning: false,
+-		input: ["text"],
+-		cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+-		contextWindow: 100000,
+-		maxTokens: 8000,
+-	}) as unknown as Model<TApi>;
+-const context = () => normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] } satisfies Context);
++const model = <TApi extends Api>(provider: string, api: TApi, baseUrl: string): Model<TApi> => ({
++	id: "m-1",
++	name: "m-1",
++	api,
++	provider,
++	baseUrl,
++	reasoning: false,
++	input: ["text"],
++	cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
++	contextWindow: 100000,
++	maxTokens: 8000,
++});
++const context = () => normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] });
+ 
+ /** Interface-only upstream; this is the smallest faithful implementation: admit only the bound endpoint. */
+ /** The per-action port the native layer constructs: the action's signal is bound at construction, so admit takes two arguments. */
