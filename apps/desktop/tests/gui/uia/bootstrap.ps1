@@ -98,7 +98,7 @@ try {
     } 'accessible Engine Unavailable text'
     $initial | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $evidence 'initial-tree.json')
     Assert-Check ([bool]($initial | Where-Object { $_.name -ceq 'Engine Unavailable' -and $_.role -eq 'ControlType.Text' -and -not $_.offscreen })) 'Initial Engine Unavailable is accessible visible Text'
-    Assert-Check ([bool]($initial | Where-Object { $_.name -like 'Backend native services*' })) 'Initial accessible explanation names unavailable backend services'
+    Assert-Check ([bool]($initial | Where-Object { $_.name -like 'The native engine is unavailable*' })) 'Initial accessible explanation names the unavailable native engine'
     Assert-Check (-not ($initial | Where-Object { $_.name -ceq 'Engine stopped' })) 'Initial unavailable state does not claim engine stopped'
     Assert-NoReady $initial
     $engineProcess = [Diagnostics.Process]::GetProcessById($engine.ProcessId)

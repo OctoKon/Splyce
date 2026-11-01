@@ -117,7 +117,12 @@ async function setup(
   t: { after(fn: () => void): void },
   options: Options = {},
 ) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "td-dispatch-")));
+  // The admitted workspace path must be the on-disk long form: the tools resolve
+  // every path with the async realpath, and a plain realpathSync keeps an 8.3
+  // short name (e.g. C:\Users\MOHAMM~1) that never matches it, so every read and
+  // write in the workspace is judged an escape. native-host enforces the same
+  // canonical spelling on admission.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "td-dispatch-")));
   const store = Store.open(join(dir, "store.db"));
   t.after(() => {
     if (!store.closed) store.close();

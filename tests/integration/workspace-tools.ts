@@ -17,7 +17,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -517,6 +517,114 @@ test(
     assert.equal(child.error, undefined);
     assert.equal(child.status, 0, child.stderr || child.stdout);
     assert.match(child.stdout, /restricted-shell: splyce/);
+  },
+);
+
+test(
+  "shell timeout keeps SHELL_TIMEOUT when an outside process pins the owned temp dir",
+  { skip: !win },
+  async () => {
+    const h = harness({ timeoutMs: 8000 });
+    const cmd =
+      "Set-Content -Path (Join-Path (Get-Location) 'tp.txt') -Value $env:TEMP; Start-Sleep 60";
+    h.grants.approve("shell.run", `${sh}:${cmd}`);
+    const pending = codeOf(run(h, sh, { command: cmd }));
+    let temp = "";
+    for (let i = 0; i < 60 && !temp; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      try {
+        temp = readFileSync(join(h.root, "tp.txt"), "utf8").trim();
+      } catch {
+        // the shell has not written the temp path yet
+      }
+    }
+    assert.ok(temp.includes(".splyce-shell-"), `owned temp recorded: ${temp}`);
+    // Not a child of the killed shell, so the tree kill cannot release it. The holder writes READY only after
+    // the exclusive lock is actually held: without that witness a slow or failed acquisition would let the
+    // ordinary timeout satisfy this test while the owned temp dir was never pinned at all.
+    const held = join(temp, "held.txt").replace(/'/g, "''");
+    const holder = spawn(
+      join(
+        process.env.SystemRoot!,
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      ),
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$ErrorActionPreference='Stop'; $fs=[IO.File]::Open('${held}','OpenOrCreate','ReadWrite','None'); [Console]::Out.WriteLine('READY'); [Console]::Out.Flush(); Start-Sleep 60; $fs.Dispose()`,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let holderStderr = "";
+    const ready = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `lock holder never held the owned temp dir${holderStderr ? `: ${holderStderr}` : ""}`,
+            ),
+          ),
+        30_000,
+      );
+      holder.stdout?.on("data", (chunk) => {
+        if (!String(chunk).includes("READY")) return;
+        clearTimeout(timer);
+        resolve();
+      });
+      holder.stderr?.on("data", (chunk) => {
+        holderStderr += String(chunk);
+      });
+      holder.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      holder.once("exit", (code, signal) => {
+        clearTimeout(timer);
+        reject(
+          new Error(
+            `lock holder exited before READY (code=${code} signal=${signal})${holderStderr ? `: ${holderStderr}` : ""}`,
+          ),
+        );
+      });
+    });
+    // A failure before READY must fail the lock witness, not surface as an unhandled rejection when the
+    // timeout path settles first.
+    ready.catch(() => undefined);
+    try {
+      const settled = await Promise.race([
+        ready.then(() => "ready" as const),
+        pending.then((code) => `settled:${code}` as const),
+      ]);
+      assert.equal(
+        settled,
+        "ready",
+        `the shell settled before the lock holder pinned the owned temp dir (${settled})`,
+      );
+      assert.equal(await pending, "SHELL_TIMEOUT");
+    } finally {
+      holder.kill("SIGKILL");
+      // Await the holder's exit so the handles it held are gone before the temp dir is removed.
+      await new Promise<void>((resolve) => {
+        if (holder.exitCode !== null || holder.signalCode !== null)
+          return resolve();
+        holder.once("exit", () => resolve());
+      });
+    }
+    assert.equal(h.log.length, 1);
+    assert.equal(h.log[0]?.ok, false);
+    assert.equal(h.log[0]?.summary, "SHELL_TIMEOUT");
+    for (let i = 0; i < 20; i += 1) {
+      try {
+        rmSync(temp, { recursive: true, force: true });
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
   },
 );
 

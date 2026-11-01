@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Threading::{
@@ -221,6 +221,10 @@ fn selected_node() -> &'static (PathBuf, String) {
     })
 }
 
+// The test harness starts every case in this binary concurrently, so a name derived from the clock is not unique:
+// two threads can read the same tick and the second create_dir would land on the first fixture (Os error 183).
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
 struct Fixture {
     directory: PathBuf,
     temporary_base: PathBuf,
@@ -236,10 +240,7 @@ impl Fixture {
         let owner = format!(
             "{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         );
         let directory = temporary_base.join(format!("splyce-process-transport-{owner}"));
         fs::create_dir(&directory).unwrap();

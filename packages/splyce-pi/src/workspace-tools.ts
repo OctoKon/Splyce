@@ -775,7 +775,10 @@ export function createWorkspaceTools(
         if (signal?.aborted) onAbort();
       });
     } finally {
-      if (temp) await rm(temp, { recursive: true, force: true });
+      // A surviving descendant can hold a file in the owned temp dir; a failed
+      // cleanup must not replace the command's own typed result with EBUSY.
+      if (temp)
+        await rm(temp, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
