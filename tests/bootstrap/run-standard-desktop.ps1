@@ -107,6 +107,7 @@ public static class StandardDesktopLauncher {
     IntPtr buffer = Info(token, kind, 4);
     try { return Marshal.ReadInt32(buffer); } finally { Marshal.FreeHGlobal(buffer); }
   }
+  static string ClassifyIntegrity(int rid) { return rid == 0x2000 ? "Medium" : "OtherOrUnknown"; }
   static Observation Inspect(IntPtr token) {
     IntPtr user = Info(token, 1), label = IntPtr.Zero;
     try {
@@ -118,7 +119,7 @@ public static class StandardDesktopLauncher {
       int rid = Marshal.ReadInt32(integritySid, 8 + 4 * (count - 1));
       int elevated = Scalar(token, 20), type = Scalar(token, 18);
       if ((elevated != 0 && elevated != 1) || type < 1 || type > 3 || Scalar(token, 8) != 1) throw new InvalidOperationException("Malformed primary token.");
-      return new Observation { Sid = new SecurityIdentifier(sid).Value, Session = Scalar(token, 12), Elevated = elevated == 1, ElevationType = type, Integrity = rid >= 8192 && rid < 12288 ? "Medium" : "OtherOrUnknown" };
+      return new Observation { Sid = new SecurityIdentifier(sid).Value, Session = Scalar(token, 12), Elevated = elevated == 1, ElevationType = type, Integrity = ClassifyIntegrity(rid) };
     } finally { Marshal.FreeHGlobal(user); if (label != IntPtr.Zero) Marshal.FreeHGlobal(label); }
   }
   static void RequireWorker(Observation candidate, Observation owner) {
@@ -216,6 +217,9 @@ public static class StandardDesktopLauncher {
   }
   public static int RunWorker(string shell, string root, string directory, string nonce, string mode) { return Launch(shell, root, directory, nonce, mode, false); }
   public static bool SelfCheck(string shell, string root) {
+    if (ClassifyIntegrity(0x2000) != "Medium") throw new InvalidOperationException("Exact medium integrity was rejected.");
+    foreach (int rid in new int[] { 0x2100, 0x2001, 0x1000, 0x3000, -1 })
+      if (ClassifyIntegrity(rid) != "OtherOrUnknown") throw new InvalidOperationException("Non-medium integrity RID was accepted.");
     if (Quote(@"C:\Program Files\Splyce & CI\") != "\"C:\\Program Files\\Splyce & CI\\\\\"") throw new InvalidOperationException("Windows argument quoting failed.");
     var owner = new Observation { Sid = "same", Session = 1, Elevated = true, ElevationType = 2, Integrity = "OtherOrUnknown" };
     var valid = new Observation { Sid = "same", Session = 1, Elevated = false, ElevationType = 3, Integrity = "Medium" };

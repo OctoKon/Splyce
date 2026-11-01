@@ -7,6 +7,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-IntegrityLabel([int]$Rid) {
+  if ($Rid -eq 0x2000) { return 'Medium' }
+  return 'OtherOrUnknown'
+}
+
 function Test-ProfileWritable([string]$Profile, [string]$RunNonce) {
   if (-not (Test-Path -LiteralPath $Profile -PathType Container)) { throw 'User profile is unavailable.' }
   $probe = Join-Path $Profile ".splyce-standard-ci-$RunNonce.tmp"
@@ -20,6 +25,10 @@ function Test-ProfileWritable([string]$Profile, [string]$RunNonce) {
 }
 
 if ($SelfCheck) {
+  if ((Get-IntegrityLabel 0x2000) -ne 'Medium') { throw 'Exact medium integrity was rejected.' }
+  foreach ($rid in @(0x2100, 0x2001, 0x1000, 0x3000, -1)) {
+    if ((Get-IntegrityLabel $rid) -ne 'OtherOrUnknown') { throw 'Non-medium integrity RID was accepted.' }
+  }
   $testDirectory = Join-Path ([IO.Path]::GetTempPath()) ("splyce-profile-probe-" + [guid]::NewGuid().ToString('N'))
   [IO.Directory]::CreateDirectory($testDirectory) | Out-Null
   $testNonce = [guid]::NewGuid().ToString('N')
@@ -97,7 +106,7 @@ public static class StandardDesktopIntegrity {
     profileWritable = $profileWritable
     elevated = $elevation.elevated
     elevationType = $elevation.elevationType
-    integrity = if ($rid -ge 0x2000 -and $rid -lt 0x3000) { 'Medium' } else { 'OtherOrUnknown' }
+    integrity = Get-IntegrityLabel $rid
   }
   [IO.File]::WriteAllText((Join-Path $RunDirectory 'attestation.json'), ($attestation | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
   if ($runConfig.sid -ne $attestation.sid -or $runConfig.session -ne $attestation.session -or -not $profileSame -or -not $profileWritable -or
