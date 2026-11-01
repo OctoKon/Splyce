@@ -450,3 +450,185 @@ export function validateJob(job: unknown): JobDefinition {
     catchUp: j.catchUp,
   });
 }
+
+/** Why an occurrence was not dispatched. Every skipped slot is reported, never silently dropped. */
+export type MissedReason =
+  "scheduler_disabled" | "paused" | "overlap" | "late" | "superseded";
+
+/** Cumulative record of slots that were decided without dispatch, until acknowledged. */
+export interface MissedSummary {
+  readonly count: number;
+  readonly firstUtcMs?: number;
+  readonly latestUtcMs?: number;
+  readonly byReason: Readonly<Partial<Record<MissedReason, number>>>;
+}
+
+/** Durable per-job planner state; persisted by the caller between ticks. */
+export interface JobState {
+  readonly jobId: string;
+  /** Definition revision this cursor belongs to. */
+  readonly revision: string;
+  /** Every slot at or before this instant has been decided. Never moves backwards. */
+  readonly cursorUtcMs: number;
+  /** Whether the scheduler was enabled at the last tick that saw this job. */
+  readonly enabledAtLastTick: boolean;
+  readonly lastDispatchedId?: string;
+  readonly missed: MissedSummary;
+}
+
+export interface TickInput {
+  readonly nowUtcMs: number;
+  /** Only the literal `true` enables dispatch; anything else is disabled (default deny). */
+  readonly schedulingEnabled: unknown;
+  readonly jobs: readonly JobDefinition[];
+  readonly states: readonly JobState[];
+}
+
+/** One planning decision for a job in this tick. */
+export interface MissedReport {
+  readonly jobId: string;
+  readonly reason: MissedReason;
+  readonly count: number;
+  readonly firstUtcMs: number;
+  readonly latestUtcMs: number;
+}
+
+export interface TickPlan {
+  /** At most one occurrence per job; each still needs native admission before any effect. */
+  readonly dispatch: readonly Occurrence[];
+  readonly missed: readonly MissedReport[];
+  /** Next states for every input state and every new job, in job order then retained states. */
+  readonly states: readonly JobState[];
+}
+
+const NO_MISSED: MissedSummary = Object.freeze({
+  count: 0,
+  byReason: Object.freeze({}),
+});
+
+function addMissed(
+  summary: MissedSummary,
+  reason: MissedReason,
+  scan: OccurrenceScan,
+): MissedSummary {
+  if (scan.count === 0 || !scan.first || !scan.latest) return summary;
+  return Object.freeze({
+    count: summary.count + scan.count,
+    firstUtcMs: summary.firstUtcMs ?? scan.first.scheduledUtcMs,
+    latestUtcMs: scan.latest.scheduledUtcMs,
+    byReason: Object.freeze({
+      ...summary.byReason,
+      [reason]: (summary.byReason[reason] ?? 0) + scan.count,
+    }),
+  });
+}
+
+function assertInstant(field: string, value: unknown): asserts value is number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new JobError("INVALID_TICK", `${field} must be an integer instant`);
+  }
+}
+
+/**
+ * Decides one scheduler tick. Pure: the caller supplies the clock, the
+ * enablement flag and the persisted states, and persists the returned states
+ * before acting on `dispatch`, so a crash after persisting can never replay a
+ * dispatched slot (its id is recorded and the cursor has passed it).
+ */
+export function planTick(input: TickInput): TickPlan {
+  assertInstant("nowUtcMs", input.nowUtcMs);
+  const now = input.nowUtcMs;
+  const enabled = input.schedulingEnabled === true;
+  const jobs = input.jobs.map(validateJob);
+  const ids = new Set<string>();
+  for (const job of jobs) {
+    if (ids.has(job.jobId)) throw new JobError("DUPLICATE_JOB", job.jobId);
+    ids.add(job.jobId);
+  }
+  const previous = new Map<string, JobState>();
+  for (const state of input.states) {
+    if (previous.has(state.jobId)) {
+      throw new JobError("DUPLICATE_STATE", state.jobId);
+    }
+    assertInstant("cursorUtcMs", state.cursorUtcMs);
+    previous.set(state.jobId, state);
+  }
+
+  const dispatch: Occurrence[] = [];
+  const missed: MissedReport[] = [];
+  const states: JobState[] = [];
+  const report = (
+    jobId: string,
+    reason: MissedReason,
+    scan: OccurrenceScan,
+  ) => {
+    if (scan.count === 0 || !scan.first || !scan.latest) return;
+    missed.push(
+      Object.freeze({
+        jobId,
+        reason,
+        count: scan.count,
+        firstUtcMs: scan.first.scheduledUtcMs,
+        latestUtcMs: scan.latest.scheduledUtcMs,
+      }),
+    );
+  };
+
+  for (const job of jobs) {
+    const state = previous.get(job.jobId);
+    previous.delete(job.jobId);
+    if (!state) {
+      // A new job starts at the current instant: it never backfills slots
+      // that were scheduled before it existed.
+      states.push(
+        Object.freeze({
+          jobId: job.jobId,
+          revision: job.revision,
+          cursorUtcMs: now,
+          enabledAtLastTick: enabled,
+          missed: NO_MISSED,
+        }),
+      );
+      continue;
+    }
+    const window = scanOccurrences(job, state.cursorUtcMs, now);
+    const cursorUtcMs = Math.max(state.cursorUtcMs, now);
+    let summary = state.missed;
+    let lastDispatchedId = state.lastDispatchedId;
+    if (!enabled) {
+      report(job.jobId, "scheduler_disabled", window);
+      summary = addMissed(summary, "scheduler_disabled", window);
+    } else if (window.latest) {
+      // At most one dispatch per job per tick: the latest slot. Earlier slots
+      // in the same window are reported, never run as a burst.
+      const earlier = scanOccurrences(
+        job,
+        state.cursorUtcMs,
+        window.latest.scheduledUtcMs - 1,
+      );
+      report(job.jobId, "late", earlier);
+      summary = addMissed(summary, "late", earlier);
+      if (window.latest.occurrenceId !== lastDispatchedId) {
+        dispatch.push(window.latest);
+        lastDispatchedId = window.latest.occurrenceId;
+      }
+    }
+    states.push(
+      Object.freeze({
+        jobId: job.jobId,
+        revision: state.revision,
+        cursorUtcMs,
+        enabledAtLastTick: enabled,
+        ...(lastDispatchedId !== undefined ? { lastDispatchedId } : {}),
+        missed: summary,
+      }),
+    );
+  }
+  // States whose definition is gone are retained unchanged and stay inspectable.
+  for (const state of previous.values()) states.push(state);
+  return Object.freeze({
+    dispatch: Object.freeze(dispatch),
+    missed: Object.freeze(missed),
+    states: Object.freeze(states),
+  });
+}

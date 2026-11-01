@@ -9,6 +9,7 @@ import {
   JobError,
   MIN_INTERVAL_MS,
   nextOccurrence,
+  planTick,
   resolveWallTime,
   scanOccurrences,
   validateJob,
@@ -310,4 +311,163 @@ test("the next occurrence is found for both schedule kinds", () => {
   );
   assert.equal(nextOccurrence(later, 0).scheduledUtcMs, 50 * HOUR);
   assert.equal(nextOccurrence(later, 50 * HOUR).scheduledUtcMs, 51 * HOUR);
+});
+
+// Runs ticks in order, threading persisted state like the caller would.
+function run(jobs, ticks, { states = [], enabled = true } = {}) {
+  const plans = [];
+  for (const tick of ticks) {
+    const t = typeof tick === "number" ? { now: tick } : tick;
+    const plan = planTick({
+      nowUtcMs: t.now,
+      schedulingEnabled: t.enabled ?? enabled,
+      jobs: t.jobs ?? jobs,
+      states,
+    });
+    states = plan.states;
+    plans.push(plan);
+  }
+  return { plans, states };
+}
+const ids = (plan) => plan.dispatch.map((o) => o.occurrenceId);
+
+test("a new job starts at the current instant and never backfills", () => {
+  const job = interval();
+  const { plans, states } = run([job], [10 * HOUR + 5]);
+  assert.deepEqual(ids(plans[0]), []);
+  assert.deepEqual(plans[0].missed, []);
+  assert.equal(states[0].cursorUtcMs, 10 * HOUR + 5);
+  assert.equal(states[0].revision, "r1");
+});
+
+test("a due slot dispatches once, and a duplicate tick does not dispatch it again", () => {
+  const { plans } = run([interval()], [HOUR - 1, HOUR, HOUR, HOUR + 30_000]);
+  assert.deepEqual(plans.map(ids), [[], ["job-i@r1#1"], [], []]);
+});
+
+test("replaying the same persisted state yields the same single decision", () => {
+  const first = run([interval()], [HOUR - 1]).states;
+  const a = planTick({
+    nowUtcMs: HOUR,
+    schedulingEnabled: true,
+    jobs: [interval()],
+    states: first,
+  });
+  const b = planTick({
+    nowUtcMs: HOUR,
+    schedulingEnabled: true,
+    jobs: [interval()],
+    states: first,
+  });
+  assert.deepEqual(ids(a), ["job-i@r1#1"]);
+  assert.deepEqual(b, a);
+  assert.deepEqual(
+    ids(
+      planTick({
+        nowUtcMs: HOUR,
+        schedulingEnabled: true,
+        jobs: [interval()],
+        states: a.states,
+      }),
+    ),
+    [],
+  );
+});
+
+test("at most one dispatch per job per tick; earlier slots are reported, not burst", () => {
+  const { plans, states } = run([interval()], [HOUR - 1, 5 * HOUR]);
+  assert.deepEqual(ids(plans[1]), ["job-i@r1#5"]);
+  assert.deepEqual(plans[1].missed, [
+    {
+      jobId: "job-i",
+      reason: "late",
+      count: 4,
+      firstUtcMs: HOUR,
+      latestUtcMs: 4 * HOUR,
+    },
+  ]);
+  assert.deepEqual(states[0].missed, {
+    count: 4,
+    firstUtcMs: HOUR,
+    latestUtcMs: 4 * HOUR,
+    byReason: { late: 4 },
+  });
+});
+
+test("scheduling is denied unless enablement is the literal true", () => {
+  const states = run([interval()], [HOUR - 1]).states;
+  for (const flag of [undefined, null, 1, "true", {}, false]) {
+    const plan = planTick({
+      nowUtcMs: HOUR,
+      schedulingEnabled: flag,
+      jobs: [interval()],
+      states,
+    });
+    assert.deepEqual(ids(plan), [], String(flag));
+    assert.equal(plan.missed[0].reason, "scheduler_disabled");
+  }
+});
+
+test("states and jobs are validated before planning", () => {
+  rejects(
+    () =>
+      planTick({
+        nowUtcMs: 1.5,
+        schedulingEnabled: true,
+        jobs: [],
+        states: [],
+      }),
+    "INVALID_TICK",
+  );
+  rejects(
+    () =>
+      planTick({
+        nowUtcMs: 0,
+        schedulingEnabled: true,
+        jobs: [interval(), interval()],
+        states: [],
+      }),
+    "DUPLICATE_JOB",
+  );
+  const state = run([interval()], [0]).states[0];
+  rejects(
+    () =>
+      planTick({
+        nowUtcMs: 0,
+        schedulingEnabled: true,
+        jobs: [],
+        states: [state, state],
+      }),
+    "DUPLICATE_STATE",
+  );
+  rejects(
+    () =>
+      planTick({
+        nowUtcMs: 0,
+        schedulingEnabled: true,
+        jobs: [interval({ timeZone: "Nowhere/X" })],
+        states: [],
+      }),
+    "INVALID_TIME_ZONE",
+  );
+});
+
+test("a state whose job definition is gone is retained unchanged", () => {
+  const { states } = run([interval()], [0]);
+  const plan = planTick({
+    nowUtcMs: 5 * HOUR,
+    schedulingEnabled: true,
+    jobs: [],
+    states,
+  });
+  assert.deepEqual(plan.states, states);
+  assert.deepEqual(plan.dispatch, []);
+});
+
+test("planner outputs are frozen", () => {
+  const { plans } = run([interval()], [HOUR - 1, HOUR]);
+  assert.ok(Object.isFrozen(plans[1]));
+  assert.ok(Object.isFrozen(plans[1].dispatch));
+  assert.ok(Object.isFrozen(plans[1].dispatch[0]));
+  assert.ok(Object.isFrozen(plans[1].states[0]));
 });
