@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { PassThrough } from "node:stream";
@@ -78,8 +78,7 @@ describe("DefaultPackageManager", () => {
 	beforeEach(() => {
 		previousOfflineEnv = process.env.PI_OFFLINE;
 		delete process.env.PI_OFFLINE;
-		tempDir = join(tmpdir(), `pm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "pm-test-"));
 		agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 
