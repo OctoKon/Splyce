@@ -1,19 +1,22 @@
+import { syncBuiltinESMExports } from "node:module";
 import { constants as bufferConstants } from "buffer";
-import {
+import fs, {
 	appendFileSync,
+	chmodSync,
 	closeSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	openSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	writeFileSync,
 	writeSync,
 } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findMostRecentSession, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
 import { assistantMsg, readSessionFileRoles, userMsg } from "../utilities.ts";
 
@@ -23,8 +26,7 @@ describe("loadEntriesFromFile", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
 	});
 
 	afterEach(() => {
@@ -111,6 +113,106 @@ describe("loadEntriesFromFile", () => {
 
 		expect(loadEntriesFromFile(file)).toHaveLength(1);
 		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
+	});
+
+	it("does not repair a file that replaced the loaded session", () => {
+		const file = join(tempDir, "session.jsonl");
+		const original = '{"type":"session","id":"one"}';
+		const replacement = '{"type":"session","id":"two"}';
+		writeFileSync(file, original);
+		const actualRead = fs.readSync;
+		let replaced = false;
+		const read = vi.spyOn(fs, "readSync").mockImplementation((...args) => {
+			const count = Reflect.apply(actualRead, fs, args) as number;
+			if (count === 0 && !replaced) {
+				replaced = true;
+				renameSync(file, join(tempDir, "loaded.jsonl"));
+				writeFileSync(file, replacement);
+			}
+			return count;
+		});
+		syncBuiltinESMExports();
+		try {
+			expect(() => loadEntriesFromFile(file)).toThrow("Session file changed while loading");
+			expect(replaced).toBe(true);
+			expect(readFileSync(file, "utf8")).toBe(replacement);
+			expect(readFileSync(join(tempDir, "loaded.jsonl"), "utf8")).toBe(original);
+		} finally {
+			read.mockRestore();
+			syncBuiltinESMExports();
+		}
+	});
+
+	it("does not repair a session that grows while loading", () => {
+		const file = join(tempDir, "growing.jsonl");
+		const content = '{"type":"session","id":"one"}';
+		writeFileSync(file, content);
+		const actualRead = fs.readSync;
+		let changed = false;
+		const read = vi.spyOn(fs, "readSync").mockImplementation((...args) => {
+			const count = Reflect.apply(actualRead, fs, args) as number;
+			if (count === 0 && !changed) {
+				changed = true;
+				appendFileSync(file, "extra");
+			}
+			return count;
+		});
+		syncBuiltinESMExports();
+		try {
+			expect(() => loadEntriesFromFile(file)).toThrow("Session file changed while loading");
+			expect(changed).toBe(true);
+			expect(readFileSync(file, "utf8")).toBe(`${content}extra`);
+		} finally {
+			read.mockRestore();
+			syncBuiltinESMExports();
+		}
+	});
+
+	it("does not repair a session rewritten at the same length while loading", () => {
+		const file = join(tempDir, "rewritten.jsonl");
+		const original = '{"type":"session","id":"one"}';
+		const replacement = '{"type":"session","id":"two"}';
+		writeFileSync(file, original);
+		const actualRead = fs.readSync;
+		let changed = false;
+		const read = vi.spyOn(fs, "readSync").mockImplementation((...args) => {
+			const count = Reflect.apply(actualRead, fs, args) as number;
+			if (count === 0 && !changed) {
+				changed = true;
+				writeFileSync(file, replacement);
+			}
+			return count;
+		});
+		syncBuiltinESMExports();
+		try {
+			expect(() => loadEntriesFromFile(file)).toThrow("Session file changed while loading");
+			expect(changed).toBe(true);
+			expect(readFileSync(file, "utf8")).toBe(replacement);
+		} finally {
+			read.mockRestore();
+			syncBuiltinESMExports();
+		}
+	});
+
+	it("reads a terminated read-only session without requiring write access", () => {
+		const file = join(tempDir, "read-only.jsonl");
+		const content = '{"type":"session","id":"read-only"}\n';
+		writeFileSync(file, content);
+		chmodSync(file, 0o444);
+		const actualOpen = fs.openSync;
+		const open = vi.spyOn(fs, "openSync").mockImplementation((...args) => {
+			if (args[1] !== "r") throw new Error("Unexpected write open");
+			return Reflect.apply(actualOpen, fs, args) as number;
+		});
+		syncBuiltinESMExports();
+		try {
+			expect(loadEntriesFromFile(file)).toHaveLength(1);
+			expect(readFileSync(file, "utf8")).toBe(content);
+		} finally {
+			open.mockRestore();
+			syncBuiltinESMExports();
+			chmodSync(file, 0o666);
+		}
 	});
 
 	it("does not modify an unterminated non-session file", () => {
