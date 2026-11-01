@@ -106,6 +106,9 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Hydrate pinned Pi model data
         run: node vendor/pi/scripts/update-model-catalog-pin.mjs --hydrate-pinned
+      - name: Check standard desktop launcher guards
+        shell: pwsh
+        run: ./tests/bootstrap/run-standard-desktop.ps1 -SelfCheck
       - name: Build the uninstrumented release app
         run: npm run build:desktop
       - name: Run Rust tests
@@ -116,9 +119,6 @@ jobs:
       - name: Build and qualify per-run release-smoke drivers
         shell: pwsh
         run: ./tests/bootstrap/prepare-release-drivers.ps1
-      - name: Check standard desktop launcher guards
-        shell: pwsh
-        run: ./tests/bootstrap/run-standard-desktop.ps1 -SelfCheck
       - name: Probe release smoke in the standard user session
         shell: pwsh
         run: ./tests/bootstrap/run-standard-desktop.ps1 -Mode Smoke
@@ -143,5 +143,6 @@ jobs:
           path: |
             apps/desktop/src-tauri/target/bootstrap-smoke/*/diagnostics/result.json
             apps/desktop/src-tauri/target/bootstrap-smoke/*/diagnostics/driver.log
+            apps/desktop/src-tauri/target/bootstrap-standard-ci/*/diagnostics/result.json
           if-no-files-found: ignore
           retention-days: 7
