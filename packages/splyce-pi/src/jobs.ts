@@ -524,6 +524,11 @@ export interface TickPlan {
   readonly missed: readonly MissedReport[];
   /** Next states for every input state and every new job, in job order then retained states. */
   readonly states: readonly JobState[];
+  /**
+   * Jobs whose decided cursor is ahead of `nowUtcMs` (the clock moved back).
+   * Their cursor does not move back, so nothing already decided runs again.
+   */
+  readonly clockRegressed: readonly string[];
 }
 
 const NO_MISSED: MissedSummary = Object.freeze({
@@ -587,6 +592,7 @@ export function planTick(input: TickInput): TickPlan {
   }
 
   const dispatch: Dispatch[] = [];
+  const clockRegressed: string[] = [];
   const missed: MissedReport[] = [];
   const states: JobState[] = [];
   const report = (
@@ -627,11 +633,19 @@ export function planTick(input: TickInput): TickPlan {
     const cursorUtcMs = Math.max(state.cursorUtcMs, now);
     let summary = state.missed;
     let lastDispatchedId = state.lastDispatchedId;
-    // The first enabled tick after a disabled one only re-arms the job: the
-    // whole window belongs to the disabled period, so re-enabling never runs
-    // a slot implicitly, not even one catch-up (capability-map.md retention).
     let running = state.running;
-    if (!enabled || !state.enabledAtLastTick) {
+    if (now < state.cursorUtcMs) clockRegressed.push(job.jobId);
+    if (state.revision !== job.revision) {
+      // A changed definition starts at the current instant, like a new job:
+      // slots are never run under a revision they were not scheduled by. The
+      // old schedule is no longer known, so the gap is counted under the new
+      // one and reported as superseded. A running occurrence stays recorded.
+      report(job.jobId, "superseded", window);
+      summary = addMissed(summary, "superseded", window);
+    } else if (!enabled || !state.enabledAtLastTick) {
+      // The first enabled tick after a disabled one only re-arms the job: the
+      // whole window belongs to the disabled period, so re-enabling never runs
+      // a slot implicitly, not even one catch-up (capability-map.md retention).
       report(job.jobId, "scheduler_disabled", window);
       summary = addMissed(summary, "scheduler_disabled", window);
     } else if (state.paused) {
@@ -667,6 +681,7 @@ export function planTick(input: TickInput): TickPlan {
     states.push(
       Object.freeze({
         ...state,
+        revision: job.revision,
         cursorUtcMs,
         enabledAtLastTick: enabled,
         ...(lastDispatchedId !== undefined ? { lastDispatchedId } : {}),
@@ -681,6 +696,7 @@ export function planTick(input: TickInput): TickPlan {
     dispatch: Object.freeze(dispatch),
     missed: Object.freeze(missed),
     states: Object.freeze(states),
+    clockRegressed: Object.freeze(clockRegressed),
   });
 }
 
