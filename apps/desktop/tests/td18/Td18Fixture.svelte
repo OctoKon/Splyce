@@ -20,6 +20,8 @@
   }[] = [];
 
   const transport = createTurnStreamTransport({
+    sessionId: "ses_test_01",
+    scopeId: "w-demo",
     onState: (next) => {
       state = next;
     },

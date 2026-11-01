@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "caseId": "FUI-W2",
+  "title": "IME composition safety",
+  "targetTask": "TD-71",
+  "description": "Multi-stage CJK IME text composition in composer. Candidate confirmation emits zero prompt submissions; explicit Ctrl+Enter outside composition submits exactly intended string once.",
+  "preconditions": {
+    "windowMode": "normal",
+    "dpiScale": 1.0,
+    "contrastMode": false,
+    "reducedMotion": false,
+    "engineStatus": "ready"
+  },
+  "eventSequence": [
+    {
+      "delayMs": 0,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w2_01",
+        "eventId": "evt_01W2_01",
+        "createdAt": "2026-10-26T12:00:00.000Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 1,
+        "durable": true,
+        "kind": "engine.status",
+        "payload": {
+          "state": "ready",
+          "activeWorkers": 0
+        }
+      }
+    },
+    {
+      "delayMs": 10,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w2_02",
+        "eventId": "evt_01W2_02",
+        "createdAt": "2026-10-26T12:00:00.010Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 2,
+        "durable": true,
+        "kind": "turn.started",
+        "payload": {
+          "runId": "run_w2_ime",
+          "turnId": "turn_01"
+        }
+      }
+    },
+    {
+      "delayMs": 20,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w2_03",
+        "eventId": "evt_01W2_03",
+        "createdAt": "2026-10-26T12:00:00.020Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 3,
+        "durable": true,
+        "kind": "turn.completed",
+        "payload": {
+          "runId": "run_w2_ime",
+          "candidateSnapshotId": "target1",
+          "finalRevision": "B"
+        }
+      }
+    }
+  ],
+  "userActions": [
+    {
+      "step": 1,
+      "action": "ime_compose",
+      "targetSelector": "textarea",
+      "payload": "日本語テスト"
+    },
+    {
+      "step": 2,
+      "action": "shortcut",
+      "targetSelector": "textarea",
+      "payload": "Enter"
+    },
+    {
+      "step": 3,
+      "action": "shortcut",
+      "targetSelector": "textarea",
+      "payload": "Ctrl+Enter"
+    }
+  ],
+  "assertions": {
+    "expectedState": {
+      "isComposing": false,
+      "submittedCount": 1
+    },
+    "expectedDispatches": [
+      {
+        "op": "session.prompt",
+        "payloadMatch": {
+          "text": "日本語テスト"
+        }
+      }
+    ],
+    "accessibilityQueries": [
+      {
+        "role": "textbox",
+        "name": "Composer Input",
+        "expectedState": "focused"
+      }
+    ],
+    "guardRemovalCheck": {
+      "action": "disable_is_composing_guard",
+      "mustFailWith": "ERR_PREMATURE_IME_SUBMIT"
+    }
+  }
+}

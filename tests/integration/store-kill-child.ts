@@ -58,8 +58,8 @@ if (mode === "mid-transaction") {
   raw.exec("BEGIN IMMEDIATE;");
   raw
     .prepare(
-      "INSERT INTO records (kind, record_id, schema_version, scope_id, created_at, payload) " +
-        "VALUES ('run', 'rec-uncommitted', 1, 'w-demo', '2026-10-26T00:00:00.000Z', '{}')",
+      "INSERT INTO records (kind, record_id, schema_version, scope_id, session_id, created_at, payload) " +
+        "VALUES ('run', 'rec-uncommitted', 1, 'w-demo', 'child', '2026-10-26T00:00:00.000Z', '{}')",
     )
     .run();
   writeFileSync(join(dir, "mid.json"), "{}", "utf8");
@@ -86,8 +86,8 @@ if (mode === "busy-hold") {
     trace("begun");
     raw
       .prepare(
-        "INSERT INTO records (kind, record_id, schema_version, scope_id, created_at, payload) " +
-          "VALUES ('run', 'rec-child-second', 1, 'w-demo', '2026-10-26T00:00:00.000Z', '{}')",
+        "INSERT INTO records (kind, record_id, schema_version, scope_id, session_id, created_at, payload) " +
+          "VALUES ('run', 'rec-child-second', 1, 'w-demo', 'child', '2026-10-26T00:00:00.000Z', '{}')",
       )
       .run();
     trace("inserted");

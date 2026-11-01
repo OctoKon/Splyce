@@ -170,6 +170,67 @@ describe("FUI-W4 stream & backpressure semantics", () => {
     });
   });
 
+  it("retains the optional outcome summary without inventing absent fields", () => {
+    const state = applyAll(createTurnsState(), [
+      started(),
+      toolIntent(2),
+      event(3, "turn.tool_outcome", {
+        runId: "run_a",
+        actionId: "act_1",
+        status: "success",
+        outcomeRef: "ref_1",
+        summary: {
+          exitCode: 1,
+          durationMs: 42,
+          bytes: 64,
+          truncated: true,
+          preview: "first line\nsecond line",
+        },
+      } as unknown as EventPayloads["turn.tool_outcome"]),
+    ]);
+
+    expect(state.runs.run_a.actions[0].summary).toEqual({
+      exitCode: 1,
+      durationMs: 42,
+      bytes: 64,
+      truncated: true,
+      preview: "first line\nsecond line",
+    });
+
+    const current = applyAll(createTurnsState(), [
+      started(),
+      toolIntent(2),
+      event(3, "turn.tool_outcome", {
+        runId: "run_a",
+        actionId: "act_1",
+        status: "success",
+        outcomeRef: "ref_1",
+      }),
+    ]);
+    expect(current.runs.run_a.actions[0].summary).toBeUndefined();
+  });
+
+  it("drops malformed optional summary fields instead of displaying them", () => {
+    const state = applyAll(createTurnsState(), [
+      started(),
+      toolIntent(2),
+      event(3, "turn.tool_outcome", {
+        runId: "run_a",
+        actionId: "act_1",
+        status: "success",
+        summary: {
+          exitCode: "0",
+          durationMs: -1,
+          bytes: 1.5,
+          truncated: "yes",
+          preview: 42,
+        },
+      } as unknown as EventPayloads["turn.tool_outcome"]),
+    ]);
+
+    expect(state.runs.run_a.actions[0].summary).toBeUndefined();
+  });
+
   it("keeps a 10x render-rate burst lossless and requests no resync", () => {
     const burst = Array.from({ length: 10_000 }, (_, index) =>
       delta(index + 2, "x"),
@@ -423,7 +484,11 @@ describe("TD-18 renderer transport", () => {
   const manual = () => {};
 
   it("coalesces a 10x render-rate burst without dropping text or requesting resync", () => {
-    const transport = createTurnStreamTransport({ schedule: manual });
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
     transport.enqueue(started());
     transport.flush();
 
@@ -442,6 +507,8 @@ describe("TD-18 renderer transport", () => {
     const resyncs: number[] = [];
     const errors: string[] = [];
     const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
       schedule: manual,
       onResync: (fromSeq) => resyncs.push(fromSeq),
       onError: (code) => errors.push(code),
@@ -479,6 +546,8 @@ describe("TD-18 renderer transport", () => {
   it("pauses durable delivery at the frozen queue bound with one resync", () => {
     const resyncs: number[] = [];
     const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
       schedule: manual,
       onResync: (fromSeq) => resyncs.push(fromSeq),
     });
@@ -496,6 +565,8 @@ describe("TD-18 renderer transport", () => {
   it("rejects an encoded frame over the byte cap before it reaches the reducer", () => {
     const errors: string[] = [];
     const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
       schedule: manual,
       onError: (code) => errors.push(code),
     });
@@ -518,7 +589,11 @@ describe("TD-18 renderer transport", () => {
   it("preserves FUI-W4 ordering and attribution through the coalescing transport", () => {
     const fixture = guiFixture("fui-w4-stream-backpressure.json");
     const events = fixture.eventSequence.map((step) => step.event);
-    const transport = createTurnStreamTransport({ schedule: manual });
+    const transport = createTurnStreamTransport({
+      sessionId: events[0].sessionId,
+      scopeId: events[0].scopeId,
+      schedule: manual,
+    });
     for (const envelope of events) transport.enqueue(envelope);
     const state = transport.flush();
     const expected = applyAll(createTurnsState(), events);
@@ -540,7 +615,11 @@ describe("TD-18 renderer transport", () => {
   });
 
   it("validates and dedupes before coalescing, never duplicating text", () => {
-    const transport = createTurnStreamTransport({ schedule: manual });
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
     transport.enqueue(started());
     transport.flush();
 
@@ -557,6 +636,8 @@ describe("TD-18 renderer transport", () => {
   it("does not merge across a gap and ignores late out-of-order deltas", () => {
     const resyncs: number[] = [];
     const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
       schedule: manual,
       onResync: (fromSeq) => resyncs.push(fromSeq),
     });
@@ -583,7 +664,11 @@ describe("TD-18 renderer transport", () => {
   });
 
   it("drops a replayed delta after a flush instead of appending it twice", () => {
-    const transport = createTurnStreamTransport({ schedule: manual });
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
     transport.enqueue(started());
     transport.flush();
     transport.enqueue(delta(2, "x"));
@@ -599,6 +684,7 @@ describe("TD-18 renderer transport", () => {
   it("keeps cross-session state separate instead of dropping one session", () => {
     const transport = createTurnStreamTransport({
       sessionId: "ses_a",
+      scopeId: "scope_spec",
       schedule: manual,
     });
     const sessionA = event(
@@ -622,6 +708,7 @@ describe("TD-18 renderer transport", () => {
       "ses_b",
     );
 
+    transport.follow("ses_b", "scope_spec");
     transport.enqueue(sessionA);
     transport.enqueue(sessionB);
     transport.flush();
@@ -633,7 +720,11 @@ describe("TD-18 renderer transport", () => {
   });
 
   it("rejects an invalid payload before it can mutate the stream", () => {
-    const transport = createTurnStreamTransport({ schedule: manual });
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
     transport.enqueue(started());
     transport.flush();
 
@@ -655,6 +746,8 @@ describe("TD-18 renderer transport", () => {
   it("offers the session id with the recovery request", () => {
     const requests: [number, string][] = [];
     const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
       schedule: manual,
       onResync: (fromSeq, sessionId) => requests.push([fromSeq, sessionId]),
     });
@@ -666,7 +759,11 @@ describe("TD-18 renderer transport", () => {
   });
 
   it("rejects a malformed frame while paused before inspecting its kind", () => {
-    const transport = createTurnStreamTransport({ schedule: manual });
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
     transport.enqueue(started());
     transport.flush();
     transport.enqueue(delta(4, "gap"));
@@ -684,7 +781,11 @@ describe("TD-18 renderer transport", () => {
   });
 
   it("replays durable events after a reconnect snapshot without skipping them", () => {
-    const transport = createTurnStreamTransport({ schedule: manual });
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
     transport.enqueue(started());
     transport.flush();
     transport.enqueue(delta(4, "gap"));
@@ -716,5 +817,185 @@ describe("TD-18 renderer transport", () => {
       actionId: "act_replay",
       status: "success",
     });
+  });
+
+  it("rejects events for sessions it was not told to follow", () => {
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_a",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
+    transport.enqueue(
+      event(
+        1,
+        "turn.started",
+        { runId: "run_b", turnId: "turn_b" },
+        true,
+        "ses_b",
+      ),
+    );
+    const state = transport.flush();
+
+    expect(state.runs.run_b).toBeUndefined();
+    expect(transport.current("ses_b").runs.run_b).toBeUndefined();
+    expect(transport.rejectedCount()).toBe(1);
+
+    transport.follow("ses_b", "scope_spec");
+    transport.enqueue(
+      event(
+        1,
+        "turn.started",
+        { runId: "run_b", turnId: "turn_b" },
+        true,
+        "ses_b",
+      ),
+    );
+    transport.flush();
+    expect(transport.current("ses_b").runs.run_b).toBeDefined();
+    expect(transport.current().runs.run_b).toBeUndefined();
+    expect(transport.rejectedCount()).toBe(1);
+  });
+
+  it("stays inert until a session is followed", () => {
+    const transport = createTurnStreamTransport({ schedule: manual });
+    transport.enqueue(started());
+    const state = transport.flush();
+
+    expect(state.runs.run_a).toBeUndefined();
+    expect(state.sessionId).toBeUndefined();
+    expect(transport.rejectedCount()).toBe(1);
+  });
+
+  it("applies every durable replay frame after a durable-queue overflow and snapshot", () => {
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
+    transport.enqueue(started());
+    transport.flush();
+
+    const count = TRANSPORT_LIMITS.pendingQueueFrames + 1;
+    for (let i = 0; i < count; i += 1) {
+      transport.enqueue(toolIntent(i + 2, `act_${i}`));
+    }
+    expect(transport.current().needsResync).toBe(true);
+    const from = transport.current().resyncFromSeq ?? 0;
+    expect(from).toBe(1);
+
+    transport.enqueue(snapshot(count + 3));
+    for (let i = 0; i < count; i += 1) {
+      transport.enqueue(toolIntent(i + 2, `act_${i}`));
+      if (i % 256 === 255) transport.flush();
+    }
+    const state = transport.flush();
+
+    expect(state.runs.run_a.actions).toHaveLength(count);
+    expect(state.needsResync).toBe(false);
+    expect(state.lastDurableSeq).toBe(count + 1);
+    expect(state.duplicateCount).toBe(0);
+  });
+
+  it("drops a retransmitted eventId instead of merging its text twice", () => {
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
+    transport.enqueue(started());
+    transport.flush();
+
+    transport.enqueue(delta(2, "x"));
+    transport.enqueue({ ...delta(3, "x"), eventId: "evt_2" });
+    const state = transport.flush();
+
+    expect(state.runs.run_a.text).toBe("x");
+    expect(state.duplicateCount).toBe(1);
+  });
+
+  it("keeps the live cursor above the snapshot while replaying durable frames", () => {
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
+    transport.enqueue(started());
+    transport.flush();
+    transport.enqueue(delta(4, "gap"));
+    transport.flush();
+
+    transport.enqueue(
+      event(5, "run.reconnect_snapshot", {
+        runId: "run_a",
+        lastDurableSeq: 2,
+        turnId: "turn_a",
+        activeActionIds: [],
+        state: "busy",
+      }),
+    );
+    transport.enqueue(toolIntent(3, "act_3"));
+    transport.enqueue(toolIntent(4, "act_4"));
+    transport.enqueue(delta(6, "live"));
+    const state = transport.flush();
+
+    expect(state.needsResync).toBe(false);
+    expect(state.resyncCount).toBe(1);
+    expect(state.runs.run_a.actions.map((a) => a.actionId)).toEqual([
+      "act_3",
+      "act_4",
+    ]);
+    expect(state.runs.run_a.text).toBe("live");
+  });
+
+  it("rejects an event whose scope differs from the followed scope", () => {
+    const transport = createTurnStreamTransport({
+      sessionId: "ses_spec",
+      scopeId: "scope_spec",
+      schedule: manual,
+    });
+    transport.enqueue(started());
+    transport.flush();
+
+    transport.enqueue({
+      ...delta(2, "x"),
+      scopeId: "scope_other",
+    } as SplyceEventEnvelope);
+    const state = transport.flush();
+
+    expect(state.runs.run_a.text).toBe("");
+    expect(state.lastSeq).toBe(1);
+    expect(transport.rejectedCount()).toBe(1);
+  });
+});
+
+describe("reducer event-id memory", () => {
+  it("stays bounded and fast across a long run of events", () => {
+    let state = createTurnsState();
+    state = reduceTurns(
+      state,
+      event(1, "turn.started", { runId: "run_a", turnId: "turn_a" }),
+    );
+    const started = performance.now();
+    for (let seq = 2; seq < 12_002; seq += 1) {
+      state = reduceTurns(state, delta(seq, "x"), { coalesced: true });
+    }
+    const elapsed = performance.now() - started;
+    expect(state.runs.run_a?.text.length).toBe(12_000);
+    expect(state.seenEventIds.size).toBeLessThanOrEqual(4096);
+    // The old per-event Set copy made this O(n^2); the bounded window keeps it linear.
+    expect(elapsed).toBeLessThan(2000);
+  });
+
+  it("still rejects a duplicate that is inside the window", () => {
+    let state = createTurnsState();
+    state = reduceTurns(
+      state,
+      event(1, "turn.started", { runId: "run_a", turnId: "turn_a" }),
+    );
+    const repeated = delta(2, "x");
+    state = reduceTurns(state, repeated);
+    const again = reduceTurns(state, repeated);
+    expect(again.duplicateCount).toBe(state.duplicateCount + 1);
+    expect(again.runs.run_a?.text).toBe("x");
   });
 });

@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "caseId": "FUI-W1",
+  "title": "Base-only install",
+  "targetTask": "TD-29",
+  "description": "Clean install with unconfigured provider state. Navigation works, generation is honestly labeled unconfigured, zero unselected background workers spawned.",
+  "preconditions": {
+    "windowMode": "normal",
+    "dpiScale": 1.0,
+    "contrastMode": false,
+    "reducedMotion": false,
+    "engineStatus": "ready"
+  },
+  "eventSequence": [
+    {
+      "delayMs": 0,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w1_01",
+        "eventId": "evt_01W1_01",
+        "createdAt": "2026-10-26T12:00:00.000Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 1,
+        "durable": true,
+        "kind": "engine.status",
+        "payload": {
+          "state": "ready",
+          "activeWorkers": 0
+        }
+      }
+    },
+    {
+      "delayMs": 10,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w1_02",
+        "eventId": "evt_01W1_02",
+        "createdAt": "2026-10-26T12:00:00.010Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 2,
+        "durable": true,
+        "kind": "turn.started",
+        "payload": {
+          "runId": "run_w1_base",
+          "turnId": "turn_01"
+        }
+      }
+    },
+    {
+      "delayMs": 20,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w1_03",
+        "eventId": "evt_01W1_03",
+        "createdAt": "2026-10-26T12:00:00.020Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 3,
+        "durable": true,
+        "kind": "turn.failed",
+        "payload": {
+          "runId": "run_w1_base",
+          "error": {
+            "code": "POLICY_DENIED",
+            "message": "No provider configured for base workspace.",
+            "correlationId": "req_w1_01",
+            "retryable": false
+          }
+        }
+      }
+    }
+  ],
+  "userActions": [
+    {
+      "step": 1,
+      "action": "click",
+      "targetSelector": "[data-testid='setup-provider-card']",
+      "payload": "select"
+    }
+  ],
+  "assertions": {
+    "expectedState": {
+      "generationBlocked": true,
+      "unconfiguredBanner": true
+    },
+    "expectedDispatches": [],
+    "accessibilityQueries": [
+      {
+        "role": "alert",
+        "name": "Provider Unconfigured",
+        "expectedState": "visible"
+      }
+    ],
+    "guardRemovalCheck": {
+      "action": "bypass_provider_check",
+      "mustFailWith": "ERR_PROVIDER_UNCONFIGURED"
+    }
+  }
+}

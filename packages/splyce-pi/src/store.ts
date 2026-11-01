@@ -21,7 +21,10 @@ import {
   writeFileSync,
 } from "node:fs";
 
-const LAYOUT_VERSION = 1 as const;
+const LAYOUT_VERSION = 2 as const;
+
+/** Effective configuration revision of a scope before any transition applied. */
+export const INITIAL_CONFIG_REVISION = "cfg-0";
 
 const RECORD_COLUMNS = [
   "seq",
@@ -29,6 +32,7 @@ const RECORD_COLUMNS = [
   "record_id",
   "schema_version",
   "scope_id",
+  "session_id",
   "created_at",
   "payload",
 ] as const;
@@ -192,7 +196,9 @@ export class Store {
     if (stampedVersion !== String(LAYOUT_VERSION))
       throw new StoreError(
         "STORE_LAYOUT",
-        `store layout version ${stampedVersion} is not supported (expected ${String(LAYOUT_VERSION)})`,
+        stampedVersion === "1"
+          ? `store layout version 1 predates session attribution; run Store.migrateV1(path) explicitly (expected ${String(LAYOUT_VERSION)})`
+          : `store layout version ${stampedVersion} is not supported (expected ${String(LAYOUT_VERSION)})`,
       );
     const required: Array<[string, readonly string[]]> = [
       ["records", RECORD_COLUMNS],
@@ -207,6 +213,82 @@ export class Store {
           "STORE_LAYOUT",
           `store claims layout ${stampedVersion} but table ${table} lacks columns: ${missing.join(", ")}`,
         );
+    }
+  }
+
+  /**
+   * Explicit v1 -> v2 migration: adds session attribution to the records
+   * table and stamps layout 2. Never invoked implicitly by open() — a v1
+   * store refuses to open until it is migrated on purpose, so the schema
+   * change cannot happen silently.
+   *
+   * A populated v1 store REQUIRES explicit `attribution.sessionId`: every
+   * pre-existing row is stamped with that session id so its old-session
+   * replay keeps working (no silent loss). An empty v1 store needs no
+   * attribution; migrated rows never end up unreplayable-by-accident.
+   */
+  static migrateV1(path: string, attribution?: { sessionId: string }): void {
+    const db = new DatabaseSync(path, { timeout: 5000 });
+    try {
+      // Every precondition read runs inside the write transaction, so a
+      // concurrent v1 writer cannot commit rows between the check and the act.
+      db.exec("BEGIN IMMEDIATE;");
+      const stamped = db
+        .prepare("SELECT value FROM store_meta WHERE key = 'layout_version'")
+        .get() as { value: string } | undefined;
+      if (stamped === undefined)
+        throw new StoreError(
+          "STORE_LAYOUT",
+          "store is not stamped; nothing to migrate",
+        );
+      if (stamped.value !== "1")
+        throw new StoreError(
+          "STORE_LAYOUT",
+          `store layout version ${stamped.value} is not migratable to ${String(LAYOUT_VERSION)} by migrateV1`,
+        );
+      const present = Store.tableColumns(db, "records");
+      for (const column of ["seq", "record_id", "payload"]) {
+        if (!present.has(column))
+          throw new StoreError(
+            "STORE_LAYOUT",
+            `records table lacks ${column}; store is not a valid v1 store`,
+          );
+      }
+      if (present.has("session_id"))
+        throw new StoreError(
+          "STORE_LAYOUT",
+          "records table already carries session_id; migrateV1 refuses to run twice",
+        );
+      const populated =
+        (
+          db.prepare("SELECT COUNT(*) AS n FROM records").get() as {
+            n: number | bigint;
+          }
+        ).n > 0;
+      if (populated && (attribution?.sessionId ?? "") === "")
+        throw new StoreError(
+          "STORE_LAYOUT",
+          "v1 store has records but no explicit session attribution was given; pass migrateV1(path, { sessionId }) so old-session replay is preserved, never silently dropped",
+        );
+      const sessionId = attribution?.sessionId ?? "";
+      db.exec(
+        "ALTER TABLE records ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
+      );
+      if (populated)
+        db.prepare("UPDATE records SET session_id = ?").run(sessionId);
+      db.prepare(
+        "UPDATE store_meta SET value = ? WHERE key = 'layout_version'",
+      ).run(String(LAYOUT_VERSION));
+      db.exec("COMMIT;");
+    } catch (error) {
+      try {
+        if (db.isTransaction) db.exec("ROLLBACK;");
+      } catch {
+        // the original failure is the reportable one
+      }
+      throw error instanceof StoreError ? error : mapSqliteError(error);
+    } finally {
+      db.close();
     }
   }
 
@@ -263,6 +345,7 @@ export class Store {
             "record_id TEXT NOT NULL UNIQUE, " +
             "schema_version INTEGER NOT NULL, " +
             "scope_id TEXT NOT NULL, " +
+            "session_id TEXT NOT NULL, " +
             "created_at TEXT NOT NULL, " +
             "payload TEXT NOT NULL)",
         );
@@ -351,20 +434,76 @@ export class Store {
     };
   }
 
+  /**
+   * Highest committed seq attributed to one session in a scope: the exclusive
+   * cursor for that session's replay/resync. Other sessions' records never
+   * advance another session's cursor, and 0 means the session has no
+   * attributable records (nothing to replay from).
+   */
+  sessionCursor(scopeId: string, sessionId: string): number {
+    this.assertOpen();
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(seq), 0) AS s FROM records " +
+          "WHERE scope_id = ? AND session_id = ?",
+      )
+      .get(scopeId, sessionId) as { s: number | bigint };
+    return Number(row.s);
+  }
+
+  /**
+   * The scope's effective configuration revision: the `acceptedConfigRevision`
+   * of the latest `applied` configurationTransition, or
+   * {@link INITIAL_CONFIG_REVISION} when none was ever applied. Pending,
+   * draining and failed transitions never change it.
+   */
+  configRevision(scopeId: string): string {
+    this.assertOpen();
+    return Store.readConfigRevision(this.db, scopeId);
+  }
+
+  private static readConfigRevision(db: DatabaseSync, scopeId: string): string {
+    // The query below reads raw payloads, so it must never trust a row the
+    // normal reader would reject: an unreadable (future-schema) transition
+    // means the effective revision is unknowable, so fail closed (S5).
+    const unreadable = db
+      .prepare(
+        "SELECT schema_version FROM records WHERE scope_id = ? AND kind = 'configurationTransition' " +
+          "AND schema_version != ? LIMIT 1",
+      )
+      .get(scopeId, CONTRACT_VERSION) as
+      { schema_version: number | bigint } | undefined;
+    if (unreadable !== undefined)
+      throw new StoreError(
+        "UNKNOWN_SCHEMA",
+        `scope ${JSON.stringify(scopeId)} holds a configurationTransition with schemaVersion ${String(unreadable.schema_version)}; this store reads ${String(CONTRACT_VERSION)}, so the effective configuration revision cannot be determined`,
+      );
+    const row = db
+      .prepare(
+        "SELECT json_extract(payload, '$.acceptedConfigRevision') AS rev FROM records " +
+          "WHERE scope_id = ? AND kind = 'configurationTransition' " +
+          "AND json_extract(payload, '$.state') = 'applied' ORDER BY seq DESC LIMIT 1",
+      )
+      .get(scopeId) as { rev: string } | undefined;
+    return row === undefined ? INITIAL_CONFIG_REVISION : row.rev;
+  }
+
   private insertValidated(
     kind: RecordKind,
     record: RecordByKind[RecordKind],
+    sessionId: string,
   ): number {
     const result = this.db
       .prepare(
-        "INSERT INTO records (kind, record_id, schema_version, scope_id, created_at, payload) " +
-          "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO records (kind, record_id, schema_version, scope_id, session_id, created_at, payload) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         kind,
         record.recordId,
         CONTRACT_VERSION,
         record.scopeId,
+        sessionId,
         record.createdAt,
         JSON.stringify(record),
       );
@@ -394,7 +533,7 @@ export class Store {
       throw mapSqliteError(error);
     }
     try {
-      const seq = this.insertValidated(input.kind, validated);
+      const seq = this.insertValidated(input.kind, validated, caller.sessionId);
       return { seq, recordId: validated.recordId };
     } catch (error) {
       throw mapSqliteError(error);
@@ -407,13 +546,33 @@ export class Store {
    * mid-batch constraint violation — rolls the whole batch back: the cursor
    * observable from a fresh connection is unchanged and the next write
    * succeeds on a clean handle.
+   *
+   * `expectedAbsentActionKey` makes the batch an atomic test-and-set: under
+   * the SAME BEGIN IMMEDIATE as the inserts, an action record carrying that
+   * idempotency key OR that actionId in the scope is looked up; if either
+   * exists the batch throws ACTION_ALREADY_EXISTS and acknowledges nothing.
+   * `expectedConfigRevision` is the same kind of in-transaction precondition for
+   * configuration: the batch commits only if the scope's effective revision
+   * still equals the expected one (TD-26 compare-and-set).
+   *
+   * Two processes that both observed the key absent can never both commit —
+   * one wins the write lock, the other sees the row — and two host permit
+   * IDs cannot create the same logical action under a new key.
    */
   appendBatch(
     inputs: readonly AppendInput[],
     caller: CallerContext,
+    expectedAbsentActionKey?: {
+      scopeId: string;
+      idempotencyKey: string;
+      actionId: string;
+    },
+    expectedOwnershipEpoch?: { workspaceId: string; epoch: number },
+    expectedConfigRevision?: { scopeId: string; revision: string },
   ): AppendBatchResult {
     this.assertWritable();
-    if (inputs.length === 0) return { seqs: [] };
+    if (inputs.length === 0 && expectedAbsentActionKey === undefined)
+      return { seqs: [] };
     const prepared: Array<[RecordKind, RecordByKind[RecordKind]]> = [];
     try {
       for (const input of inputs) {
@@ -437,9 +596,82 @@ export class Store {
     }
     try {
       this.db.exec("BEGIN IMMEDIATE;");
+      if (expectedOwnershipEpoch !== undefined) {
+        const { workspaceId, epoch } = expectedOwnershipEpoch;
+        const row = this.db
+          .prepare(
+            "SELECT epoch FROM workspace_ownership WHERE workspace_id = ?",
+          )
+          .get(workspaceId) as { epoch: number | bigint } | undefined;
+        const current = row === undefined ? 0 : Number(row.epoch);
+        if (current !== epoch) {
+          this.db.exec("ROLLBACK;");
+          throw new StoreError(
+            "OWNERSHIP_STALE_EPOCH",
+            `workspace ${JSON.stringify(workspaceId)} ownership epoch is ${String(current)}, not the expected ${String(epoch)}; nothing appended`,
+          );
+        }
+      }
+      if (expectedConfigRevision !== undefined) {
+        const { scopeId, revision } = expectedConfigRevision;
+        const current = Store.readConfigRevision(this.db, scopeId);
+        if (current !== revision) {
+          this.db.exec("ROLLBACK;");
+          throw new StoreError(
+            "CONFIG_STALE_REVISION",
+            `scope ${JSON.stringify(scopeId)} configuration revision is ${JSON.stringify(current)}, not the expected ${JSON.stringify(revision)}; nothing appended`,
+          );
+        }
+      }
+      if (expectedConfigRevision !== undefined) {
+        // An accepted revision is never reused within a scope (including the
+        // initial one): otherwise cfg-0 -> cfg-1 -> cfg-0 recreates the state a
+        // stale writer expects and its compare-and-set would succeed (ABA).
+        for (const [kind, record] of prepared) {
+          if (kind !== "configurationTransition") continue;
+          const transition = record as RecordByKind["configurationTransition"];
+          if (transition.state !== "applied") continue;
+          const taken =
+            transition.acceptedConfigRevision === INITIAL_CONFIG_REVISION ||
+            this.db
+              .prepare(
+                "SELECT 1 FROM records WHERE scope_id = ? AND kind = 'configurationTransition' " +
+                  "AND json_extract(payload, '$.state') = 'applied' " +
+                  "AND json_extract(payload, '$.acceptedConfigRevision') = ? LIMIT 1",
+              )
+              .get(
+                expectedConfigRevision.scopeId,
+                transition.acceptedConfigRevision,
+              ) !== undefined;
+          if (taken) {
+            this.db.exec("ROLLBACK;");
+            throw new StoreError(
+              "CONFIG_REVISION_REUSED",
+              `configuration revision ${JSON.stringify(transition.acceptedConfigRevision)} was already accepted in scope ${JSON.stringify(expectedConfigRevision.scopeId)}; nothing appended`,
+            );
+          }
+        }
+      }
+      if (expectedAbsentActionKey !== undefined) {
+        const { scopeId, idempotencyKey, actionId } = expectedAbsentActionKey;
+        const existing = this.db
+          .prepare(
+            "SELECT 1 FROM records WHERE scope_id = ? AND kind = 'action' " +
+              "AND (json_extract(payload, '$.idempotencyKey') = ? " +
+              "OR json_extract(payload, '$.actionId') = ?) LIMIT 1",
+          )
+          .get(scopeId, idempotencyKey, actionId);
+        if (existing !== undefined) {
+          this.db.exec("ROLLBACK;");
+          throw new StoreError(
+            "ACTION_ALREADY_EXISTS",
+            `an action record with idempotencyKey ${JSON.stringify(idempotencyKey)} or actionId ${JSON.stringify(actionId)} already exists in scope ${JSON.stringify(scopeId)}; nothing appended`,
+          );
+        }
+      }
       const seqs: number[] = [];
       for (const [kind, record] of prepared) {
-        seqs.push(this.insertValidated(kind, record));
+        seqs.push(this.insertValidated(kind, record, caller.sessionId));
       }
       this.db.exec("COMMIT;");
       return { seqs };
@@ -495,15 +727,30 @@ export class Store {
     return this.readRow(row);
   }
 
-  /** Ordered read of a scope's records after a cursor. */
-  list(scopeId: string, afterSeq = 0): ListResult {
+  /**
+   * Ordered read of a scope's records after a cursor. When `sessionId` is
+   * given, only records committed by that session are returned — replay for
+   * one session never mixes another session's records. Records written
+   * before session attribution (migrated v1 rows) carry '' and are excluded
+   * from session-filtered reads.
+   */
+  list(scopeId: string, afterSeq = 0, sessionId?: string): ListResult {
     this.assertOpen();
-    const rows = this.db
-      .prepare(
-        "SELECT seq, kind, schema_version, payload FROM records " +
-          "WHERE scope_id = ? AND seq > ? ORDER BY seq ASC",
-      )
-      .all(scopeId, afterSeq) as unknown[];
+    const rows = (
+      sessionId === undefined
+        ? this.db
+            .prepare(
+              "SELECT seq, kind, schema_version, payload FROM records " +
+                "WHERE scope_id = ? AND seq > ? ORDER BY seq ASC",
+            )
+            .all(scopeId, afterSeq)
+        : this.db
+            .prepare(
+              "SELECT seq, kind, schema_version, payload FROM records " +
+                "WHERE scope_id = ? AND seq > ? AND session_id = ? ORDER BY seq ASC",
+            )
+            .all(scopeId, afterSeq, sessionId)
+    ) as unknown[];
     const records: StoredRecord[] = [];
     let skippedUnknownSchema = 0;
     for (const row of rows) {

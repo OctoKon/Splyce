@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TD-30 ApprovalDialog fixture</title>
+    <style>
+      :root {
+        color-scheme: light;
+        background: #f9fafb;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        font-family:
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+        color: #111827;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="behind" data-testid="behind" type="button">
+      Behind the modal
+    </button>
+    <div id="app"></div>
+    <script type="module" src="./fixture.ts"></script>
+  </body>
+</html>

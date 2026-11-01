@@ -1,0 +1,359 @@
+[
+  {
+    "id": "TD04-01",
+    "tool": "Pi openai-completions at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-completions.ts#L383",
+    "title": "Pinned openai-completions adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "SDK Chat Completions request: model, converted messages and optional tools; stream=true with compatibility-specific token, reasoning and usage options. It is not the legacy text completions operation.",
+      "Choice deltas reconstruct text and tool calls by index/ID; finish_reason determines stop/length/toolUse/error, and missing terminal finish_reason is an error.",
+      "Prompt/completion and cache/reasoning fields are normalized from reported chunks; initialized zero counters and catalog cost do not establish measured billing or complete usage.",
+      "AbortSignal reaches the SDK and retry path; aborted or interrupted streams remain non-successful. No inference that remote processing or charging stopped."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "0e5b606e6995bfaf3c01e8e62fede0beb4995533",
+    "sharedSources": []
+  },
+  {
+    "id": "TD04-02",
+    "tool": "Pi mistral-conversations at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/mistral-conversations.ts#L298",
+    "title": "Pinned mistral-conversations adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "The adapter label is mistral-conversations, but this revision posts a streaming Chat Completions payload to v1/chat/completions relative to the endpoint root.",
+      "SSE choice deltas carry content/tool fragments, usage and finish reasons; this source does not establish a Mistral Conversations wire implementation.",
+      "Prompt/completion and cached prompt fields feed normalized counters; preserve actual reporting and do not treat unavailable usage or catalog prices as measured cost.",
+      "Combined caller/header-timeout signals reach the request and stream reader; interruption or missing terminal state is an error, not a successful completed response."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "69e3f1dd1a0a74646ed4a291322a10b639548ced",
+    "sharedSources": []
+  },
+  {
+    "id": "TD04-03",
+    "tool": "Pi openai-responses at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-responses.ts#L221",
+    "title": "Pinned openai-responses adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "OpenAI SDK Responses request with model, converted input items, tool definitions and selected reasoning/configuration; stream=true. Custom fetch covers HTTP, not arbitrary WebSocket routes.",
+      "Shared Responses parsing tracks item/call IDs, text/argument deltas and terminal completed/incomplete/failed/error states; opaque reasoning signatures stay provider-specific.",
+      "Terminal response usage separates cached/cache-write input, output and reasoning; catalog/service-tier pricing is an estimate distinct from observed billing.",
+      "Caller signal reaches SDK/retries and is checked before success; pending EOF becomes an error. This adapter does not inherit Codex WebSocket support."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "c29e6adfb5c85b387592f59d90ef243a4b4356de",
+    "sharedSources": [
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-responses-shared.ts#L1"
+    ]
+  },
+  {
+    "id": "TD04-04",
+    "tool": "Pi azure-openai-responses at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/azure-openai-responses.ts#L92",
+    "title": "Pinned azure-openai-responses adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "AzureOpenAI Responses client resolves Azure base URL/API version and deployment name; deployment name becomes request model. This pin explicitly requires options.apiKey.",
+      "Responses stream uses the shared item/terminal parser; Azure deployment/resource identity remains separate from a public OpenAI model name.",
+      "Shared terminal Responses usage/cost normalization applies; absent observations and Azure billing are not inferred from compatibility.",
+      "AbortSignal passes to the SDK and retry path. Wrong deployment/version/auth, aborted calls and incomplete terminal results need separate qualification."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "24e73fd0562fa8321f432415487ceb2417caaafa",
+    "sharedSources": [
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-responses-shared.ts#L1"
+    ]
+  },
+  {
+    "id": "TD04-05",
+    "tool": "Pi openai-codex-responses at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-codex-responses.ts#L309",
+    "title": "Pinned openai-codex-responses adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Account-oriented Codex backend Responses payload; transport may be auto, sse or websocket, with session/continuation and account-specific headers. It is not ordinary API-key Responses.",
+      "WebSocket and SSE paths produce Responses-derived events; continuation recovery and automatic transport fallback exist upstream and must be constrained by Splyce explicit transport admission.",
+      "Responses-derived token/cache/reasoning accounting plus service-tier pricing; account usage-limit diagnostics are not proof of remote billing.",
+      "Signals participate in HTTP, retries and WebSocket processing. Every reconnect, reconstruction or fallback needs current authority and no duplicate effects; a custom HTTP fetch does not mediate WebSocket."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "5165e1ccfff26d983015a8608d110d253164c703",
+    "sharedSources": [
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-responses-shared.ts#L1"
+    ]
+  },
+  {
+    "id": "TD04-06",
+    "tool": "Pi anthropic-messages at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/anthropic-messages.ts#L660",
+    "title": "Pinned anthropic-messages adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Beta Messages SDK request with system/context, converted messages, tool definitions and selected thinking/cache options; response is consumed as a Messages stream.",
+      "Indexed content-block start/delta/stop events preserve text, thinking signatures and partial JSON tool input; message stop reasons/errors remain distinct.",
+      "message_start initializes reported input/cache counters; message_delta replaces only present cumulative fields, rather than adding every update. Preserve model-specific catalog cost separately.",
+      "SDK signal and stream abort checks map local cancellation to aborted; beta/server-side behavior, credentials and model-specific features require independent selected-cell admission."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "53764b406914591dad121a4a83d4a02e30f32dd4",
+    "sharedSources": []
+  },
+  {
+    "id": "TD04-07",
+    "tool": "Pi bedrock-converse-stream at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/bedrock-converse-stream.ts#L292",
+    "title": "Pinned bedrock-converse-stream adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "AWS ConverseStreamCommand receives modelId, system/messages, tool and inference configuration; client.send uses abortSignal. AWS event-stream framing is not generic SSE.",
+      "Content-block/tool-use deltas, messageStop and metadata drive normalized assistant events; AWS region/profile/model identity and streaming exceptions remain explicit.",
+      "Metadata reports input/output/cache counts; source computes normalized totals/catalog cost. Missing provider metadata and measured account charges remain unqualified.",
+      "AWS abortSignal is forwarded and checked before success. Ambient credentials, signed headers and SDK transport are separate authority surfaces, not a single fetch hook."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "7a7740f06e75e44e5d34c5587c377b0a3ef05801",
+    "sharedSources": []
+  },
+  {
+    "id": "TD04-08",
+    "tool": "Pi google-generative-ai at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/google-generative-ai.ts#L100",
+    "title": "Pinned google-generative-ai adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Google GenAI generateContentStream takes model, converted contents and config with tools/thinking settings; this is generateContent, not an inferred Interactions API.",
+      "Candidate parts map text, functions and applicable thought signatures into assistant events; finishReason determines terminal state and function-call completion.",
+      "usageMetadata separates prompt/cache, candidate and thought counters; subsequent snapshots replace normalized totals. Source accounting does not certify measured billing.",
+      "config.abortSignal receives the caller signal; retries and post-stream checks preserve abort/error state. History/signatures must remain compatible with the selected provider."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "213eff5e8ddaf75f6e565235440f40b6c52a2ca9",
+    "sharedSources": [
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/google-shared.ts#L1"
+    ]
+  },
+  {
+    "id": "TD04-09",
+    "tool": "Pi google-vertex at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/google-vertex.ts#L116",
+    "title": "Pinned google-vertex adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Vertex-mode Google GenAI generateContentStream uses an explicit Vertex API key or ADC plus project/location; endpoint/project identity differs from Gemini Developer API.",
+      "Candidate parts/functions/thought signatures and finish reasons follow the shared Google conversion surface; no generic cross-provider signature compatibility is implied.",
+      "Vertex usageMetadata normalizes prompt/cache/output/thought fields, without establishing actual account billing or unreported token counts.",
+      "config.abortSignal, retry and post-stream checks handle caller cancellation; ADC/project/location routing must be admitted before provider effects."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "07f78afe8079470df79e1d37cb16f30446998365",
+    "sharedSources": [
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/google-shared.ts#L1"
+    ]
+  },
+  {
+    "id": "TD04-10",
+    "tool": "Pi pi-messages at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/pi-messages.ts#L379",
+    "title": "Pinned pi-messages adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Explicit gateway POST to baseUrl/messages serializes model, transcript context and allowed request options; a gateway is an egress hop requiring its own identity and policy.",
+      "SSE carries serialized Pi assistant events and terminal done/error with response identity; a disconnect or missing terminal message cannot become success.",
+      "Terminal serialized assistant usage is gateway-reported; preserve attribution and do not infer the backing provider or remote charge from gateway counters.",
+      "Request/reader caller signals abort local delivery. This protocol is not implicit durable state storage and does not itself prove that the remote model stopped."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "59b54567e7556ae906559a5d10df88dadd81085a",
+    "sharedSources": []
+  },
+  {
+    "id": "TD04-11",
+    "tool": "Pi typesafe-system-one at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/typesafe-system-one.ts#L15",
+    "title": "Pinned typesafe-system-one adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "POST baseUrl/systemone with model plus state/questions; public bool questions map to wire noul. Image compatibility selects assets or state image URLs, with the TypeSafe image opt-in header when needed.",
+      "Shared parsing maps choice/score/noul answers to typed choice/score/bool results; API mismatch, missing answers and unsupported images return an error result.",
+      "Shared helper records optional reported usage before parsing answers; a billed malformed answer can retain usage. Catalog cost is not measured billing.",
+      "Shared POST retries/timeouts combine caller signal; failures resolve ClassifierResult.stopReason error or aborted rather than throwing to codemode. Base remains denied."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "e9fa13c28fdd8047c26dfe1b459457586ea38ff2",
+    "sharedSources": [
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/system-one-shared.ts#L1",
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/classifier-shared.ts#L1"
+    ]
+  },
+  {
+    "id": "TD04-12",
+    "tool": "Pi cloudflare-workers-ai-system-one at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/cloudflare-workers-ai-system-one.ts#L31",
+    "title": "Pinned cloudflare-workers-ai-system-one adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "REST POST to configured Workers AI base/run with model and input containing System One state/questions. Image compatibility differs between Clef images and TypeSafe assets.",
+      "Unwrap success/result or a Completed nested run record before shared typed-answer parsing; unsuccessful/non-Completed or malformed responses are errors.",
+      "Optional nested usage is parsed before answers and priced from catalog metadata; cloud/account locality and billing are not inferred from the Workers label.",
+      "Shared caller signal/timeouts/retries apply to REST; errors/abort return a non-successful ClassifierResult. A separately supplied Worker binding needs its own route qualification."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "ec1aefc4a3752c896ec78dd8bc8ae89f5fffb1cd",
+    "sharedSources": [
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/system-one-shared.ts#L1",
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/classifier-shared.ts#L1"
+    ]
+  },
+  {
+    "id": "TD04-13",
+    "tool": "Pi llama-cpp-classify at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/llama-cpp-classify.ts#L427",
+    "title": "Pinned llama-cpp-classify adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Text-only state/questions become prompts with single-token labels; native llama-server tokenize, apply-template and completion requests use model identity and a one-token probability readout, not Chat Completions classification.",
+      "Per-question log probabilities become typed choice/score/bool answers; absent label probability, invalid temperature/questions or image input returns error. All questions are validated before requests.",
+      "This implementation does not attach usage to the ClassifierResult; leave it unknown rather than synthesizing zero tokens or zero cost.",
+      "Caller and timeout signals cover native endpoint requests/retries; abort/error clears answers. Native/local-looking URLs do not supply locality proof or a base grant."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "817caea39cb23b329afb7d37fc5a519a4a9f36ad",
+    "sharedSources": []
+  },
+  {
+    "id": "TD04-14",
+    "tool": "Pi openai-decisions at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-decisions.ts#L161",
+    "title": "Pinned openai-decisions adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "POST baseUrl/decisions with model, input and named questions; choice criteria become choices, score criteria become levels, bool becomes predicate with instructions. Optional image input is bounded.",
+      "Named answer array maps choice/score/predicate back to typed answers; refusal, missing names or malformed values produce a non-successful result.",
+      "Optional reported input/output usage is saved before answer parsing, preserving usage for malformed/refused results; catalog pricing is separate.",
+      "Shared POST signal/retries apply with adapter-specific non-retry statuses; aborted/error results contain no successful answers. This is not inferred chat-generation permission."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "5912781d639d54b97b59dd08162f809beb378135",
+    "sharedSources": [
+      "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/classifier-shared.ts#L1"
+    ]
+  },
+  {
+    "id": "TD04-15",
+    "tool": "Pi openrouter-images at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openrouter-images.ts#L43",
+    "title": "Pinned openrouter-images adapter request/result boundary",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Non-streaming OpenAI SDK Chat Completions request with model and text/image message content plus requested modalities; explicit API key and selected model are required.",
+      "First choice text plus recognized base64 data-URL images become output blocks; remote image URLs are ignored at this source revision. Empty output still needs separate Splyce success validation.",
+      "Optional chat-completion usage and catalog-priced cost populate AssistantImages; absence stays optional/unknown and does not prove no charge.",
+      "SDK caller signal and retry path apply; exceptions resolve stopReason error/aborted. Prompt/reference images and output/temp-file retention require independent admission; denied in base."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Source blob checked against GitHub Git-object SHA. Dependent parsing/type contracts were inspected separately in this ledger. No execution of upstream code, provider request, installed adapter or live billing/cancellation qualification.",
+    "sourceBlobSha1": "6054c7238ad310e3a938ddd90259ad897c52c014",
+    "sharedSources": []
+  },
+  {
+    "id": "TD04-16",
+    "tool": "Pi types.ts at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/types.ts#L1",
+    "title": "Pinned types.ts shared protocol contract",
+    "accessed": "2026-10-26",
+    "claims": [
+      "KnownApi contains ten chat API IDs, KnownClassifierApi contains four classifier IDs and KnownImageApi contains one image ID; extensible string types are not a support allowlist.",
+      "ClassifierContext contains JSON state, optional images and typed questions; classifier/image results expose stop/error/aborted and optional usage. Provider request fetch overrides do not cover WebSocket transports."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Public primary source inspected at the immutable revision; source blob SHA verified. No runtime or live-provider support claim.",
+    "sourceBlobSha1": "32b5a5f31eee96a01830641eeea105feafc22bf3"
+  },
+  {
+    "id": "TD04-17",
+    "tool": "Pi codemode.md at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/coding-agent/docs/codemode.md#L1",
+    "title": "Pinned codemode.md shared protocol contract",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Codemode models can list chat/image/classifier entries, but scripts execute classifiers/images rather than chat generation.",
+      "classify/generateImages resolve provider and id using session credentials, return status-bearing results, and charge reported usage to the tool/session; these facts grant no Splyce authority."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Public primary source inspected at the immutable revision; source blob SHA verified. No runtime or live-provider support claim.",
+    "sourceBlobSha1": "6dd76cbad1f120fbf66ebbdea580b516cc51b08c"
+  },
+  {
+    "id": "TD04-18",
+    "tool": "Pi system-one-shared.ts at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/system-one-shared.ts#L1",
+    "title": "Pinned system-one-shared.ts shared protocol contract",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Shared System One conversion maps public bool questions/answers through the noul wire form; selected model image compatibility controls image encoding.",
+      "Reported usage is parsed before answers; failures return error/aborted with typed result identity rather than establishing successful classification."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Public primary source inspected at the immutable revision; source blob SHA verified. No runtime or live-provider support claim.",
+    "sourceBlobSha1": "96abf494c8cc2fb94f61aadc54e09cc80bddbdaa"
+  },
+  {
+    "id": "TD04-19",
+    "tool": "Pi classifier-shared.ts at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/classifier-shared.ts#L1",
+    "title": "Pinned classifier-shared.ts shared protocol contract",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Shared classifier POST constructs the request with configured credentials/headers, timeout, AbortSignal and bounded retry options.",
+      "Optional token usage is catalog-priced when reported; absent usage does not establish zero billing. Native Splyce admission is still required before every request/helper effect."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Public primary source inspected at the immutable revision; source blob SHA verified. No runtime or live-provider support claim.",
+    "sourceBlobSha1": "81818f7598e3da2ff987442a95d99efc644b2c22"
+  },
+  {
+    "id": "TD04-20",
+    "tool": "Pi openai-responses-shared.ts at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-responses-shared.ts#L1",
+    "title": "Pinned openai-responses-shared.ts shared protocol contract",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Responses parsing tracks item/call identities, argument/text events, terminal response states and provider-specific reasoning signatures.",
+      "Terminal usage separates input cache reads/writes, output and reasoning; status/incomplete details remain distinct rather than every terminal event being successful."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Public primary source inspected at the immutable revision; source blob SHA verified. No runtime or live-provider support claim.",
+    "sourceBlobSha1": "ecc104043d805b2d72b1fb314b58bf5cbb9c7dcb"
+  },
+  {
+    "id": "TD04-21",
+    "tool": "Pi google-shared.ts at d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "url": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/google-shared.ts#L1",
+    "title": "Pinned google-shared.ts shared protocol contract",
+    "accessed": "2026-10-26",
+    "claims": [
+      "Shared Google message conversion retains applicable thought signatures and paired function-call/result identities.",
+      "These conversion mechanisms are source observations, not qualification of arbitrary model/provider history conversion or Interactions APIs."
+    ],
+    "verification": "pinned-source-inspection",
+    "notes": "Public primary source inspected at the immutable revision; source blob SHA verified. No runtime or live-provider support claim.",
+    "sourceBlobSha1": "d68d1c4f26ed557d81ada86379b4e4b91424eefd"
+  }
+]

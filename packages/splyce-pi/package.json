@@ -7,6 +7,18 @@
     "./contracts": {
       "types": "./dist/contracts.d.ts",
       "import": "./dist/contracts.js"
+    },
+    "./provider-auth": {
+      "types": "./dist/provider-auth.d.ts",
+      "import": "./dist/provider-auth.js"
+    },
+    "./credential-resolver": {
+      "types": "./dist/credential-resolver.d.ts",
+      "import": "./dist/credential-resolver.js"
+    },
+    "./provider-admission": {
+      "types": "./dist/provider-admission.d.ts",
+      "import": "./dist/provider-admission.js"
     }
   },
   "files": [

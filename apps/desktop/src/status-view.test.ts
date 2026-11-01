@@ -208,18 +208,16 @@ describe("projectStatus", () => {
     ).toBe("unknown");
   });
 
-  it("projects inherited Object keys to Unknown in every projector", () => {
-    for (const key of [
-      "constructor",
-      "toString",
-      "__proto__",
-      "hasOwnProperty",
-    ]) {
-      expect(projectStatus("run", { state: key } as never).status, key).toBe(
+  it("safely handles prototype property names without collision", () => {
+    for (const key of ["constructor", "__proto__", "toString", "valueOf"]) {
+      expect(projectStatus("run", { state: key } as never).status).toBe(
         "unknown",
       );
-      expect(projectTurnStatus(key as never).label, key).toBe("Unknown");
-      expect(projectToolStatus(key as never).label, key).toBe("Unknown");
+      expect(projectStatus("run", { state: key } as never).label).toBe(
+        "Unknown",
+      );
+      expect(projectTurnStatus(key as never).status).toBe("unknown");
+      expect(projectToolStatus(key as never).status).toBe("unknown");
     }
   });
 

@@ -1,0 +1,67 @@
+[
+  {
+    "id": "SQ-01",
+    "tool": "Node.js node:sqlite (v24 line)",
+    "url": "https://nodejs.org/docs/latest-v24.x/api/sqlite.html",
+    "title": "SQLite | Node.js v24 documentation",
+    "accessed": "2026-10-26",
+    "claims": [
+      "The node:sqlite module ships inside Node 24 without the --experimental-sqlite flag and is documented at Stability 1.2 - Release candidate as of v24.15.0.",
+      "It exposes synchronous DatabaseSync and StatementSync classes with open, readOnly, timeout, foreign-key and defensive options plus a module-level backup() function, and has no transaction helper, so BEGIN and COMMIT are issued as SQL."
+    ],
+    "verification": "primary-documentation",
+    "notes": "API surface only. Class names differ across release lines (DatabaseSync on v24, a Database alias in later docs), so the exact pinned Node minor matters. No Splyce durability, crash or timing result is implied."
+  },
+  {
+    "id": "SQ-02",
+    "tool": "better-sqlite3",
+    "url": "https://github.com/WiseLibs/better-sqlite3/blob/master/docs/api.md",
+    "title": "better-sqlite3 API documentation",
+    "accessed": "2026-10-26",
+    "claims": [
+      "better-sqlite3 provides a synchronous API with transaction() wrappers (deferred, immediate, exclusive and nested savepoints), pragma(), and a promise-returning backup().",
+      "Its documented caveats are that manual BEGIN/COMMIT must not be mixed with transaction(), and that SQLite may roll a transaction back on errors such as SQLITE_FULL or SQLITE_BUSY, leaving callers to check the in-transaction flag after catching."
+    ],
+    "verification": "primary-documentation",
+    "notes": "Library documentation. The repository's performance table is a vendor benchmark, not a Splyce measurement, and is not used for selection here."
+  },
+  {
+    "id": "SQ-03",
+    "tool": "better-sqlite3 package metadata",
+    "url": "https://registry.npmjs.org/better-sqlite3",
+    "title": "better-sqlite3 npm registry metadata",
+    "accessed": "2026-10-26",
+    "claims": [
+      "The published release 13.0.3 is MIT-licensed, requires Node >=22, declares node-addon-api ^8, and carries no npm install or build script in its metadata (gypfile false).",
+      "That release unpacks to 27,302,929 bytes."
+    ],
+    "verification": "primary-registry-metadata",
+    "notes": "Metadata only. Prebuilt-binary contents and an actual Windows x64 load are unverified until TD-09 runs the candidate on the target platform."
+  },
+  {
+    "id": "SQ-04",
+    "tool": "SQLite WAL",
+    "url": "https://www.sqlite.org/wal.html",
+    "title": "Write-Ahead Logging",
+    "accessed": "2026-10-26",
+    "claims": [
+      "In WAL mode writers sync the WAL on every commit when PRAGMA synchronous is FULL, and omit that sync when it is NORMAL, so NORMAL commits may roll back after a power loss or hard reset.",
+      "WAL requires all processes to share memory on one host and cannot run on a network filesystem, and a database file separated from its -wal file can lose committed transactions or corrupt."
+    ],
+    "verification": "primary-documentation",
+    "notes": "Engine-level durability semantics. It does not establish that a Node binding exposes or preserves them, and no Splyce trial was run."
+  },
+  {
+    "id": "SQ-05",
+    "tool": "SQLite corruption guide",
+    "url": "https://www.sqlite.org/howtocorrupt.html",
+    "title": "How To Corrupt An SQLite Database File",
+    "accessed": "2026-10-26",
+    "claims": [
+      "SQLite automatically rolls back a partially written transaction on the next access after an application crash, OS crash or power failure.",
+      "A copy taken while a transaction is in flight can be inconsistent, while the backup API, VACUUM INTO or a copy with no transaction in flight is safe, and hot -journal or -wal files must travel with the database."
+    ],
+    "verification": "primary-documentation",
+    "notes": "Recovery and copy-safety guidance. It is not evidence about our binding, our kill sequence or Windows filesystem behaviour."
+  }
+]

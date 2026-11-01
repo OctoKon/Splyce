@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { EventPayloads } from "@splyce/pi/contracts";
+  import ApprovalSummary from "./ApprovalSummary.svelte";
 
   type ApprovalRequestedPayload = EventPayloads["approval.requested"];
 
@@ -35,22 +36,7 @@
     <h3 id="approval-title">Approval Required: {request.capabilityId}</h3>
   </div>
 
-  <p id="approval-desc" class="rationale">
-    {request.riskRationale}
-  </p>
-
-  <dl class="kv-list">
-    <dt>Request ID</dt>
-    <dd>{request.approvalRequestId}</dd>
-    <dt>Run ID</dt>
-    <dd>{request.runId}</dd>
-    <dt>Action ID</dt>
-    <dd>{request.actionId}</dd>
-    <dt>Target Scope</dt>
-    <dd>{request.targetScope}</dd>
-    <dt>Target</dt>
-    <dd>{request.normalizedTarget}</dd>
-  </dl>
+  <ApprovalSummary {request} riskId="approval-desc" />
 
   {#if decision === null}
     <div class="card-actions">
@@ -112,25 +98,6 @@
   .badge.denied {
     background: rgba(239, 68, 68, 0.12);
     color: #b91c1c;
-  }
-  .rationale {
-    font-size: 0.875rem;
-    color: var(--text-secondary, #4b5563);
-    margin: 8px 0 12px;
-  }
-  .kv-list {
-    display: grid;
-    grid-template-columns: 120px 1fr;
-    gap: 4px 8px;
-    font-size: 0.8125rem;
-    margin: 8px 0 16px;
-  }
-  .kv-list dt {
-    color: var(--text-muted, #6b7280);
-  }
-  .kv-list dd {
-    font-family: monospace;
-    margin: 0;
   }
   .card-actions {
     display: flex;

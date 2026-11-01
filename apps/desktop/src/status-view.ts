@@ -90,15 +90,10 @@ const STATE_VIEWS: Readonly<Record<string, StatusView>> = Object.freeze({
   draining: view("Draining", "active", "draining"),
 });
 
-// Own-property lookup only: inherited keys such as "constructor" or
-// "__proto__" must project to Unknown, never to an Object.prototype member.
-function lookup(views: Readonly<Record<string, StatusView>>, key: string) {
-  return Object.hasOwn(views, key) ? views[key]! : UNKNOWN;
-}
-
 function projectState(state: unknown): StatusView {
-  if (typeof state !== "string") return UNKNOWN;
-  return lookup(STATE_VIEWS, state);
+  if (typeof state !== "string" || !Object.hasOwn(STATE_VIEWS, state))
+    return UNKNOWN;
+  return STATE_VIEWS[state]!;
 }
 
 export type TurnViewStatus =
@@ -138,15 +133,15 @@ const TOOL_STATUS_VIEWS: Readonly<Record<ToolViewStatus, StatusView>> =
 export function projectTurnStatus(
   status: TurnViewStatus | null | undefined,
 ): StatusView {
-  if (!status) return UNKNOWN;
-  return lookup(TURN_STATUS_VIEWS, status);
+  if (!status || !Object.hasOwn(TURN_STATUS_VIEWS, status)) return UNKNOWN;
+  return TURN_STATUS_VIEWS[status]!;
 }
 
 export function projectToolStatus(
   status: ToolViewStatus | null | undefined,
 ): StatusView {
-  if (!status) return UNKNOWN;
-  return lookup(TOOL_STATUS_VIEWS, status);
+  if (!status || !Object.hasOwn(TOOL_STATUS_VIEWS, status)) return UNKNOWN;
+  return TOOL_STATUS_VIEWS[status]!;
 }
 
 function projectOutcome(

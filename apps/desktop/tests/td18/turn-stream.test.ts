@@ -163,6 +163,7 @@ describe("TurnStream component", () => {
   it("focuses Deny and resolves Escape/Y through the ApprovalCard", async () => {
     const onApproval = vi.fn();
     render(applyAll([started(), intent(), approval()]).runs.run_a, {
+      canRespond: () => true,
       onApproval,
     });
 
@@ -190,6 +191,7 @@ describe("TurnStream component", () => {
   it("sends approve from Y without moving focus first", async () => {
     const onApproval = vi.fn();
     render(applyAll([started(), intent(), approval()]).runs.run_a, {
+      canRespond: () => true,
       onApproval,
     });
 
@@ -238,7 +240,9 @@ describe("TurnStream component", () => {
     expect(
       document.querySelector('[data-testid="approval-allow-button"]'),
     ).toBeNull();
-    expect(document.body.textContent).not.toContain("Approval controls are not available");
+    expect(document.body.textContent).not.toContain(
+      "Approval controls are not available",
+    );
   });
 
   it("keeps partial text visible on cancel and announces the stop", () => {

@@ -1,6 +1,6 @@
-# Windows setup flow: supporting TD-05 proposal
+# Windows setup flow: TD-05 proposal
 
-**Status: supporting proposal, 2026-10-26; runtime, GUI, accessibility and Windows evidence n=0.** Dnarsh remains the primary TD-05 owner. This input helps TD-01 reconcile shared contracts and TD-06 design fixtures; it neither closes TD-05 nor freezes schemas, routes, command names or visual design. MdSiddiqx retains frontend design authority through TD-02/06. No runtime or visual implementation accompanies this document.
+**Status: TD-05 proposal by its owner (dnarsh), 2026-10-26, built on the supporting draft already merged here; runtime, GUI, accessibility and Windows evidence n=0.** This input helps TD-01 reconcile shared contracts and TD-06 design fixtures; it neither freezes schemas, routes, command names or visual design nor authorizes an operation. MdSiddiqx retains frontend design authority through TD-02/06. No runtime or visual implementation accompanies this document.
 
 ## Boundaries and defaults
 
@@ -41,6 +41,22 @@ Show custom/local packages as trusted executable code, with source and integrity
 
 Display app/runtime/WebView provisioning, selected module transfer, installed package/dependency, native and model bytes separately where supplied. Shared assets identify existing owners and incremental versus total cost. An unknown byte count reads **Unknown**, with reason; it never becomes 0 B, an invented total or a completed percentage. Unknown size alone is not fabricated incompatibility: display it and apply the engine's actual validation/capacity outcome. Known-stage progress can be determinate; unknown-total transfer is indeterminate with observed transferred bytes when available. Readiness reads unconfigured, blocked, starting, ready or failed only from the relevant authoritative projection, with tested/unknown/unsupported qualification separate from readiness.
 
+## Setup state machine
+
+These are logical states for TD-29's route fixtures and TD-06's manifests, not route paths or component names. Every state is entered only from the listed trigger; an effect state is left only by an engine outcome, never by the renderer's own timer or optimistic update.
+
+| State        | Entered from (trigger)                                               | Leaves to                                                                  | Guard that must hold                                                                                                  |
+| ------------ | -------------------------------------------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `start`      | First launch, or Modules reopened                                    | `workbench` (base or skip), `selecting`                                    | No network, catalog, credential or model is needed to leave; zero optional activity on either exit.                   |
+| `workbench`  | `start` base/skip, or `recovered` with nothing pending               | `selecting` via Modules                                                    | Reads the authoritative snapshot; reports **Generation unconfigured** without blocking navigation or history.         |
+| `selecting`  | `start` choose modules, or Modules add                               | `reviewing`, `workbench`                                                   | Selections start empty; offline or stale catalog shows provenance and a refresh, never an empty successful list.      |
+| `reviewing`  | `selecting` confirms roots                                           | `selecting` (edit invalidates the plan), `workbench` (cancel), `operating` | Confirm is disabled unless the engine reports the plan current; any changed pin, closure or compatibility re-reviews. |
+| `operating`  | `reviewing` confirm, or an enable, disable, update, uninstall action | `outcome`, `recovering`                                                    | Carries the engine operation identity; Back navigates away without cancelling; Cancel targets this operation only.    |
+| `outcome`    | Engine terminal outcome for the operation                            | `workbench`, `selecting`, `recovering`                                     | Shows installed, enabled and ready as three separate facts. Success is shown only from the durable outcome.           |
+| `recovering` | Reconnect, engine restart or an uncertain outcome                    | `outcome`, `workbench`                                                     | Shows the prior valid record or an honest staged failure; offers only engine-reconciled actions; never replays.       |
+
+Install, enable, provision and delete are four separate paths through `reviewing` → `operating` → `outcome`. A combined install-and-enable request still produces two reviewed choices and two outcomes. Nothing in `start`, `selecting` or `reviewing` changes installed or effective state.
+
 ## Command and outcome input for TD-01
 
 The following are semantic operation proposals, not additional Tauri commands, accepted operation IDs or a new schema. TD-01 alone adopts the minimal allowlisted forms and shared versioned records. Reuse its event envelope and [record contract](implementation-contracts.md#record-contract), TD-15 ordering/cursors, TD-26 transitions and TD-28 installed records. Rust's fixed `handshake`, validated `send`, `cancel`, event subscription and native dialog boundary remain unchanged.
@@ -60,6 +76,19 @@ Every submitted action must carry the shared request/correlation identity, authe
 | Reconnect / restart                | Recover snapshot and durable cursor; explicit Restart only after engine exit under the native process contract                          | Reconciled current records/outcomes; cursor/version mismatch requires resync or visible incompatibility, never effect replay                |
 
 The renderer displays acceptance, start and completion separately. Rejection retains the relevant draft and inline reason. Out-of-order, duplicate, unknown-required or stale-revision events cannot update a different operation or install record. No completion badge precedes the durable outcome; a lost outcome leaves pending recovery/uncertain state. Engine readiness loss disables effect submission but preserves read-only cached views clearly marked stale. Reconnection invalidates old review/approval authority until current identities and revisions are reconciled.
+
+## Gaps in frozen contract v1 for TD-01
+
+[Shared contract v1](shared-contract-v1.md) allowlists no installation or provisioning operation, so the table above stays a proposal. Against the frozen types, TD-01 must add or decide the following before TD-27/28/29 build on it. This is a gap list, not a schema edit.
+
+1. **Operations.** A read-only review/plan request (catalog refresh, closure resolution), an accept-plan install, enable/disable, update/rollback, uninstall, model-asset provision, scoped retention delete, and one cancel addressed by operation identity. `session.cancel` is session-scoped and does not fit.
+2. **Events.** No setup or module event kind exists beyond `engine.status` and the reconnect snapshot. Accepted, started, progress (determinate or unknown-total), outcome and recovery events need kinds that carry the operation identity, with outcomes durable and progress transient.
+3. **Installation states.** The frozen set is `staging`, `installed`, `failed`, `removing`, `removed`. It has no canceled or uncertain state, so a lost commit or a cancel mid-fetch cannot be expressed honestly; the GUI would have to infer it.
+4. **Requested versus effective.** The configuration record has `pending`, `applied`, `draining` and `failed`. That covers requested versus effective for enable and disable, but not "blocked by missing prerequisite", which the Modules screen must show with its reason.
+5. **Plan identity.** The installation record has `contentDigest` and `sourceRevisionOrSnapshot` but no reviewed-plan identity or digest. Stale-plan rejection and duplicate-submit reconciliation need one.
+6. **Unknown size.** No field distinguishes an unknown byte count from zero. The proposal requires **Unknown** with a reason, so the shape must allow absence plus a reason code.
+
+The ownership split follows [the named case table](team-delivery-plan.md#named-case-ownership): TD-27 builds the planner that produces the reviewed plan, TD-28 owns installed records and recovery, TD-26 owns configuration transitions, TD-29 builds the screens, and TD-08 adapts the client state. No owner here gains authority another already holds.
 
 ## Keyboard, failure and recovery contract
 
@@ -89,7 +118,7 @@ Contract/webview fixtures can establish rendering and rejection semantics only. 
 
 ## Open decisions before adoption
 
-TD-01 must reconcile exact operations/envelope, plan freshness, duplicate-command behavior and recoverable snapshot/cursor forms with the primary TD-05 proposal and TD-02/06. TD-28 owns verified catalog/pin records and staging/recovery behavior; TD-26 owns requested/effective transitions. MdSiddiqx freezes routes, tokens, keyboard details and specimens. TD-11 owns advertised Windows/runtime/WebView cells; no byte budget or compatibility/readiness result is inferred here.
+TD-01 must reconcile exact operations/envelope, plan freshness, duplicate-command behavior and recoverable snapshot/cursor forms with this TD-05 proposal and TD-02/06. TD-28 owns verified catalog/pin records and staging/recovery behavior; TD-26 owns requested/effective transitions. MdSiddiqx freezes routes, tokens, keyboard details and specimens. TD-11 owns advertised Windows/runtime/WebView cells; no byte budget or compatibility/readiness result is inferred here.
 
 Skipped: runtime/UI implementation, shared-schema changes and Windows execution. Material risk: until those owners adopt and implement the proposal with the listed real-path checks, these interactions remain design input rather than working product behavior.
 

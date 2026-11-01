@@ -66,3 +66,28 @@ test("TD-08: per-session cursor isolation", async () => {
   await ackCursor("ses_alpha", 3);
   assert.equal(getCursor("ses_alpha"), 5);
 });
+
+test("TD-18: disposing a subscription never cancels engine work", async () => {
+  const calls = [];
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: async (cmd, args) => {
+        calls.push([cmd, args]);
+        return null;
+      },
+      transformCallback: () => 0,
+    },
+  };
+  try {
+    const dispose = await subscribe("ses_dispose", 0);
+    dispose();
+    // A subscription ends with its channel; unsubscribing must not reach the
+    // engine as a cancel (cancel always means cancel).
+    assert.deepEqual(
+      calls.map(([cmd]) => cmd),
+      ["subscribe"],
+    );
+  } finally {
+    delete globalThis.window;
+  }
+});

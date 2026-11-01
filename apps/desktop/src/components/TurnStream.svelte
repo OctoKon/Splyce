@@ -1,16 +1,18 @@
 ﻿<script lang="ts">
-  import type { EventPayloads } from "@splyce/pi/contracts";
-  import ApprovalCard from "./ApprovalCard.svelte";
-  import type { ApprovalView, ToolCallView, TurnView } from "../stores/turns";
+  import ToolCard from "./ToolCard.svelte";
+  import { projectTurnStatus } from "../status-view";
+  import type { TurnView } from "../stores/turns";
 
   type ApprovalDecision = "approve" | "deny";
-  type ApprovalRequest = EventPayloads["approval.requested"];
 
   let {
     run,
     stale = false,
     showApprovalControls = true,
-    canRespond = () => true,
+    // Fail closed: a caller that does not state who may answer must not get live
+    // approval controls. App.svelte already passes () => false because session
+    // revisions are not delivered to the renderer yet.
+    canRespond = () => false,
     onApproval,
   }: {
     run: TurnView;
@@ -25,89 +27,10 @@
     ) => void;
   } = $props();
 
-  const statusLabel: Record<TurnView["status"], string> = {
-    streaming: "Working",
-    waiting_approval: "Waiting for approval",
-    completed: "Completed",
-    failed: "Failed",
-    canceled: "Canceled",
-    stopped: "Stopped",
-  };
-
-  const toolStatusLabel: Record<ToolCallView["status"], string> = {
-    pending: "Pending - not executed",
-    success: "Success",
-    error: "Failed",
-    uncertain: "Uncertain",
-    canceled: "Canceled",
-  };
-
   let actions = $derived(
     new Map(run.actions.map((action) => [action.actionId, action])),
   );
-  let sending = $state<Record<string, ApprovalDecision>>({});
-
-  function approvalRequest(approval: ApprovalView): ApprovalRequest {
-    return {
-      approvalRequestId: approval.approvalRequestId,
-      runId: approval.runId,
-      actionId: approval.actionId,
-      capabilityId: approval.capabilityId,
-      targetScope: approval.targetScope,
-      normalizedTarget: approval.normalizedTarget,
-      riskRationale: approval.riskRationale,
-      ...(approval.timeoutMs !== undefined
-        ? { timeoutMs: approval.timeoutMs }
-        : {}),
-    };
-  }
-
-  function respond(action: ToolCallView, decision: ApprovalDecision) {
-    const approval = action.approval;
-    if (
-      !approval ||
-      approval.state !== "requested" ||
-      stale ||
-      sending[approval.approvalRequestId] ||
-      !canRespond(action.actionId)
-    ) {
-      return;
-    }
-    sending[approval.approvalRequestId] = decision;
-    onApproval(
-      approval.approvalRequestId,
-      approval.runId,
-      action.actionId,
-      decision,
-    );
-  }
-
-  function onApprovalKeydown(event: KeyboardEvent, action: ToolCallView) {
-    if (event.repeat) return;
-    if (event.key === "Escape" || event.key === "n" || event.key === "N") {
-      event.preventDefault();
-      respond(action, "deny");
-    } else if (event.key === "y" || event.key === "Y") {
-      event.preventDefault();
-      respond(action, "approve");
-    }
-  }
-
-  function approvalKeys(node: HTMLElement, action: ToolCallView) {
-    const handler = (event: KeyboardEvent) => onApprovalKeydown(event, action);
-    node.addEventListener("keydown", handler);
-    return {
-      destroy() {
-        node.removeEventListener("keydown", handler);
-      },
-    };
-  }
-
-  function focusDeny(node: HTMLElement) {
-    node
-      .querySelector<HTMLButtonElement>('[data-testid="approval-deny-button"]')
-      ?.focus();
-  }
+  let runStatus = $derived(projectTurnStatus(run.status));
 </script>
 
 <article
@@ -120,8 +43,12 @@
   aria-label="Assistant turn"
 >
   <header class="turn-head">
-    <span class="status" data-status={run.status}>
-      {statusLabel[run.status]}
+    <span
+      class="status"
+      data-status={run.status}
+      data-tone={runStatus.tone}
+    >
+      {runStatus.label}
     </span>
     {#if stale}
       <span class="stale-badge">Stale</span>
@@ -148,55 +75,13 @@
       {:else}
         {@const action = actions.get(block.actionId)}
         {#if action}
-          <article
-            class="tool"
-            data-testid="tool-card"
-            data-action-id={action.actionId}
-            data-status={action.status}
-            aria-label={`Tool ${action.capabilityId}`}
-          >
-            <div class="tool-head">
-              <code class="capability">{action.capabilityId}</code>
-              <span class="tool-status" data-status={action.status}>
-                {toolStatusLabel[action.status]}
-              </span>
-            </div>
-            <p class="target">{action.target}</p>
-            {#if action.argsSummary}
-              <p class="args">
-                <span>Requested arguments</span>
-                <code>{action.argsSummary}</code>
-              </p>
-            {/if}
-            {#if action.outcomeRef}
-              <p class="outcome">Outcome: <code>{action.outcomeRef}</code></p>
-            {/if}
-            {#if action.error}
-              <p class="tool-error">{action.error}</p>
-            {/if}
-
-            {#if action.approval?.state === "requested" && showApprovalControls}
-              {#if canRespond(action.actionId) && !stale}
-                <div
-                  class="approval"
-                  use:approvalKeys={action}
-                  use:focusDeny
-                >
-                  <ApprovalCard
-                    request={approvalRequest(action.approval)}
-                    decision={sending[action.approval.approvalRequestId] ?? null}
-                    onRespond={(decision) => respond(action, decision)}
-                  />
-                </div>
-              {:else}
-                <p class="approval-closed" role="status">
-                  {stale
-                    ? "Approval closed - this request can no longer be answered."
-                    : "Approval controls are not available in this view."}
-                </p>
-              {/if}
-            {/if}
-          </article>
+          <ToolCard
+            {action}
+            {stale}
+            {showApprovalControls}
+            {canRespond}
+            {onApproval}
+          />
         {/if}
       {/if}
     {/each}
@@ -238,8 +123,7 @@
   }
 
   .status,
-  .stale-badge,
-  .tool-status {
+  .stale-badge {
     font-size: var(--splyce-font-size-xs, 0.75rem);
     padding: var(--splyce-space-1, 0.25rem) var(--splyce-space-2, 0.5rem);
     border-radius: 999px;
@@ -247,26 +131,22 @@
     color: var(--splyce-text-secondary, #4b5563);
   }
 
-  .status[data-status="streaming"],
-  .tool-status[data-status="pending"] {
+  .status[data-status="streaming"] {
     color: var(--splyce-status-pending, #7c3aed);
     border-color: var(--splyce-status-pending, #7c3aed);
   }
 
-  .status[data-status="waiting_approval"],
-  .tool-status[data-status="uncertain"] {
+  .status[data-status="waiting_approval"] {
     color: var(--splyce-status-warning, #b45309);
     border-color: var(--splyce-status-warning, #b45309);
   }
 
-  .status[data-status="completed"],
-  .tool-status[data-status="success"] {
+  .status[data-status="completed"] {
     color: var(--splyce-status-success, #047857);
     border-color: var(--splyce-status-success, #047857);
   }
 
-  .status[data-status="failed"],
-  .tool-status[data-status="error"] {
+  .status[data-status="failed"] {
     color: var(--splyce-status-danger, #b91c1c);
     border-color: var(--splyce-status-danger, #b91c1c);
   }
@@ -314,76 +194,6 @@
   .thought p {
     margin: var(--splyce-space-2, 0.5rem) 0 0;
     white-space: pre-wrap;
-  }
-
-  .tool {
-    display: flex;
-    flex-direction: column;
-    gap: var(--splyce-space-2, 0.5rem);
-    padding: var(--splyce-space-3, 0.75rem);
-    border: 1px solid var(--splyce-border-default, #e5e7eb);
-    border-radius: var(--splyce-space-2, 0.5rem);
-    background: var(--splyce-surface-raised, #ffffff);
-  }
-
-  .tool-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--splyce-space-2, 0.5rem);
-  }
-
-  .capability,
-  .args code,
-  .outcome code {
-    font-family: var(
-      --splyce-font-family-mono,
-      "Cascadia Code",
-      Consolas,
-      monospace
-    );
-    font-size: var(--splyce-font-size-sm, 0.875rem);
-    line-height: var(--splyce-line-height-mono, 1.4);
-    overflow-wrap: anywhere;
-  }
-
-  .target,
-  .args,
-  .outcome,
-  .tool-error,
-  .approval-closed {
-    margin: 0;
-    color: var(--splyce-text-secondary, #4b5563);
-    font-size: var(--splyce-font-size-sm, 0.875rem);
-  }
-
-  .args span {
-    display: block;
-    color: var(--splyce-text-muted, #6b7280);
-    font-size: var(--splyce-font-size-xs, 0.75rem);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .tool-error {
-    color: var(--splyce-status-danger, #b91c1c);
-  }
-
-  .approval {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .approval :global(.btn-approve:focus-visible),
-  .approval :global(.btn-deny:focus-visible) {
-    outline: 2px solid var(--splyce-focus-ring, #2563eb);
-    outline-offset: var(--splyce-focus-offset, 2px);
-  }
-
-  .approval-closed {
-    padding: var(--splyce-space-2, 0.5rem) var(--splyce-space-3, 0.75rem);
-    border: 1px dashed var(--splyce-border-default, #e5e7eb);
-    border-radius: var(--splyce-space-2, 0.5rem);
   }
 
   @media (prefers-reduced-motion: reduce) {

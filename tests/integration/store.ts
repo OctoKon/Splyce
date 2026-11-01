@@ -479,7 +479,7 @@ test("a stamped v1 store with missing tables fails closed, never healed", () => 
   );
   raw
     .prepare(
-      "INSERT INTO store_meta (key, value) VALUES ('layout_version', '1')",
+      "INSERT INTO store_meta (key, value) VALUES ('layout_version', '2')",
     )
     .run();
   raw.close();
@@ -799,5 +799,379 @@ test("first-swap rename failure preserves live bytes and keeps the handle usable
   const verify = Store.open(path);
   assert.equal(verify.cursor(), 3);
   verify.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("v1 stores refuse to open until explicit migrateV1; migration preserves bytes", () => {
+  const dir = freshDir();
+  const path = join(dir, "store.db");
+  // Build a genuine v1 store: old records columns, stamped layout 1, with a
+  // committed record written before session attribution existed.
+  const raw = new DatabaseSync(path);
+  raw.exec(
+    "CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+  );
+  raw.exec(
+    "CREATE TABLE records (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, " +
+      "record_id TEXT NOT NULL UNIQUE, schema_version INTEGER NOT NULL, scope_id TEXT NOT NULL, " +
+      "created_at TEXT NOT NULL, payload TEXT NOT NULL)",
+  );
+  raw.exec(
+    "CREATE TABLE deletions (record_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, deleted_at TEXT NOT NULL)",
+  );
+  raw.exec(
+    "CREATE TABLE workspace_ownership (workspace_id TEXT PRIMARY KEY, owner_session_id TEXT NOT NULL, " +
+      "epoch INTEGER NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL)",
+  );
+  raw.prepare("INSERT INTO store_meta VALUES ('layout_version', '1')").run();
+  raw.close();
+
+  // open() refuses a v1 store � explicit migration only, never silent.
+  assert.throws(
+    () => Store.open(path),
+    (error: unknown) =>
+      error instanceof StoreError &&
+      error.code === "STORE_LAYOUT" &&
+      error.message.includes("migrateV1"),
+  );
+
+  // migrateV1 adds session attribution and stamps 2 without touching rows.
+  Store.migrateV1(path);
+  const migrated = Store.open(path);
+  assert.equal(migrated.cursor(), 0);
+  migrated.close();
+
+  // After migration, appends attribute sessions and replay stays scoped.
+  const store = Store.open(path);
+  const a = record("run");
+  const callerS1 = { ...caller, sessionId: "s1" };
+  store.append({ kind: "run", record: a }, callerS1);
+  assert.equal(store.cursor(), 1);
+  const scoped = store.list("w-demo", 0, "s1");
+  assert.equal(scoped.records.length, 1);
+  store.close();
+
+  // migrateV1 refuses to run twice (store is now v2).
+  assert.throws(
+    () => Store.migrateV1(path),
+    (error: unknown) => error instanceof StoreError,
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("populated v1 migration requires explicit attribution and preserves replay", () => {
+  const dir = freshDir();
+  const path = join(dir, "store.db");
+  // Build a populated v1 store: a committed run record written before
+  // session attribution existed.
+  const raw = new DatabaseSync(path);
+  raw.exec(
+    "CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+  );
+  raw.exec(
+    "CREATE TABLE records (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, " +
+      "record_id TEXT NOT NULL UNIQUE, schema_version INTEGER NOT NULL, scope_id TEXT NOT NULL, " +
+      "created_at TEXT NOT NULL, payload TEXT NOT NULL)",
+  );
+  raw.exec(
+    "CREATE TABLE deletions (record_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, deleted_at TEXT NOT NULL)",
+  );
+  raw.exec(
+    "CREATE TABLE workspace_ownership (workspace_id TEXT PRIMARY KEY, owner_session_id TEXT NOT NULL, " +
+      "epoch INTEGER NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL)",
+  );
+  raw.prepare("INSERT INTO store_meta VALUES ('layout_version', '1')").run();
+  const legacy = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/contracts/records.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, Record<string, unknown>>;
+  raw
+    .prepare(
+      "INSERT INTO records (kind, record_id, schema_version, scope_id, created_at, payload) VALUES ('run', ?, 1, 'w-demo', '2026-10-26T00:00:00.000Z', ?)",
+    )
+    .run(
+      "rec-legacy",
+      JSON.stringify({
+        ...legacy.run,
+        recordId: "rec-legacy",
+        scopeId: "w-demo",
+      }),
+    );
+  raw.close();
+
+  // Populated v1 + no attribution: refused, never a silent session-less row.
+  assert.throws(
+    () => Store.migrateV1(path),
+    (error: unknown) =>
+      error instanceof StoreError && error.message.includes("attribution"),
+  );
+
+  // Explicit attribution: the old session's records stay replayable.
+  Store.migrateV1(path, { sessionId: "s-legacy" });
+  const migrated = Store.open(path);
+  const scoped = migrated.list("w-demo", 0, "s-legacy");
+  assert.equal(scoped.records.length, 1);
+  assert.equal(
+    (scoped.records[0]?.record as { recordId: string }).recordId,
+    "rec-legacy",
+  );
+  // Another session still sees nothing of it.
+  assert.equal(migrated.list("w-demo", 0, "s-new").records.length, 0);
+  migrated.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("appendBatch idempotency precondition is atomic: second committer sees the row", () => {
+  const dir = freshDir();
+  const path = join(dir, "store.db");
+  const store = Store.open(path);
+  const fixtures = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/contracts/records.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, Record<string, unknown>>;
+
+  // First commit with the absent-key precondition succeeds.
+  const first = {
+    ...structuredClone(fixtures.action),
+    recordId: "rec-a1",
+    idempotencyKey: "idem-1",
+  } as Record<string, unknown>;
+  const r1 = store.appendBatch([{ kind: "action", record: first }], caller, {
+    scopeId: "w-demo",
+    idempotencyKey: "idem-1",
+    actionId: "a-new-1",
+  });
+  assert.equal(r1.seqs.length, 1);
+  const cursorAfterFirst = store.cursor();
+
+  // A second committer that observed the key absent BEFORE the first commit
+  // loses the race atomically: the check runs under the same BEGIN IMMEDIATE
+  // as the inserts, so it sees the committed row and appends nothing.
+  const second = {
+    ...structuredClone(fixtures.action),
+    recordId: "rec-a2",
+    actionId: "a2",
+    idempotencyKey: "idem-1",
+  } as Record<string, unknown>;
+  assert.throws(
+    () =>
+      store.appendBatch([{ kind: "action", record: second }], caller, {
+        scopeId: "w-demo",
+        idempotencyKey: "idem-1",
+        actionId: "a2",
+      }),
+    (error: unknown) =>
+      error instanceof StoreError && error.code === "ACTION_ALREADY_EXISTS",
+  );
+  assert.equal(store.cursor(), cursorAfterFirst); // nothing appended
+
+  // A different key commits normally under the same precondition.
+  const third = {
+    ...structuredClone(fixtures.action),
+    recordId: "rec-a3",
+    actionId: "a3",
+    idempotencyKey: "idem-2",
+  } as Record<string, unknown>;
+  const r3 = store.appendBatch([{ kind: "action", record: third }], caller, {
+    scopeId: "w-demo",
+    idempotencyKey: "idem-2",
+    actionId: "a-new-2",
+  });
+  assert.equal(r3.seqs.length, 1);
+  store.close();
+
+  // Cross-connection contention: a second store handle on the same file also
+  // loses the race against the committed row.
+  const store2 = Store.open(path, { busyTimeoutMs: 2000 });
+  const fourth = {
+    ...structuredClone(fixtures.action),
+    recordId: "rec-a4",
+    actionId: "a4",
+    idempotencyKey: "idem-1",
+  } as Record<string, unknown>;
+  assert.throws(
+    () =>
+      store2.appendBatch([{ kind: "action", record: fourth }], caller, {
+        scopeId: "w-demo",
+        idempotencyKey: "idem-1",
+        actionId: "a4",
+      }),
+    (error: unknown) =>
+      error instanceof StoreError && error.code === "ACTION_ALREADY_EXISTS",
+  );
+  store2.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("appendBatch can require a same-commit ownership epoch", () => {
+  const dir = freshDir();
+  const path = join(dir, "store.db");
+  const store = Store.open(path);
+  const ws = "C:\\ws\\idem";
+  const acquired = store.acquireWorkspace(ws, "session-a"); // epoch 1
+  const fixtures = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/contracts/records.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, Record<string, unknown>>;
+
+  // Matching epoch: decision+intent append and ownership check in one txn.
+  const record = {
+    ...structuredClone(fixtures.action),
+    recordId: "rec-owned",
+  } as Record<string, unknown>;
+  const ok = store.appendBatch(
+    [{ kind: "action", record }],
+    caller,
+    undefined,
+    { workspaceId: ws, epoch: acquired.epoch },
+  );
+  assert.equal(ok.seqs.length, 1);
+
+  // Stale epoch (owner released, fence advanced): refused, nothing appended.
+  store.releaseWorkspace(ws, "session-a", acquired.epoch);
+  const cursorBefore = store.cursor();
+  assert.throws(
+    () =>
+      store.appendBatch(
+        [{ kind: "action", record: { ...record, recordId: "rec-owned2" } }],
+        caller,
+        undefined,
+        { workspaceId: ws, epoch: acquired.epoch },
+      ),
+    (error: unknown) =>
+      error instanceof StoreError && error.code === "OWNERSHIP_STALE_EPOCH",
+  );
+  assert.equal(store.cursor(), cursorBefore);
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("appendBatch precondition rejects an existing actionId with a new key", () => {
+  const dir = freshDir();
+  const path = join(dir, "store.db");
+  const store = Store.open(path);
+  const fixtures = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/contracts/records.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, Record<string, unknown>>;
+  const first = {
+    ...structuredClone(fixtures.action),
+    recordId: "rec-pa1",
+  } as Record<string, unknown>; // actionId a1, idempotencyKey key1 (fixture)
+  store.appendBatch([{ kind: "action", record: first }], caller, {
+    scopeId: "w-demo",
+    idempotencyKey: "key1",
+    actionId: "a1",
+  });
+  const cursor = store.cursor();
+
+  // A second host permit ID: new actionId check target but SAME logical
+  // action attempted under a NEW key with the OLD actionId -> refused.
+  const second = {
+    ...structuredClone(fixtures.action),
+    recordId: "rec-pa2",
+    idempotencyKey: "brand-new-key",
+  } as Record<string, unknown>;
+  assert.throws(
+    () =>
+      store.appendBatch([{ kind: "action", record: second }], caller, {
+        scopeId: "w-demo",
+        idempotencyKey: "brand-new-key",
+        actionId: "a1", // existing logical action, new key
+      }),
+    (error: unknown) =>
+      error instanceof StoreError && error.code === "ACTION_ALREADY_EXISTS",
+  );
+  assert.equal(store.cursor(), cursor); // nothing appended
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("migrateV1 decides attribution inside its write transaction (no check-then-act race)", async () => {
+  const dir = freshDir();
+  const path = join(dir, "store.db");
+  const raw = new DatabaseSync(path);
+  raw.exec(
+    "CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+  );
+  raw.exec(
+    "CREATE TABLE records (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, " +
+      "record_id TEXT NOT NULL UNIQUE, schema_version INTEGER NOT NULL, scope_id TEXT NOT NULL, " +
+      "created_at TEXT NOT NULL, payload TEXT NOT NULL)",
+  );
+  raw.exec(
+    "CREATE TABLE deletions (record_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, deleted_at TEXT NOT NULL)",
+  );
+  raw.exec(
+    "CREATE TABLE workspace_ownership (workspace_id TEXT PRIMARY KEY, owner_session_id TEXT NOT NULL, " +
+      "epoch INTEGER NOT NULL, acquired_at TEXT NOT NULL, renewed_at TEXT NOT NULL)",
+  );
+  raw.prepare("INSERT INTO store_meta VALUES ('layout_version', '1')").run();
+  raw.close();
+
+  // A concurrent v1 writer holds the write lock with an uncommitted row and
+  // commits shortly after migrateV1 starts. The empty-looking store must not
+  // be migrated without attribution once that row is committed.
+  const signal = join(dir, "locked");
+  const writer = spawn(
+    process.execPath,
+    [
+      "-e",
+      `const { DatabaseSync } = require("node:sqlite");
+       const fs = require("node:fs");
+       const db = new DatabaseSync(process.argv[1], { timeout: 10000 });
+       db.exec("BEGIN IMMEDIATE;");
+       db.prepare("INSERT INTO records (kind, record_id, schema_version, scope_id, created_at, payload) VALUES ('run', 'rec-race', 1, 'w-demo', '2026-10-26T00:00:00.000Z', '{}')").run();
+       fs.writeFileSync(process.argv[2], "1");
+       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+       db.exec("COMMIT;");
+       db.close();`,
+      path,
+      signal,
+    ],
+    { stdio: "ignore" },
+  );
+  const exited = new Promise<number | null>((resolve) =>
+    writer.once("exit", resolve),
+  );
+  let writerExit: number | null | undefined;
+  void exited.then((code) => (writerExit = code));
+  // Bounded wait: a writer that crashes or never locks fails the test
+  // instead of hanging it.
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(signal)) {
+    assert.equal(writerExit, undefined, "writer exited before taking the lock");
+    assert.ok(Date.now() < deadline, "writer never took the lock");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  let migrateError: unknown;
+  try {
+    Store.migrateV1(path);
+  } catch (error) {
+    migrateError = error;
+  }
+  // Check the writer first: if its commit failed, the store really was empty
+  // and a clean migration would be correct, so the harness is what broke.
+  assert.equal(await exited, 0, "writer must commit cleanly");
+  assert.ok(
+    migrateError instanceof StoreError &&
+      migrateError.message.includes("attribution"),
+    `expected an attribution refusal, got ${String(migrateError)}`,
+  );
+  const check = new DatabaseSync(path);
+  const layout = check
+    .prepare("SELECT value FROM store_meta WHERE key = 'layout_version'")
+    .get() as { value: string };
+  assert.equal(layout.value, "1");
+  check.close();
   rmSync(dir, { recursive: true, force: true });
 });

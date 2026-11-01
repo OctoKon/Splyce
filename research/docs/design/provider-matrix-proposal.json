@@ -1,8 +1,8 @@
 {
-  "status": "supporting draft; TD-04 supporting input reconciled by TD-01; adapter qualification pending",
+  "status": "TD-04 protocol proposal verified and adopted by primary owner; runtime adapter qualification pending",
   "task": "TD-04",
   "primaryOwner": "dnarsh",
-  "taskComplete": false,
+  "taskComplete": true,
   "schemaFrozen": false,
   "runtimeSamples": 0,
   "observedAt": "2026-10-26",
@@ -15,7 +15,8 @@
     "apiContract": "research/docs/capabilities/provider-api-conformance.md",
     "profileContract": "research/docs/design/providers-profiles-and-sessions.md",
     "nativeBoundaryContract": "research/docs/design/core-fusion.md",
-    "verification": "KnownApi, KnownClassifierApi, KnownImageApi and codemode model docs read via GitHub contents API at the pin; chat wire observations reused from the existing API contract. No fetched code executed."
+    "verification": "All 15 adapters, their shared request/result parsers, the API enums/types and codemode model documentation independently inspected at the stated pin; 21 source blob SHAs verified. Public source findings and Splyce-required behavior are kept distinct. No upstream code executed.",
+    "verificationLedger": "research/docs/evidence/td04-provider-source-verification.json"
   },
   "adoption": {
     "consumer": "TD-01 tests/fixtures/contracts/",
@@ -27,6 +28,12 @@
       "Commit correlated decision/request intent before credential helper spawn or network effect; helper execution has its own effect lifecycle",
       "Send only admitted request; persist observed outcome, usage and cancellation state with original attempt identity",
       "Fence late results against current revisions before publishing or persisting"
+    ],
+    "upstreamGaps": [
+      "Upstream Codex transport auto fallback/reconnect is observed behavior, not permission for Splyce silent transport fallback; freeze and enforce transport identity at each attempt.",
+      "Upstream chat usage structures start with zero counters, while classifier/image usage is optional. Preserve reporting provenance; an initialized zero is not a confirmed zero charge.",
+      "The image adapter can return stop with empty output. Validate selected-operation result shape and output requirements before exposing success.",
+      "Provider callbacks and a custom fetch cannot alone establish full native mediation, especially WebSocket, AWS SDK, credential helpers and alternate/nested codemode routes."
     ]
   },
   "cellIdentity": [
@@ -80,7 +87,19 @@
       "egress": "admission",
       "wire": "OpenAI SDK chat.completions.create; streamed choice/tool deltas; Chat Completions, not legacy text /completions",
       "requiredCase": "API_chat_tool_roundtrip",
-      "negativeFixture": "Interleave two tool-index argument fragments; incomplete or mismatched arguments never dispatch a tool."
+      "negativeFixture": "Interleave two tool-index argument fragments; incomplete or mismatched arguments never dispatch a tool.",
+      "sourceVerification": {
+        "evidenceId": "TD04-01",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-completions.ts#L383",
+        "sourceBlobSha1": "0e5b606e6995bfaf3c01e8e62fede0beb4995533",
+        "requestShape": "SDK Chat Completions request: model, converted messages and optional tools; stream=true with compatibility-specific token, reasoning and usage options. It is not the legacy text completions operation.",
+        "resultShape": "Choice deltas reconstruct text and tool calls by index/ID; finish_reason determines stop/length/toolUse/error, and missing terminal finish_reason is an error.",
+        "usage": "Prompt/completion and cache/reasoning fields are normalized from reported chunks; initialized zero counters and catalog cost do not establish measured billing or complete usage.",
+        "cancellationAndErrors": "AbortSignal reaches the SDK and retry path; aborted or interrupted streams remain non-successful. No inference that remote processing or charging stopped.",
+        "sharedSources": [],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "mistral-conversations",
@@ -90,7 +109,19 @@
       "egress": "admission",
       "wire": "Pinned implementation POSTs v1/chat/completions and parses SSE choices; enum label does not establish Conversations wire support",
       "requiredCase": "API_mistral_actual_wire",
-      "negativeFixture": "A Conversations-shaped response instead of expected choice/terminal events fails explicitly; no alternate transport."
+      "negativeFixture": "A Conversations-shaped response instead of expected choice/terminal events fails explicitly; no alternate transport.",
+      "sourceVerification": {
+        "evidenceId": "TD04-02",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/mistral-conversations.ts#L298",
+        "sourceBlobSha1": "69e3f1dd1a0a74646ed4a291322a10b639548ced",
+        "requestShape": "The adapter label is mistral-conversations, but this revision posts a streaming Chat Completions payload to v1/chat/completions relative to the endpoint root.",
+        "resultShape": "SSE choice deltas carry content/tool fragments, usage and finish reasons; this source does not establish a Mistral Conversations wire implementation.",
+        "usage": "Prompt/completion and cached prompt fields feed normalized counters; preserve actual reporting and do not treat unavailable usage or catalog prices as measured cost.",
+        "cancellationAndErrors": "Combined caller/header-timeout signals reach the request and stream reader; interruption or missing terminal state is an error, not a successful completed response.",
+        "sharedSources": [],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "openai-responses",
@@ -100,7 +131,21 @@
       "egress": "admission",
       "wire": "Responses SDK path; typed SSE item/text/argument/terminal events; WebSocket capability is not inherited from Codex",
       "requiredCase": "API_responses_sse_terminal",
-      "negativeFixture": "EOF after text without a completed terminal, or failed/incomplete terminal, cannot persist a completed result."
+      "negativeFixture": "EOF after text without a completed terminal, or failed/incomplete terminal, cannot persist a completed result.",
+      "sourceVerification": {
+        "evidenceId": "TD04-03",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-responses.ts#L221",
+        "sourceBlobSha1": "c29e6adfb5c85b387592f59d90ef243a4b4356de",
+        "requestShape": "OpenAI SDK Responses request with model, converted input items, tool definitions and selected reasoning/configuration; stream=true. Custom fetch covers HTTP, not arbitrary WebSocket routes.",
+        "resultShape": "Shared Responses parsing tracks item/call IDs, text/argument deltas and terminal completed/incomplete/failed/error states; opaque reasoning signatures stay provider-specific.",
+        "usage": "Terminal response usage separates cached/cache-write input, output and reasoning; catalog/service-tier pricing is an estimate distinct from observed billing.",
+        "cancellationAndErrors": "Caller signal reaches SDK/retries and is checked before success; pending EOF becomes an error. This adapter does not inherit Codex WebSocket support.",
+        "sharedSources": [
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-responses-shared.ts#L1"
+        ],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "azure-openai-responses",
@@ -110,7 +155,21 @@
       "egress": "admission",
       "wire": "Distinct Azure Responses endpoint/version configuration; deployment identity is not a public model ID",
       "requiredCase": "API_azure_deployment",
-      "negativeFixture": "Wrong resource/deployment/version or credential identity rejects without substituting public OpenAI."
+      "negativeFixture": "Wrong resource/deployment/version or credential identity rejects without substituting public OpenAI.",
+      "sourceVerification": {
+        "evidenceId": "TD04-04",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/azure-openai-responses.ts#L92",
+        "sourceBlobSha1": "24e73fd0562fa8321f432415487ceb2417caaafa",
+        "requestShape": "AzureOpenAI Responses client resolves Azure base URL/API version and deployment name; deployment name becomes request model. This pin explicitly requires options.apiKey.",
+        "resultShape": "Responses stream uses the shared item/terminal parser; Azure deployment/resource identity remains separate from a public OpenAI model name.",
+        "usage": "Shared terminal Responses usage/cost normalization applies; absent observations and Azure billing are not inferred from compatibility.",
+        "cancellationAndErrors": "AbortSignal passes to the SDK and retry path. Wrong deployment/version/auth, aborted calls and incomplete terminal results need separate qualification.",
+        "sharedSources": [
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-responses-shared.ts#L1"
+        ],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "openai-codex-responses",
@@ -120,7 +179,21 @@
       "egress": "admission; every selected SSE/WebSocket route and transition separately admitted",
       "wire": "Account-specific Codex Responses with auto/SSE/WebSocket paths; not ordinary API-key Responses",
       "requiredCase": "API_responses_ws_reconnect",
-      "negativeFixture": "Continuation references unavailable state after reconnect; fail or explicitly re-admit safe history replay without duplicating completed local effects."
+      "negativeFixture": "Continuation references unavailable state after reconnect; fail or explicitly re-admit safe history replay without duplicating completed local effects.",
+      "sourceVerification": {
+        "evidenceId": "TD04-05",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-codex-responses.ts#L309",
+        "sourceBlobSha1": "5165e1ccfff26d983015a8608d110d253164c703",
+        "requestShape": "Account-oriented Codex backend Responses payload; transport may be auto, sse or websocket, with session/continuation and account-specific headers. It is not ordinary API-key Responses.",
+        "resultShape": "WebSocket and SSE paths produce Responses-derived events; continuation recovery and automatic transport fallback exist upstream and must be constrained by Splyce explicit transport admission.",
+        "usage": "Responses-derived token/cache/reasoning accounting plus service-tier pricing; account usage-limit diagnostics are not proof of remote billing.",
+        "cancellationAndErrors": "Signals participate in HTTP, retries and WebSocket processing. Every reconnect, reconstruction or fallback needs current authority and no duplicate effects; a custom HTTP fetch does not mediate WebSocket.",
+        "sharedSources": [
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-responses-shared.ts#L1"
+        ],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "anthropic-messages",
@@ -130,7 +203,19 @@
       "egress": "admission",
       "wire": "Messages SSE indexed content blocks, input_json_delta, message changes and terminal stop",
       "requiredCase": "API_messages_blocks_usage",
-      "negativeFixture": "Repeated cumulative usage is not added twice; partial JSON and terminal provider error cannot become a completed tool call."
+      "negativeFixture": "Repeated cumulative usage is not added twice; partial JSON and terminal provider error cannot become a completed tool call.",
+      "sourceVerification": {
+        "evidenceId": "TD04-06",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/anthropic-messages.ts#L660",
+        "sourceBlobSha1": "53764b406914591dad121a4a83d4a02e30f32dd4",
+        "requestShape": "Beta Messages SDK request with system/context, converted messages, tool definitions and selected thinking/cache options; response is consumed as a Messages stream.",
+        "resultShape": "Indexed content-block start/delta/stop events preserve text, thinking signatures and partial JSON tool input; message stop reasons/errors remain distinct.",
+        "usage": "message_start initializes reported input/cache counters; message_delta replaces only present cumulative fields, rather than adding every update. Preserve model-specific catalog cost separately.",
+        "cancellationAndErrors": "SDK signal and stream abort checks map local cancellation to aborted; beta/server-side behavior, credentials and model-specific features require independent selected-cell admission.",
+        "sharedSources": [],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "bedrock-converse-stream",
@@ -140,7 +225,19 @@
       "egress": "admission; bind region/profile/model streaming support",
       "wire": "AWS ConverseStreamCommand event stream, not generic SSE",
       "requiredCase": "API_bedrock_event_stream",
-      "negativeFixture": "Wrong region/profile, non-streaming model or streaming exception cannot become generic SSE success."
+      "negativeFixture": "Wrong region/profile, non-streaming model or streaming exception cannot become generic SSE success.",
+      "sourceVerification": {
+        "evidenceId": "TD04-07",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/bedrock-converse-stream.ts#L292",
+        "sourceBlobSha1": "7a7740f06e75e44e5d34c5587c377b0a3ef05801",
+        "requestShape": "AWS ConverseStreamCommand receives modelId, system/messages, tool and inference configuration; client.send uses abortSignal. AWS event-stream framing is not generic SSE.",
+        "resultShape": "Content-block/tool-use deltas, messageStop and metadata drive normalized assistant events; AWS region/profile/model identity and streaming exceptions remain explicit.",
+        "usage": "Metadata reports input/output/cache counts; source computes normalized totals/catalog cost. Missing provider metadata and measured account charges remain unqualified.",
+        "cancellationAndErrors": "AWS abortSignal is forwarded and checked before success. Ambient credentials, signed headers and SDK transport are separate authority surfaces, not a single fetch hook.",
+        "sharedSources": [],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "google-generative-ai",
@@ -150,7 +247,21 @@
       "egress": "admission at actual SDK boundary; pinned adapter rejects custom non-global fetch",
       "wire": "generateContentStream parts/functions and applicable thought signatures; not inferred Interactions support",
       "requiredCase": "API_gemini_signature_history",
-      "negativeFixture": "Blocked/empty candidate or invalid function/signature history fails; lack of a universal fetch hook never authorizes unmediated send."
+      "negativeFixture": "Blocked/empty candidate or invalid function/signature history fails; lack of a universal fetch hook never authorizes unmediated send.",
+      "sourceVerification": {
+        "evidenceId": "TD04-08",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/google-generative-ai.ts#L100",
+        "sourceBlobSha1": "213eff5e8ddaf75f6e565235440f40b6c52a2ca9",
+        "requestShape": "Google GenAI generateContentStream takes model, converted contents and config with tools/thinking settings; this is generateContent, not an inferred Interactions API.",
+        "resultShape": "Candidate parts map text, functions and applicable thought signatures into assistant events; finishReason determines terminal state and function-call completion.",
+        "usage": "usageMetadata separates prompt/cache, candidate and thought counters; subsequent snapshots replace normalized totals. Source accounting does not certify measured billing.",
+        "cancellationAndErrors": "config.abortSignal receives the caller signal; retries and post-stream checks preserve abort/error state. History/signatures must remain compatible with the selected provider.",
+        "sharedSources": [
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/google-shared.ts#L1"
+        ],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "google-vertex",
@@ -160,7 +271,21 @@
       "egress": "admission at actual SDK boundary including auth refresh; bind project/location; custom non-global fetch rejected at pin",
       "wire": "Vertex generateContentStream; Vertex key or ambient identity with project/location; distinct from Gemini Developer API",
       "requiredCase": "API_vertex_identity",
-      "negativeFixture": "Wrong project/location or function-response order fails; no alternate project/provider or signature fabrication."
+      "negativeFixture": "Wrong project/location or function-response order fails; no alternate project/provider or signature fabrication.",
+      "sourceVerification": {
+        "evidenceId": "TD04-09",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/google-vertex.ts#L116",
+        "sourceBlobSha1": "07f78afe8079470df79e1d37cb16f30446998365",
+        "requestShape": "Vertex-mode Google GenAI generateContentStream uses an explicit Vertex API key or ADC plus project/location; endpoint/project identity differs from Gemini Developer API.",
+        "resultShape": "Candidate parts/functions/thought signatures and finish reasons follow the shared Google conversion surface; no generic cross-provider signature compatibility is implied.",
+        "usage": "Vertex usageMetadata normalizes prompt/cache/output/thought fields, without establishing actual account billing or unreported token counts.",
+        "cancellationAndErrors": "config.abortSignal, retry and post-stream checks handle caller cancellation; ADC/project/location routing must be admitted before provider effects.",
+        "sharedSources": [
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/google-shared.ts#L1"
+        ],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "pi-messages",
@@ -170,7 +295,19 @@
       "egress": "admission; full serialized context/options are part of permitted data inventory",
       "wire": "POST /messages; serialized assistant-event SSE with done/error terminal; explicit gateway endpoint, not an implicit state service",
       "requiredCase": "API_pi_native_events",
-      "negativeFixture": "Out-of-order or missing terminal assistant event fails visibly without fallback or unapproved persistence."
+      "negativeFixture": "Out-of-order or missing terminal assistant event fails visibly without fallback or unapproved persistence.",
+      "sourceVerification": {
+        "evidenceId": "TD04-10",
+        "entrypoint": "stream / streamSimple",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/pi-messages.ts#L379",
+        "sourceBlobSha1": "59b54567e7556ae906559a5d10df88dadd81085a",
+        "requestShape": "Explicit gateway POST to baseUrl/messages serializes model, transcript context and allowed request options; a gateway is an egress hop requiring its own identity and policy.",
+        "resultShape": "SSE carries serialized Pi assistant events and terminal done/error with response identity; a disconnect or missing terminal message cannot become success.",
+        "usage": "Terminal serialized assistant usage is gateway-reported; preserve attribution and do not infer the backing provider or remote charge from gateway counters.",
+        "cancellationAndErrors": "Request/reader caller signals abort local delivery. This protocol is not implicit durable state storage and does not itself prove that the remote model stopped.",
+        "sharedSources": [],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     }
   ],
   "codemodeApis": [
@@ -181,7 +318,22 @@
       "operation": "classify",
       "role": "typed_decision",
       "baseDisposition": "denied",
-      "egressRequirement": "No models.classify dispatch in base. Optional enablement needs independent role/data/endpoint and operation qualification, including state/questions and any supported images."
+      "egressRequirement": "No models.classify dispatch in base. Optional enablement needs independent role/data/endpoint and operation qualification, including state/questions and any supported images.",
+      "sourceVerification": {
+        "evidenceId": "TD04-11",
+        "entrypoint": "classify -> classifySystemOne",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/typesafe-system-one.ts#L15",
+        "sourceBlobSha1": "e9fa13c28fdd8047c26dfe1b459457586ea38ff2",
+        "requestShape": "POST baseUrl/systemone with model plus state/questions; public bool questions map to wire noul. Image compatibility selects assets or state image URLs, with the TypeSafe image opt-in header when needed.",
+        "resultShape": "Shared parsing maps choice/score/noul answers to typed choice/score/bool results; API mismatch, missing answers and unsupported images return an error result.",
+        "usage": "Shared helper records optional reported usage before parsing answers; a billed malformed answer can retain usage. Catalog cost is not measured billing.",
+        "cancellationAndErrors": "Shared POST retries/timeouts combine caller signal; failures resolve ClassifierResult.stopReason error or aborted rather than throwing to codemode. Base remains denied.",
+        "sharedSources": [
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/system-one-shared.ts#L1",
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/classifier-shared.ts#L1"
+        ],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "cloudflare-workers-ai-system-one",
@@ -190,7 +342,22 @@
       "operation": "classify",
       "role": "typed_decision",
       "baseDisposition": "denied",
-      "egressRequirement": "No models.classify dispatch in base. Optional enablement independently qualifies actual hosted/binding route and role/data/account identity; a worker binding is not proof of local execution."
+      "egressRequirement": "No models.classify dispatch in base. Optional enablement independently qualifies actual hosted/binding route and role/data/account identity; a worker binding is not proof of local execution.",
+      "sourceVerification": {
+        "evidenceId": "TD04-12",
+        "entrypoint": "classify -> classifySystemOne",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/cloudflare-workers-ai-system-one.ts#L31",
+        "sourceBlobSha1": "ec1aefc4a3752c896ec78dd8bc8ae89f5fffb1cd",
+        "requestShape": "REST POST to configured Workers AI base/run with model and input containing System One state/questions. Image compatibility differs between Clef images and TypeSafe assets.",
+        "resultShape": "Unwrap success/result or a Completed nested run record before shared typed-answer parsing; unsuccessful/non-Completed or malformed responses are errors.",
+        "usage": "Optional nested usage is parsed before answers and priced from catalog metadata; cloud/account locality and billing are not inferred from the Workers label.",
+        "cancellationAndErrors": "Shared caller signal/timeouts/retries apply to REST; errors/abort return a non-successful ClassifierResult. A separately supplied Worker binding needs its own route qualification.",
+        "sharedSources": [
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/system-one-shared.ts#L1",
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/classifier-shared.ts#L1"
+        ],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "llama-cpp-classify",
@@ -199,7 +366,19 @@
       "operation": "classify",
       "role": "typed_decision",
       "baseDisposition": "denied",
-      "egressRequirement": "No models.classify dispatch in base. Optional enablement verifies selected runtime/route locality and operation; local-looking API name never supplies a grant."
+      "egressRequirement": "No models.classify dispatch in base. Optional enablement verifies selected runtime/route locality and operation; local-looking API name never supplies a grant.",
+      "sourceVerification": {
+        "evidenceId": "TD04-13",
+        "entrypoint": "classify / classifyQuestion",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/llama-cpp-classify.ts#L427",
+        "sourceBlobSha1": "817caea39cb23b329afb7d37fc5a519a4a9f36ad",
+        "requestShape": "Text-only state/questions become prompts with single-token labels; native llama-server tokenize, apply-template and completion requests use model identity and a one-token probability readout, not Chat Completions classification.",
+        "resultShape": "Per-question log probabilities become typed choice/score/bool answers; absent label probability, invalid temperature/questions or image input returns error. All questions are validated before requests.",
+        "usage": "This implementation does not attach usage to the ClassifierResult; leave it unknown rather than synthesizing zero tokens or zero cost.",
+        "cancellationAndErrors": "Caller and timeout signals cover native endpoint requests/retries; abort/error clears answers. Native/local-looking URLs do not supply locality proof or a base grant.",
+        "sharedSources": [],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "openai-decisions",
@@ -208,7 +387,21 @@
       "operation": "classify",
       "role": "typed_decision",
       "baseDisposition": "denied",
-      "egressRequirement": "No models.classify dispatch in base. Optional enablement independently admits classifier state/questions and supported images; chat credentials or generation permission are insufficient."
+      "egressRequirement": "No models.classify dispatch in base. Optional enablement independently admits classifier state/questions and supported images; chat credentials or generation permission are insufficient.",
+      "sourceVerification": {
+        "evidenceId": "TD04-14",
+        "entrypoint": "classify / wireQuestion / parseAnswers",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openai-decisions.ts#L161",
+        "sourceBlobSha1": "5912781d639d54b97b59dd08162f809beb378135",
+        "requestShape": "POST baseUrl/decisions with model, input and named questions; choice criteria become choices, score criteria become levels, bool becomes predicate with instructions. Optional image input is bounded.",
+        "resultShape": "Named answer array maps choice/score/predicate back to typed answers; refusal, missing names or malformed values produce a non-successful result.",
+        "usage": "Optional reported input/output usage is saved before answer parsing, preserving usage for malformed/refused results; catalog pricing is separate.",
+        "cancellationAndErrors": "Shared POST signal/retries apply with adapter-specific non-retry statuses; aborted/error results contain no successful answers. This is not inferred chat-generation permission.",
+        "sharedSources": [
+          "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/classifier-shared.ts#L1"
+        ],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     },
     {
       "apiId": "openrouter-images",
@@ -217,7 +410,19 @@
       "operation": "generateImages",
       "role": "image_generation_or_edit",
       "baseDisposition": "denied",
-      "egressRequirement": "No models.generateImages dispatch in base. Optional enablement independently admits prompt/reference images, actual route, output/temp-file retention and model modality; generation permission is insufficient."
+      "egressRequirement": "No models.generateImages dispatch in base. Optional enablement independently admits prompt/reference images, actual route, output/temp-file retention and model modality; generation permission is insufficient.",
+      "sourceVerification": {
+        "evidenceId": "TD04-15",
+        "entrypoint": "generateImages / buildParams",
+        "source": "https://github.com/earendil-works/pi/blob/d5b3de22d0e24a3e9c38a9410d3329b099717283/packages/ai/src/api/openrouter-images.ts#L43",
+        "sourceBlobSha1": "6054c7238ad310e3a938ddd90259ad897c52c014",
+        "requestShape": "Non-streaming OpenAI SDK Chat Completions request with model and text/image message content plus requested modalities; explicit API key and selected model are required.",
+        "resultShape": "First choice text plus recognized base64 data-URL images become output blocks; remote image URLs are ignored at this source revision. Empty output still needs separate Splyce success validation.",
+        "usage": "Optional chat-completion usage and catalog-priced cost populate AssistantImages; absence stays optional/unknown and does not prove no charge.",
+        "cancellationAndErrors": "SDK caller signal and retry path apply; exceptions resolve stopReason error/aborted. Prompt/reference images and output/temp-file retention require independent admission; denied in base.",
+        "sharedSources": [],
+        "qualification": "source-observed only; no fetched code executed or provider call performed"
+      }
     }
   ],
   "codemodeContract": {
@@ -281,7 +486,11 @@
         "inputCounts": [10, 10],
         "outputCounts": [2, 5]
       },
-      "expect": { "input": 10, "output": 5, "notSummedOutput": 7 }
+      "expect": {
+        "input": 10,
+        "output": 5,
+        "notSummedOutput": 7
+      }
     },
     {
       "case": "API_retry_cancel_uncertain",
@@ -372,7 +581,11 @@
     },
     {
       "case": "API_codemode_result_status",
-      "input": { "stopReason": "error", "answers": {}, "usage": null },
+      "input": {
+        "stopReason": "error",
+        "answers": {},
+        "usage": null
+      },
       "expect": "Error result is not successful classification, generated image or zero usage; aborted likewise stays canceled. A text-only classifier given images fails before send. Optional success requires separate selected-cell qualification; no base success is claimed."
     },
     {
@@ -390,6 +603,78 @@
     "All fixture cases above are proposed inputs/assertions, not executable or passing tests; TD-01 adopts them independently and preserves named-case ownership in the delivery plan.",
     "No provider requests, installs, model downloads, package-selectivity tests, Windows GUI E2E, guard-removal runs, CI or live billing/cancellation measurements performed; runtime n=0.",
     "Classifier/image base denial inventories every enum at the pin; their actual optional wire contracts remain unqualified. New custom API strings require explicit inventory/admission, never inherited support.",
-    "TD-01 owns shared-schema adoption; TD-19 through TD-23/TD-50/TD-52 real-path qualification remains open. This inventory does not complete TD-04 or establish provider support."
-  ]
+    "TD-01 owns shared-schema adoption; TD-19 through TD-23/TD-50/TD-52 real-path qualification remains open. This completes the TD-04 source/proposal inventory only and does not establish provider support."
+  ],
+  "proposalCompletion": {
+    "issue": "https://github.com/OctoKon/Splyce/issues/57",
+    "owner": "dnarsh/codex",
+    "scope": "TD-04 proposal and source inventory only; TD-01 owns shared-schema/fixture adoption and later owners qualify real transports.",
+    "sourceRevision": "d5b3de22d0e24a3e9c38a9410d3329b099717283",
+    "sourceBlobCount": 21,
+    "chatApiCount": 10,
+    "classifierApiCount": 4,
+    "imageApiCount": 1,
+    "method": "Exact enum-to-inventory equality, unique API IDs, explicit base denial for every classifier/image API, anchored per-adapter request/result/usage/cancel observations and Git blob SHA verification.",
+    "evidence": "research/docs/evidence/td04-provider-source-verification.json",
+    "runtimeSamples": 0
+  },
+  "customOpenAICompatibleProfile": {
+    "status": "proposal only; no gateway installation, runtime configuration or compatibility claim",
+    "notRuntimeRecord": true,
+    "apiId": "openai-completions",
+    "operation": "chat_generation",
+    "sourceEvidence": "TD04-01",
+    "purpose": "Explicit owner-selected compatible gateways, including user-managed Portkey/OpenRouter/Ollama-style services, can be qualified without bundling another process or treating a provider name as support.",
+    "inputSpecimen": {
+      "connectionId": "custom-gateway",
+      "baseUrl": "https://gateway.invalid/v1",
+      "modelId": "explicit-owner-selected-model-id",
+      "nonSecretHeaders": {
+        "X-Client-Application": "splyce"
+      },
+      "credentialHeaderBindings": [
+        {
+          "header": "Authorization",
+          "scheme": "Bearer",
+          "credentialRef": "credential:custom-gateway"
+        }
+      ],
+      "selectedTransport": "http-sse",
+      "declaredRoute": "Explicit endpoint origin plus separately admitted proxy/gateway upstream destinations; actual route locality must be verified.",
+      "implicitFallback": false,
+      "implicitProviderRouting": false
+    },
+    "frozenContractMapping": {
+      "providerConnection": "apiFamily, apiVersion, endpointRef, credentialRef, adapterRevision, accountScopeRef and locality identify the connection; do not insert raw header secrets into this record.",
+      "providerRole": "Bind the selected operation/model, current connection/binding revisions, qualified usage/cancel semantics and permitted role/data classes.",
+      "unresolvedTD01Gap": "The current frozen record references endpointRef and credentialRef but does not define versioned endpoint/base-URL or custom-header configuration records. TD-01 must freeze their owned storage, validation, update/revocation and redaction shape before TD-19/TD-16 implement them; this specimen does not create a second runtime schema."
+    },
+    "admissionRequirements": [
+      "No automatic login, probe, server launch, adapter/model install or third-party gateway dependency. Base setup can complete without this connection.",
+      "Validate exact base URL, effective origin, transport, header names and credential bindings before construction/send; preserve host/TLS/credential authority and redact secret headers on every artifact/egress route.",
+      "A loopback gateway with a hosted upstream is cloud egress. Local-only policy denies hosted upstream inference/auth/discovery even when the first hop is localhost.",
+      "Gateway routes, redirects, retry destinations, model identity and selected upstream provider stay visible and bound to current admission. Unknown or changed routing is unavailable until requalified.",
+      "Disable gateway/provider/model/transport fallback and implicit load-balanced routing. No alternate provider or route is admitted solely because the configured gateway supports it.",
+      "Explicit custom model IDs need operation/tool/schema/stream/usage/cancel/locality qualification; neither a curated release model list nor working credentials alone determines compatibility."
+    ],
+    "proposedCases": [
+      {
+        "case": "custom_gateway_explicit_selection",
+        "expect": "Admitted selected model/base URL and non-secret headers use the chosen Chat Completions route; credentials resolve by reference only; denied or uncommitted requests make zero sends."
+      },
+      {
+        "case": "custom_gateway_localhost_cloud_hop",
+        "expect": "A loopback first hop with hosted upstream is denied by local-only policy; no cloud or alternate-route fallback."
+      },
+      {
+        "case": "custom_gateway_route_or_headers_change",
+        "expect": "Changing base URL, effective upstream, credential header binding or redirect target invalidates current admission; no stale send/publication or credential forwarding."
+      },
+      {
+        "case": "custom_gateway_fallback_disabled",
+        "expect": "Transport/provider/model failure remains visible and attributed to the original attempt; no hidden gateway retry or alternate upstream is accepted without its own explicit selected policy."
+      }
+    ],
+    "verification": "Request configurability observed in the pinned Chat Completions adapter and ProviderRequestOptions. Gateway behavior, reserved-header policy, live routing, telemetry, compatibility, billing and cancellation are unrun; all examples are proposed fixtures, not passing tests."
+  }
 }

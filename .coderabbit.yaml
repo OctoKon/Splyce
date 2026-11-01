@@ -1,0 +1,9 @@
+reviews:
+  auto_review:
+    enabled: false
+  review_status: false
+  high_level_summary: false
+  poem: false
+  collapse_walkthrough: true
+chat:
+  auto_reply: false

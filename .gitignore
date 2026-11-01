@@ -2,3 +2,5 @@ node_modules/
 packages/*/dist/
 __pycache__/
 *.py[cod]
+apps/desktop/test-results/
+apps/desktop/playwright-report/

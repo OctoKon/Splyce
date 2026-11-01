@@ -24,3 +24,5 @@ The [runtime lineage review](docs/foundations/additional-runtimes-and-lineage.md
 The [composition contract](docs/design/core-fusion.md#composition-acceptance) links donor mechanisms to one native authority, selected-configuration interaction/sequence coverage, retention and whole-task contribution trials. Components are not assumed to compose safely or profitably.
 
 Discovery remains open when a sweep finds another eligible candidate. See the dated [gap journal](docs/agents/gap-sweep-candidates.md); no global-exhaustiveness claim is made. Runtime, retrieval and inference qualification still require actual tests.
+
+The [TD-04 provider proposal](docs/design/provider-matrix-proposal.json) inventories all ten chat, four classifier and one image API at the pinned Pi revision. Its [21-source verification ledger](docs/evidence/td04-provider-source-verification.json) separates observed request/result/usage/cancel behavior from Splyce admission requirements and unrun provider qualification.

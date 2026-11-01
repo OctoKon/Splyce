@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "caseId": "FUI-W6",
+  "title": "Crash & disconnect recovery",
+  "targetTask": "TD-08",
+  "description": "Terminate background engine process mid-generation. UI displays Engine stopped banner, composer draft preserved, stale approvals disabled immediately, restart action available.",
+  "preconditions": {
+    "windowMode": "normal",
+    "dpiScale": 1.0,
+    "contrastMode": false,
+    "reducedMotion": false,
+    "engineStatus": "ready"
+  },
+  "eventSequence": [
+    {
+      "delayMs": 0,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w6_01",
+        "eventId": "evt_01W6_01",
+        "createdAt": "2026-10-26T12:00:00.000Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 1,
+        "durable": true,
+        "kind": "turn.started",
+        "payload": {
+          "runId": "run_w6_crash",
+          "turnId": "turn_01"
+        }
+      }
+    },
+    {
+      "delayMs": 5,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w6_02",
+        "eventId": "evt_01W6_02",
+        "createdAt": "2026-10-26T12:00:00.005Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 2,
+        "durable": false,
+        "kind": "turn.stream_delta",
+        "payload": {
+          "runId": "run_w6_crash",
+          "delta": "Generating response before abrupt engine termination."
+        }
+      }
+    },
+    {
+      "delayMs": 15,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w6_03",
+        "eventId": "evt_01W6_03",
+        "createdAt": "2026-10-26T12:00:00.015Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 3,
+        "durable": true,
+        "kind": "approval.requested",
+        "payload": {
+          "approvalRequestId": "app_req_w6_01",
+          "runId": "run_w6_crash",
+          "actionId": "act_w6_write",
+          "capabilityId": "cap_fs_write_file",
+          "targetScope": "w-demo",
+          "normalizedTarget": "target_notes_md",
+          "riskRationale": "Writing a file while the engine is being terminated.",
+          "timeoutMs": 30000
+        }
+      }
+    },
+    {
+      "delayMs": 20,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w6_04",
+        "eventId": "evt_01W6_04",
+        "createdAt": "2026-10-26T12:00:00.020Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_01",
+        "seq": 4,
+        "durable": true,
+        "kind": "engine.status",
+        "payload": {
+          "state": "stopped",
+          "activeWorkers": 0
+        }
+      }
+    }
+  ],
+  "userActions": [
+    {
+      "step": 1,
+      "action": "click",
+      "targetSelector": "[data-testid='restart-engine-button']"
+    }
+  ],
+  "assertions": {
+    "expectedState": {
+      "connectionState": "disconnected",
+      "reconnectOffered": true,
+      "draftPreserved": true,
+      "staleApprovalsDisabled": true
+    },
+    "expectedDispatches": [
+      {
+        "op": "engine.restart",
+        "payloadMatch": {}
+      }
+    ],
+    "accessibilityQueries": [
+      {
+        "role": "alert",
+        "name": "Engine stopped",
+        "expectedState": "visible"
+      },
+      {
+        "role": "button",
+        "name": "Restart Engine",
+        "expectedState": "focusable"
+      }
+    ],
+    "guardRemovalCheck": {
+      "action": "ignore_engine_exit",
+      "mustFailWith": "ERR_HANGING_RPC_CALL"
+    }
+  }
+}
