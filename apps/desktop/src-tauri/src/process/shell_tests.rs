@@ -78,6 +78,58 @@ fn root_exit_waits_for_a_healthy_associated_member_and_its_output() {
 }
 
 #[test]
+fn terminal_slots_are_bounded_until_the_bound_result_is_acknowledged() {
+    let dir = std::env::temp_dir();
+    let temp = dir.join(".splyce-shell-fixture");
+    let mut registry = Registry::new(create_job().unwrap());
+    let call = |reg: &mut Registry, seq: u64, method: &str, params: Value| {
+        let frame = serde_json::json!({"native":{"id":format!("fixture-{seq}"),"method":method,"params":params}});
+        let bytes = reg.reply(frame).unwrap();
+        read_frame(&mut bytes.as_slice()).unwrap().0["native"].clone()
+    };
+    let key = |seq: u64| serde_json::json!({"effectId":format!("00000000-0000-0000-0000-{seq:012}"),"actionId":format!("action-{seq}"),"sessionId":"session","workspaceId":"workspace","ownershipEpoch":1});
+    let start = |reg: &mut Registry, seq: u64| {
+        let mut params = key(seq);
+        for (field,value) in serde_json::json!({"kind":"powershell","command":"Write-Output unused","cwd":dir,"temp":temp,"timeoutMs":1000,"systemRoot":dir.join("non-system")}).as_object().unwrap() {
+            params[field] = value.clone();
+        }
+        call(reg, seq, "shell.start", params)["value"].clone()
+    };
+    for seq in 1..=8 {
+        assert_eq!(start(&mut registry, seq)["state"], "pending");
+    }
+    let terminal = |reg: &mut Registry, seq: u64| {
+        call(
+            reg,
+            12,
+            "shell.poll",
+            serde_json::json!({"key":key(seq),"offset":0}),
+        )
+    };
+    let first = terminal(&mut registry, 1);
+    assert_eq!(first["value"]["status"], "startFailed");
+    assert_eq!(terminal(&mut registry, 1), first);
+    assert_eq!(start(&mut registry, 9)["state"], "done");
+    let mut stale = key(1);
+    stale["ownershipEpoch"] = serde_json::json!(2);
+    assert_eq!(
+        call(&mut registry, 13, "shell.ack", stale)["error"]["code"],
+        "SHELL_CLEANUP_UNCERTAIN"
+    );
+    assert_eq!(terminal(&mut registry, 1), first);
+    assert_eq!(call(&mut registry, 14, "shell.ack", key(1))["ok"], true);
+    assert_eq!(
+        terminal(&mut registry, 1)["error"]["code"],
+        "SHELL_CLEANUP_UNCERTAIN"
+    );
+    assert_eq!(
+        call(&mut registry, 15, "shell.cancel", key(1))["error"]["code"],
+        "SHELL_CLEANUP_UNCERTAIN"
+    );
+    assert_eq!(start(&mut registry, 16)["state"], "pending");
+}
+
+#[test]
 fn disconnect_reaps_only_its_own_shell_registry() {
     let dir = std::env::temp_dir().join(format!(
         "splyce-shell-disconnect-{}-{}",
