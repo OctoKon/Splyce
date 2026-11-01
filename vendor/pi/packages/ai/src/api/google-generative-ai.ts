@@ -12,6 +12,7 @@ import {
 	CredentialPreflightError,
 	redactEventWithLease,
 	redactWithLease,
+	refuseGoogleClientRedirects,
 	withLeasedSecret,
 } from "../splyce-credentials.ts";
 import type {
@@ -118,9 +119,9 @@ export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
 				() =>
 					credentials
 						? withLeasedSecret(credentials, (secret) =>
-								createClient(model, secret, options?.headers, options?.identity).models.generateContentStream(
-									params,
-								),
+								refuseGoogleClientRedirects(
+									createClient(model, secret, options?.headers, options?.identity),
+								).models.generateContentStream(params),
 							)
 						: client!.models.generateContentStream(params),
 				options,
