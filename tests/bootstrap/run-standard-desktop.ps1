@@ -69,6 +69,9 @@ public static class StandardDesktopLauncher {
   }
   public static Observation Controller { get; private set; }
   public static Observation Derived { get; private set; }
+  public static Observation Child { get; private set; }
+  public static uint? NativeExitCode { get; private set; }
+  public static string NativeExitHex { get { return FormatExit(NativeExitCode); } }
   public static bool CleanupSucceeded { get; private set; } = true;
   [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
@@ -93,6 +96,7 @@ public static class StandardDesktopLauncher {
   [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process, out uint exit);
   static void Check(bool success, string operation) { if (!success) throw new Win32Exception(Marshal.GetLastWin32Error(), operation); }
+  static string FormatExit(uint? exit) { return exit.HasValue ? "0x" + exit.Value.ToString("X8", System.Globalization.CultureInfo.InvariantCulture) : null; }
   static IntPtr Info(IntPtr token, int kind, int expectedSize = 0) {
     int length;
     bool probe = GetTokenInformation(token, kind, IntPtr.Zero, 0, out length);
@@ -156,7 +160,7 @@ public static class StandardDesktopLauncher {
     var command = new StringBuilder(Quote(shell) + " -NoProfile -NonInteractive -File " + Quote(worker) + " -RunDirectory " + Quote(runDirectory) + " -Nonce " + nonce + " -Mode " + mode);
     IntPtr current = IntPtr.Zero, linked = IntPtr.Zero, primary = IntPtr.Zero, restricted = IntPtr.Zero, job = IntPtr.Zero;
     ProcessInfo child = new ProcessInfo(); bool assigned = false;
-    CleanupSucceeded = true; Derived = null;
+    CleanupSucceeded = true; Derived = null; Child = null; NativeExitCode = null;
     try {
       Check(OpenProcessToken(GetCurrentProcess(), 0x8B, out current), "Open current primary token");
       Controller = Inspect(current);
@@ -182,13 +186,19 @@ public static class StandardDesktopLauncher {
       if (Controller.Elevated) Check(CreateProcessAsUserW(restricted, shell, command, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, root, ref startup, out child), "Create restricted worker");
       else Check(CreateProcessW(shell, command, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, root, ref startup, out child), "Create standard worker");
       Check(AssignProcessToJobObject(job, child.Process), "Assign suspended worker job"); assigned = true;
+      IntPtr childToken = IntPtr.Zero;
+      try {
+        Check(OpenProcessToken(child.Process, 8, out childToken), "Inspect suspended worker token");
+        Child = Inspect(childToken); RequireWorker(Child, Controller);
+      } finally { if (childToken != IntPtr.Zero) CloseHandle(childToken); }
       if (failBeforeResume) throw new InvalidOperationException("Selfcheck: before-resume failure.");
       Check(ResumeThread(child.Thread) != 0xFFFFFFFF, "Resume owned worker");
       uint waited = WaitForSingleObject(child.Process, mode == "Gate" ? 5700000u : mode == "Token" ? 120000u : 720000u);
       if (waited == 258) throw new TimeoutException("Owned worker timed out.");
       Check(waited == 0, "Wait for owned worker");
       uint exit; Check(GetExitCodeProcess(child.Process, out exit), "Read exact worker exit");
-      if (exit > 255) throw new InvalidOperationException("Worker exit is outside completion range.");
+      NativeExitCode = exit;
+      if (exit > 255) throw new InvalidOperationException("Worker exit is outside completion range: " + NativeExitHex + ".");
       return (int)exit;
     } finally {
       try {
@@ -217,6 +227,8 @@ public static class StandardDesktopLauncher {
   }
   public static int RunWorker(string shell, string root, string directory, string nonce, string mode) { return Launch(shell, root, directory, nonce, mode, false); }
   public static bool SelfCheck(string shell, string root) {
+    if (FormatExit(null) != null || FormatExit(0) != "0x00000000" || FormatExit(255) != "0x000000FF" ||
+        FormatExit(0xC0000142) != "0xC0000142" || FormatExit(uint.MaxValue) != "0xFFFFFFFF") throw new InvalidOperationException("Native exit formatting selfcheck failed.");
     if (ClassifyIntegrity(0x2000) != "Medium") throw new InvalidOperationException("Exact medium integrity was rejected.");
     foreach (int rid in new int[] { 0x2100, 0x2001, 0x1000, 0x3000, -1 })
       if (ClassifyIntegrity(rid) != "OtherOrUnknown") throw new InvalidOperationException("Non-medium integrity RID was accepted.");
@@ -248,7 +260,8 @@ public static class StandardDesktopLauncher {
     bool rejected = false;
     try { Launch(shell, root, directory, nonce, "Token", true); }
     catch (InvalidOperationException error) { if (error.Message != "Selfcheck: before-resume failure.") throw; rejected = true; }
-    if (!rejected || !CleanupSucceeded) throw new InvalidOperationException("Before-resume cleanup selfcheck failed.");
+    if (!rejected || !CleanupSucceeded || Child == null || NativeExitCode.HasValue || NativeExitHex != null) throw new InvalidOperationException("Before-resume cleanup or missing-exit selfcheck failed.");
+    RequireWorker(Child, Controller);
     return true;
   }
 }
@@ -393,6 +406,13 @@ try {
         elevated = if ($null -ne [StandardDesktopLauncher]::Derived) { [StandardDesktopLauncher]::Derived.Elevated } else { $null }
         elevationType = if ([StandardDesktopLauncher]::Derived.ElevationType -in @(1, 2, 3)) { [StandardDesktopLauncher]::Derived.ElevationType } else { $null }
       }
+      childToken = @{
+        integrity = if ([StandardDesktopLauncher]::Child.Integrity -in @('Medium', 'OtherOrUnknown')) { [StandardDesktopLauncher]::Child.Integrity } else { $null }
+        elevated = if ($null -ne [StandardDesktopLauncher]::Child) { [StandardDesktopLauncher]::Child.Elevated } else { $null }
+        elevationType = if ([StandardDesktopLauncher]::Child.ElevationType -in @(1, 2, 3)) { [StandardDesktopLauncher]::Child.ElevationType } else { $null }
+      }
+      nativeExitCode = [StandardDesktopLauncher]::NativeExitCode
+      nativeExitHex = [StandardDesktopLauncher]::NativeExitHex
       completion = @{
         status = if ($completion.status -in @('completed', 'failed')) { $completion.status } else { $null }
         exitCode = if (($completion.exitCode -is [int] -or $completion.exitCode -is [long]) -and
