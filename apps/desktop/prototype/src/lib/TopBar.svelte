@@ -9,6 +9,7 @@
   const KEY = 'splyce.greeting';
   let greeting = $state('Hello greeting');
   let editing = $state(false);
+  let draft = $state('');
   let input = $state<HTMLInputElement>();
 
   $effect(() => {
@@ -17,6 +18,7 @@
   });
 
   function startEdit() {
+    draft = greeting;
     editing = true;
     queueMicrotask(() => {
       input?.focus();
@@ -25,7 +27,8 @@
   }
 
   function commit() {
-    const next = (input?.value ?? greeting).trim() || 'Hello greeting';
+    if (!editing) return;
+    const next = draft.trim() || 'Hello greeting';
     greeting = next;
     localStorage.setItem(KEY, next);
     editing = false;
@@ -102,9 +105,10 @@
       <input
         class="greeting-input"
         bind:this={input}
-        bind:value={greeting}
+        bind:value={draft}
         onblur={commit}
         onkeydown={(e) => {
+          if (e.isComposing) return;
           if (e.key === 'Enter') commit();
           if (e.key === 'Escape') editing = false;
         }}

@@ -8,36 +8,30 @@
 
   type Section = 'general' | 'runtime' | 'modules' | 'memory' | 'privacy' | 'updates';
 
-  const sections: { id: Section; label: string; index: string }[] = [
+  const sections: { id: Section; label: string }[] = [
     {
       id: 'general',
       label: 'General',
-      index: 'workspace name default branch theme appearance motion autosave last run shortcuts',
     },
     {
       id: 'runtime',
       label: 'Runtime',
-      index: 'engine approvals concurrency timeout restart self-check pi node',
     },
     {
       id: 'modules',
       label: 'Modules',
-      index: 'memory models extensions providers lsp editor plugins',
     },
     {
       id: 'memory',
       label: 'Memory & storage',
-      index: 'journal retention rebuild index export data storage',
     },
     {
       id: 'privacy',
       label: 'Privacy',
-      index: 'telemetry egress network delete workspace diagnostics',
     },
     {
       id: 'updates',
       label: 'Updates',
-      index: 'channel automatic update version license master plan',
     },
   ];
 
@@ -78,9 +72,30 @@
     if (timer) clearTimeout(timer);
   });
 
-  const sectionRows = $derived(sections.find((section) => section.id === active)?.index ?? '');
+  const rows: Record<Section, string[]> = {
+    general: [
+      'Workspace name',
+      'Default branch',
+      'Theme appearance',
+      'Reduce motion',
+      'Autosave drafts',
+      'Open last run on launch',
+      'Keyboard shortcuts',
+    ],
+    runtime: [
+      'Engine path',
+      'Approval mode',
+      'Concurrent runs',
+      'Shell timeout',
+      'Engine actions restart self-check',
+    ],
+    modules: ['Memory', 'Models providers', 'Extensions plugins lsp editor'],
+    memory: ['Journal path', 'Retention raw artifacts', 'Rebuild memory index', 'Export all data'],
+    privacy: ['Telemetry', 'External egress', 'Diagnostics clipboard', 'Delete workspace data'],
+    updates: ['Update channel', 'Check automatically', 'Updates last check'],
+  };
 
-  const noResults = $derived(!!query.trim() && !sectionRows.includes(query.trim().toLowerCase()));
+  const noResults = $derived(!!query.trim() && !rows[active].some(show));
 
   function show(terms: string) {
     return !query.trim() || terms.toLowerCase().includes(query.trim().toLowerCase());
@@ -228,7 +243,7 @@
       {:else}
         {#if active === 'general'}
           <div class="set-cat">Workspace</div>
-          {#if show('Workspace name')}
+          {#if show(rows.general[0])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Workspace name</div>
@@ -237,7 +252,7 @@
               <input class="inp" bind:value={workspaceName} aria-label="Workspace name" />
             </div>
           {/if}
-          {#if show('Default branch')}
+          {#if show(rows.general[1])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Default branch</div>
@@ -254,7 +269,7 @@
           {/if}
 
           <div class="set-cat">Appearance</div>
-          {#if show('Theme appearance')}
+          {#if show(rows.general[2])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Theme</div>
@@ -273,7 +288,7 @@
               </select>
             </div>
           {/if}
-          {#if show('Reduce motion')}
+          {#if show(rows.general[3])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Reduce motion</div>
@@ -284,7 +299,7 @@
           {/if}
 
           <div class="set-cat">Behaviour</div>
-          {#if show('Autosave drafts')}
+          {#if show(rows.general[4])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Autosave drafts</div>
@@ -297,7 +312,7 @@
               />
             </div>
           {/if}
-          {#if show('Open last run on launch')}
+          {#if show(rows.general[5])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Open last run on launch</div>
@@ -310,7 +325,7 @@
               />
             </div>
           {/if}
-          {#if show('Keyboard shortcuts')}
+          {#if show(rows.general[6])}
             <div class="set-row" style="display:block">
               <div class="set-title" style="margin-bottom:8px">Keyboard shortcuts</div>
               <div class="shortcut-list">
@@ -335,7 +350,7 @@
           {/if}
         {:else if active === 'runtime'}
           <div class="set-cat">Pi engine</div>
-          {#if show('Engine path')}
+          {#if show(rows.runtime[0])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Engine path</div>
@@ -346,7 +361,7 @@
               <input class="inp" bind:value={enginePath} aria-label="Engine path" />
             </div>
           {/if}
-          {#if show('Approval mode')}
+          {#if show(rows.runtime[1])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Approval mode</div>
@@ -361,7 +376,7 @@
               </select>
             </div>
           {/if}
-          {#if show('Concurrent runs')}
+          {#if show(rows.runtime[2])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Concurrent runs</div>
@@ -376,7 +391,7 @@
               </select>
             </div>
           {/if}
-          {#if show('Shell timeout')}
+          {#if show(rows.runtime[3])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Shell timeout</div>
@@ -391,7 +406,7 @@
               </select>
             </div>
           {/if}
-          {#if show('Engine actions restart self-check')}
+          {#if show(rows.runtime[4])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Engine health</div>
@@ -438,38 +453,44 @@
           </div>
         {:else if active === 'modules'}
           <div class="set-cat">Workspace modules</div>
-          <div class="set-row">
-            <div class="set-main">
-              <div class="set-title">Memory</div>
-              <div class="set-desc">Cross-session memory, citations, retention and deletion.</div>
-            </div>
-            <button class="btn secondary sm" type="button" onclick={() => app.go('memory')}>
-              Open
-            </button>
-          </div>
-          <div class="set-row">
-            <div class="set-main">
-              <div class="set-title">Models</div>
-              <div class="set-desc">
-                Local and cloud providers, per-role bindings and credentials.
+          {#if show(rows.modules[0])}
+            <div class="set-row">
+              <div class="set-main">
+                <div class="set-title">Memory</div>
+                <div class="set-desc">Cross-session memory, citations, retention and deletion.</div>
               </div>
+              <button class="btn secondary sm" type="button" onclick={() => app.go('memory')}>
+                Open
+              </button>
             </div>
-            <button class="btn secondary sm" type="button" onclick={() => app.go('models')}>
-              Open
-            </button>
-          </div>
-          <div class="set-row">
-            <div class="set-main">
-              <div class="set-title">Extensions</div>
-              <div class="set-desc">Pinned modules, optional editor and language services.</div>
+          {/if}
+          {#if show(rows.modules[1])}
+            <div class="set-row">
+              <div class="set-main">
+                <div class="set-title">Models</div>
+                <div class="set-desc">
+                  Local and cloud providers, per-role bindings and credentials.
+                </div>
+              </div>
+              <button class="btn secondary sm" type="button" onclick={() => app.go('models')}>
+                Open
+              </button>
             </div>
-            <button class="btn secondary sm" type="button" onclick={() => app.go('extensions')}>
-              Open
-            </button>
-          </div>
+          {/if}
+          {#if show(rows.modules[2])}
+            <div class="set-row">
+              <div class="set-main">
+                <div class="set-title">Extensions</div>
+                <div class="set-desc">Pinned modules, optional editor and language services.</div>
+              </div>
+              <button class="btn secondary sm" type="button" onclick={() => app.go('extensions')}>
+                Open
+              </button>
+            </div>
+          {/if}
         {:else if active === 'memory'}
           <div class="set-cat">Journal</div>
-          {#if show('Journal path')}
+          {#if show(rows.memory[0])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Journal path</div>
@@ -480,7 +501,7 @@
               <input class="inp" bind:value={journalPath} aria-label="Journal path" />
             </div>
           {/if}
-          {#if show('Retention raw artifacts')}
+          {#if show(rows.memory[1])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Retention · raw artifacts</div>
@@ -501,7 +522,7 @@
           <div class="set-link-row">
             <span>State</span><span class="spacer"></span><span class="muted">{indexState}</span>
           </div>
-          {#if show('Rebuild memory index')}
+          {#if show(rows.memory[2])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Rebuild memory index</div>
@@ -520,7 +541,7 @@
               </button>
             </div>
           {/if}
-          {#if show('Export all data')}
+          {#if show(rows.memory[3])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Export workspace data</div>
@@ -535,7 +556,7 @@
           {/if}
         {:else if active === 'privacy'}
           <div class="set-cat">Local only</div>
-          {#if show('Telemetry')}
+          {#if show(rows.privacy[0])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Telemetry</div>
@@ -549,7 +570,7 @@
               </div>
             </div>
           {/if}
-          {#if show('External egress')}
+          {#if show(rows.privacy[1])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Block external egress</div>
@@ -572,7 +593,7 @@
               />
             </div>
           {/if}
-          {#if show('Diagnostics clipboard')}
+          {#if show(rows.privacy[2])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Diagnostics</div>
@@ -603,7 +624,7 @@
                 }}>Reset</button
               >
             </div>
-          {:else if show('Delete workspace data')}
+          {:else if show(rows.privacy[3])}
             <div class="danger-zone">
               <div class="dz-title">Delete workspace data</div>
               <div class="dz-body">
@@ -631,7 +652,7 @@
           {/if}
         {:else}
           <div class="set-cat">Release channel</div>
-          {#if show('Update channel')}
+          {#if show(rows.updates[0])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Update channel</div>
@@ -645,7 +666,7 @@
               </select>
             </div>
           {/if}
-          {#if show('Check automatically')}
+          {#if show(rows.updates[1])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Check automatically</div>
@@ -660,7 +681,7 @@
               />
             </div>
           {/if}
-          {#if show('Updates last check')}
+          {#if show(rows.updates[2])}
             <div class="set-row">
               <div class="set-main">
                 <div class="set-title">Updates</div>

@@ -38,6 +38,8 @@
   let comments = $state<Record<string, string>>({});
   let diffOpen = $state(false);
   let diffFile = $state<string | null>(null);
+  let diffDialog = $state<HTMLDialogElement>();
+  let diffTrigger: HTMLElement | null = null;
   let nextTurn = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -46,15 +48,24 @@
   const visibleDiff = $derived(
     diffFile ? diffFiles.filter((file) => file.path === diffFile) : diffFiles,
   );
+  const additions = $derived(visibleDiff.reduce((total, file) => total + file.additions, 0));
+  const deletions = $derived(visibleDiff.reduce((total, file) => total + file.deletions, 0));
+
+  $effect(() => {
+    if (diffOpen && diffDialog && !diffDialog.open) diffDialog.showModal();
+  });
 
   function openDiff(path: string | null = null) {
+    diffTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     diffFile = path;
     diffOpen = true;
   }
 
   function closeDiff() {
+    diffDialog?.close();
     diffOpen = false;
     diffFile = null;
+    diffTrigger?.focus();
   }
 
   onDestroy(() => {
@@ -203,8 +214,7 @@
 <svelte:window
   onkeydown={(event) => {
     if (event.key === 'Escape') {
-      if (diffOpen) closeDiff();
-      else if (evidenceOpen) closeEvidence();
+      if (!diffOpen && evidenceOpen) closeEvidence();
       menuOpen = false;
     }
   }}
@@ -729,18 +739,25 @@
   </div>
 
   {#if diffOpen}
-    <div
+    <dialog
       class="diff-overlay"
-      role="presentation"
+      bind:this={diffDialog}
+      aria-label="Review changes"
+      oncancel={(event) => {
+        event.preventDefault();
+        closeDiff();
+      }}
       onclick={(event) => {
         if (event.target === event.currentTarget) closeDiff();
       }}
     >
-      <div class="diff-modal" role="dialog" aria-modal="true" aria-label="Review changes">
+      <div class="diff-modal">
         <header class="diff-modal-head">
           <div>
             <h3>{diffFile ?? 'All changes'}</h3>
-            <span>{visibleDiff.length} file{visibleDiff.length === 1 ? '' : 's'} · +42 −11</span>
+            <span
+              >{visibleDiff.length} file{visibleDiff.length === 1 ? '' : 's'} · +{additions} −{deletions}</span
+            >
           </div>
           <button class="icon-btn" type="button" aria-label="Close review" onclick={closeDiff}>
             <Icon name="x" size={15} />
@@ -750,7 +767,7 @@
           <DiffView files={visibleDiff} {comments} oncomment={addComment} />
         </div>
       </div>
-    </div>
+    </dialog>
   {/if}
 </div>
 
@@ -824,9 +841,22 @@
     align-items: center;
     justify-content: center;
     padding: 32px;
+    width: 100vw;
+    height: 100vh;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    color: inherit;
+    background: transparent;
+    animation: overlay-in 0.18s var(--ease) both;
+  }
+  .diff-overlay:not([open]) {
+    display: none;
+  }
+  .diff-overlay::backdrop {
     background: rgba(0, 0, 0, 0.45);
     backdrop-filter: blur(4px);
-    animation: overlay-in 0.18s var(--ease) both;
   }
   .diff-modal {
     display: flex;

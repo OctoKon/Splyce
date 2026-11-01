@@ -16,7 +16,7 @@
         "width": 1280,
         "height": 800,
         "resizable": true,
-        "minWidth": 960,
+        "minWidth": 640,
         "minHeight": 640
       }
     ],

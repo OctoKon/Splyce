@@ -15,6 +15,7 @@ describe('keyboard and focus', () => {
 
   it('closes the mobile navigation with Escape and restores focus', async () => {
     await browser.setWindowSize(800, 720);
+    expect(await browser.execute(() => window.innerWidth)).toBeLessThanOrEqual(820);
     const menu = await $('button.mb-menu');
     await menu.waitForDisplayed();
     await menu.click();

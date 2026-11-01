@@ -39,6 +39,7 @@
   async function foldSidebar() {
     sidebarCollapsed = true;
     await tick();
+    document.querySelector<HTMLButtonElement>('.main button[aria-label="Open sidebar"]')?.focus();
   }
 
   async function unfoldSidebar() {
@@ -48,7 +49,8 @@
   }
 
   function toggleSidebar() {
-    if (sidebarCollapsed) void unfoldSidebar();
+    if (window.matchMedia('(max-width: 820px)').matches) navOpen = true;
+    else if (sidebarCollapsed) void unfoldSidebar();
     else void foldSidebar();
   }
 </script>
@@ -115,9 +117,19 @@
       {:else if app.page === 'runs'}
         <Runs />
       {:else if app.page === 'run'}
-        {#key app.runId}
-          <Run {sidebarCollapsed} ontoggleSidebar={toggleSidebar} />
-        {/key}
+        {#if app.runs.some((run) => run.id === app.runId)}
+          {#key app.runId}
+            <Run {sidebarCollapsed} ontoggleSidebar={toggleSidebar} />
+          {/key}
+        {:else}
+          <section class="page">
+            <h1>Run unavailable</h1>
+            <p>This run could not be found.</p>
+            <button class="btn secondary" type="button" onclick={() => app.go('work')}
+              >Back to Work</button
+            >
+          </section>
+        {/if}
       {:else if app.page === 'memory'}
         <Memory />
       {:else if app.page === 'models'}
