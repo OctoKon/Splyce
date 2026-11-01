@@ -14,6 +14,7 @@ import {
   validateEvent,
   validateHandshake,
   validateCursor,
+  validateControlFrame,
 } from "@splyce/pi/contracts";
 
 const fixture = (name) =>
@@ -513,7 +514,6 @@ test("TD-01: event-specific scope/session and replay cursors reject mismatches",
   for (const [kind, patch] of [
     ["approval.requested", { targetScope: "other-workspace" }],
     ["session.tree_updated", { sessionId: "other-session" }],
-    ["stream.resync", { fromSeq: 13 }],
     ["run.reconnect_snapshot", { lastDurableSeq: 13 }],
   ]) {
     const fields = fixture("events").find((value) => value.kind === kind);
@@ -711,4 +711,42 @@ test("TD-01: frozen handshake accepts unavailable but requires all readiness gua
     { readiness: { state: "ready" } },
   ])
     rejects(() => validateHandshake({ ...input, ...patch }));
+});
+
+test("TD-15: stream.resync is an exact unsequenced control frame, never an event", () => {
+  const control = {
+    frame: "control",
+    kind: "stream.resync",
+    sessionId: "s1",
+    fromSeq: 0,
+  };
+  assert.deepEqual(validateControlFrame(control), control);
+  assert.equal(
+    validateControlFrame({ ...control, fromSeq: Number.MAX_SAFE_INTEGER })
+      .fromSeq,
+    Number.MAX_SAFE_INTEGER,
+  );
+  for (const bad of [
+    { ...control, seq: 1 },
+    { ...control, extra: true },
+    { ...control, frame: "data" },
+    { ...control, kind: "stream.other" },
+    { ...control, sessionId: "a b" },
+    { ...control, fromSeq: -1 },
+    { ...control, fromSeq: 1.5 },
+    { ...control, fromSeq: Number.MAX_SAFE_INTEGER + 1 },
+    { frame: "control", kind: "stream.resync", sessionId: "s1" },
+  ])
+    rejects(() => validateControlFrame(bad));
+  // The old durable data shape is no longer an event kind.
+  rejects(() =>
+    validateEvent(
+      event({ kind: "stream.resync", payload: { fromSeq: 0 } }),
+      context,
+    ),
+  );
+  assert.equal(
+    JSON.parse(BRIDGE_PROTOCOL_JSON).eventKinds.includes("stream.resync"),
+    false,
+  );
 });

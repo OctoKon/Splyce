@@ -1597,9 +1597,26 @@ mod windows {
             ] {
                 assert!(native_reply(call("credential.redact", params), &mut scopes).is_err());
             }
+            let copies = MAX_FRAME_BYTES / "redaction-private-lane".len() + 1;
+            let text = "redaction-private-lane".repeat(copies);
+            assert!(text.len() > MAX_FRAME_BYTES);
+            let value = reply(
+                native_reply(call("credential.redact", json!({"text":text})), &mut scopes).unwrap(),
+            );
+            assert_eq!(
+                value,
+                json!({"native":{"id":"native1","ok":true,"value":{
+                    "text":"[REDACTED:credential]".repeat(copies),"redactedCount":copies
+                }}})
+            );
+            assert!(
+                !value["native"]["value"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("redaction-private-lane")
+            );
             for text in [
                 "x".repeat(crate::credentials::MAX_REDACTION_TEXT_BYTES + 1),
-                "x".repeat(MAX_FRAME_BYTES),
                 "redaction-private-lane".repeat(MAX_FRAME_BYTES / 21),
             ] {
                 let value = reply(

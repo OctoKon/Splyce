@@ -13,6 +13,9 @@ use windows_sys::Win32::Security::Credentials::{
     CredWriteW,
 };
 
+// Credential inventory probes share one OS namespace, so their fixtures must not overlap.
+static CREDENTIAL_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // Cleanup is restricted to references created by this test process, including on assertion unwind.
 
 struct Fixtures {
@@ -72,6 +75,7 @@ fn fixture_target(reference: &CredentialRef) -> Vec<u16> {
 
 #[test]
 fn real_windows_roundtrip_rotation_and_cleanup() {
+    let _credential_test = CREDENTIAL_TEST.lock().unwrap();
     let mut fixtures = Fixtures::default();
     let original = fixtures.write("synthetic-密钥-🔐").clone();
     let rotated = fixtures.write("synthetic-rotated-λ").clone();
@@ -95,6 +99,7 @@ fn real_windows_roundtrip_rotation_and_cleanup() {
 
 #[test]
 fn real_windows_exact_blob_byte_boundaries() {
+    let _credential_test = CREDENTIAL_TEST.lock().unwrap();
     assert_eq!(MAX_SECRET_BYTES, 2560);
     let mut fixtures = Fixtures::default();
     for value in [
@@ -132,6 +137,7 @@ fn rejected_secret_input_never_returns_a_reference() {
 
 #[test]
 fn real_windows_owned_namespace_metadata_and_invalid_blob() {
+    let _credential_test = CREDENTIAL_TEST.lock().unwrap();
     let mut fixtures = Fixtures::default();
     let reference = fixtures.write("synthetic-metadata");
     let mut target = fixture_target(reference);
@@ -180,6 +186,7 @@ fn real_windows_owned_namespace_metadata_and_invalid_blob() {
 
 #[test]
 fn real_windows_redaction_covers_unselected_keys_forms_and_unicode() {
+    let _credential_test = CREDENTIAL_TEST.lock().unwrap();
     let mut fixtures = Fixtures::default();
     fixtures.write("redaction-a");
     fixtures.write("redaction-b");
@@ -220,6 +227,7 @@ fn real_windows_redaction_covers_unselected_keys_forms_and_unicode() {
 
 #[test]
 fn real_windows_redaction_excludes_unrelated_namespace_and_bounds_inventory() {
+    let _credential_test = CREDENTIAL_TEST.lock().unwrap();
     let mut fixtures = Fixtures::default();
     let reference = fixtures.write("redaction-namespace").clone();
     let id = reference
@@ -262,6 +270,7 @@ fn real_windows_redaction_excludes_unrelated_namespace_and_bounds_inventory() {
 
 #[test]
 fn real_windows_redaction_rejects_marker_and_boundary_secret_recreation() {
+    let _credential_test = CREDENTIAL_TEST.lock().unwrap();
     let mut fixtures = Fixtures::default();
     fixtures.write("somekey88");
     let marker = fixtures.write("credential").clone();
