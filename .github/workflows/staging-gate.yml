@@ -126,7 +126,7 @@ jobs:
         run: |
           # Once defined, the release gate always runs; path detection only decides whether a missing script is an error.
           if node -e "process.exit(require('./package.json').scripts?.['test:release-gate'] ? 0 : 1)"; then
-            npm run test:release-gate
+            pwsh -NoProfile -NonInteractive -File ./tests/bootstrap/run-standard-desktop.ps1 -Mode Gate
             exit 0
           fi
           # UI prototypes under apps/desktop/prototype/ are non-product fixtures, not runtime source.
