@@ -74,6 +74,12 @@ export function nativeShellFixture(options = {}) {
   const control = new NativeControl(peer.send);
   return {
     execute: (...args) => control.shell(...args),
+    // Bare executor tests have no Store/NativePolicy receipt owner.
+    async executeStandalone(request, ...args) {
+      const result = await control.shell(request, ...args);
+      if (control.hasShell(request)) await control.acknowledgeShell(request);
+      return result;
+    },
     close: () => {
       control.shutdown();
       return peer.close();

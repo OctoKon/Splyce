@@ -106,7 +106,7 @@ function harness(
     },
   };
   const tools = createWorkspaceTools({
-    shellExecutor: nativeShell.execute,
+    shellExecutor: nativeShell.executeStandalone,
     ownershipEpoch: () => 1,
     workspaces,
     grants,
@@ -487,7 +487,7 @@ test(
     const receipts = [];
     let consumed = false;
     const tools = createWorkspaceTools({
-      shellExecutor:nativeShell.execute,ownershipEpoch:()=>1,
+      shellExecutor:nativeShell.executeStandalone,ownershipEpoch:()=>1,
       workspaces: { workspace: () => ({ workspaceId: 'w1', canonicalPath: root, revision: 1 }) },
       grants: {
         check: () => consumed ? { ok: false, reason: 'GRANT_CONSUMED' } : { ok: true, grantId: 'g1', scope: 'once' },
