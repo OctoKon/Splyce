@@ -236,6 +236,178 @@ export function isoWeekday(year: number, month: number, day: number): number {
   return d === 0 ? 7 : d;
 }
 
+/** One scheduled slot of one job revision. */
+export interface Occurrence {
+  readonly jobId: string;
+  readonly revision: string;
+  /**
+   * Stable identity of the slot: the interval index, or the local calendar
+   * date for daily jobs. A fall-back day still has one daily slot, and the same
+   * slot always gets the same id, which is what dedupes duplicate triggers.
+   */
+  readonly occurrenceId: string;
+  readonly scheduledUtcMs: number;
+}
+
+/** Occurrences in a window `(afterUtcMs, untilUtcMs]`, summarised without enumerating them all. */
+export interface OccurrenceScan {
+  readonly count: number;
+  readonly first?: Occurrence;
+  readonly latest?: Occurrence;
+}
+
+interface CalendarDate {
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
+}
+
+function addDays(date: CalendarDate, days: number): CalendarDate {
+  const d = new Date(Date.UTC(date.year, date.month - 1, date.day + days));
+  return {
+    year: d.getUTCFullYear(),
+    month: d.getUTCMonth() + 1,
+    day: d.getUTCDate(),
+  };
+}
+
+function daysBetween(from: CalendarDate, to: CalendarDate): number {
+  return Math.round(
+    (Date.UTC(to.year, to.month - 1, to.day) -
+      Date.UTC(from.year, from.month - 1, from.day)) /
+      86_400_000,
+  );
+}
+
+function dateKey(date: CalendarDate): string {
+  const pad = (n: number, width = 2) => String(n).padStart(width, "0");
+  return `${pad(date.year, 4)}-${pad(date.month)}-${pad(date.day)}`;
+}
+
+function occurrence(
+  job: JobDefinition,
+  slot: string,
+  scheduledUtcMs: number,
+): Occurrence {
+  return Object.freeze({
+    jobId: job.jobId,
+    revision: job.revision,
+    occurrenceId: `${job.jobId}@${job.revision}#${slot}`,
+    scheduledUtcMs,
+  });
+}
+
+function scanInterval(
+  job: JobDefinition,
+  schedule: IntervalSchedule,
+  afterUtcMs: number,
+  untilUtcMs: number,
+): OccurrenceScan {
+  const { everyMs, anchorUtcMs } = schedule;
+  const firstIndex = Math.max(
+    0,
+    Math.floor((afterUtcMs - anchorUtcMs) / everyMs) + 1,
+  );
+  const lastIndex = Math.floor((untilUtcMs - anchorUtcMs) / everyMs);
+  if (lastIndex < firstIndex) return { count: 0 };
+  const at = (index: number) =>
+    occurrence(job, String(index), anchorUtcMs + index * everyMs);
+  return {
+    count: lastIndex - firstIndex + 1,
+    first: at(firstIndex),
+    latest: at(lastIndex),
+  };
+}
+
+function scanDaily(
+  job: JobDefinition,
+  schedule: DailySchedule,
+  afterUtcMs: number,
+  untilUtcMs: number,
+): OccurrenceScan {
+  const [hour, minute] = schedule.localTime.split(":").map(Number) as [
+    number,
+    number,
+  ];
+  const weekdays = new Set(schedule.weekdays ?? [1, 2, 3, 4, 5, 6, 7]);
+  const runsOn = (date: CalendarDate) =>
+    weekdays.has(isoWeekday(date.year, date.month, date.day));
+  // The slot of a date, if it falls inside the window.
+  const slotOn = (date: CalendarDate): Occurrence | undefined => {
+    if (!runsOn(date)) return undefined;
+    const { utcMs } = resolveWallTime({ ...date, hour, minute }, job.timeZone);
+    if (utcMs <= afterUtcMs || utcMs > untilUtcMs) return undefined;
+    return occurrence(job, dateKey(date), utcMs);
+  };
+  // A slot resolves within its own local date, so only the two boundary dates
+  // can be partly outside the window; every date strictly between is inside.
+  const start = wallTimeAt(afterUtcMs, job.timeZone);
+  const end = wallTimeAt(untilUtcMs, job.timeZone);
+  const span = daysBetween(start, end);
+  if (span < 0) return { count: 0 };
+
+  let count = 0;
+  const startSlot = slotOn(start);
+  if (startSlot) count += 1;
+  const endSlot = span > 0 ? slotOn(end) : undefined;
+  if (endSlot) count += 1;
+  const interior = Math.max(0, span - 1);
+  count += Math.floor(interior / 7) * weekdays.size;
+  for (let i = 1; i <= interior % 7; i += 1) {
+    if (runsOn(addDays(start, i))) count += 1;
+  }
+  if (count === 0) return { count: 0 };
+
+  // Matching weekdays recur within a week, so 8 dates either way suffice.
+  let first: Occurrence | undefined;
+  for (let i = 0; i <= Math.min(span, 7) && !first; i += 1) {
+    first = slotOn(addDays(start, i));
+  }
+  let latest: Occurrence | undefined;
+  for (let i = 0; i <= Math.min(span, 7) && !latest; i += 1) {
+    latest = slotOn(addDays(end, -i));
+  }
+  return {
+    count,
+    ...(first ? { first } : {}),
+    ...(latest ? { latest } : {}),
+  };
+}
+
+/**
+ * Summarises the job's occurrences in `(afterUtcMs, untilUtcMs]`: how many,
+ * the earliest and the latest. Cost does not grow with the window, so a long
+ * disabled period can be reported without enumerating every missed slot.
+ */
+export function scanOccurrences(
+  job: JobDefinition,
+  afterUtcMs: number,
+  untilUtcMs: number,
+): OccurrenceScan {
+  if (untilUtcMs <= afterUtcMs) return { count: 0 };
+  return job.schedule.kind === "interval"
+    ? scanInterval(job, job.schedule, afterUtcMs, untilUtcMs)
+    : scanDaily(job, job.schedule, afterUtcMs, untilUtcMs);
+}
+
+/** The first occurrence strictly after `afterUtcMs`. */
+export function nextOccurrence(
+  job: JobDefinition,
+  afterUtcMs: number,
+): Occurrence {
+  // A daily job's next slot is within 8 days (weekdays recur weekly); an
+  // interval's is within one period of `afterUtcMs` or of a future anchor.
+  const horizon =
+    job.schedule.kind === "interval"
+      ? afterUtcMs +
+        job.schedule.everyMs +
+        Math.max(0, job.schedule.anchorUtcMs - afterUtcMs)
+      : afterUtcMs + 8 * 86_400_000;
+  const scan = scanOccurrences(job, afterUtcMs, horizon);
+  if (!scan.first) throw new JobError("NO_OCCURRENCE", job.jobId);
+  return scan.first;
+}
+
 /**
  * Validates a definition and returns a frozen copy, so a caller cannot change a
  * schedule after it was checked.
