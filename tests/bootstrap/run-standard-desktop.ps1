@@ -89,15 +89,24 @@ if ($SelfCheck) {
   if (-not $lookupFailed -or (Get-FinalExitCode 0 $null $(if ($lookupFailed) { 'lookup failed' })) -ne 1) {
     throw 'Task lookup errors must block success.'
   }
+  $taskIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
   $taskAction = New-ScheduledTaskAction -Execute 'C:\Program Files\Splyce & CI\pwsh.exe' -Argument $quoted -WorkingDirectory 'C:\repo'
-  $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'selfcheck' -LogonType Interactive -RunLevel Limited
+  $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskIdentity.User.Value -LogonType Interactive -RunLevel Limited
   $taskDefinition = New-ScheduledTask -Action $taskAction -Principal $taskPrincipal
-  $taskExpected = [pscustomobject]@{ name = 'selfcheck'; user = 'selfcheck'; shell = $taskAction.Execute; arguments = $taskAction.Arguments; root = $taskAction.WorkingDirectory }
+  $taskExpected = [pscustomobject]@{ name = 'selfcheck'; user = $taskIdentity.Name; sid = $taskIdentity.User.Value; shell = $taskAction.Execute; arguments = $taskAction.Arguments; root = $taskAction.WorkingDirectory }
   $taskObserved = [pscustomobject]@{ TaskName = 'selfcheck'; TaskPath = '\'; Principal = $taskDefinition.Principal; Actions = $taskDefinition.Actions; Triggers = $taskDefinition.Triggers }
+  if ([Security.Principal.SecurityIdentifier]::new($taskObserved.Principal.UserId).Value -ne $taskExpected.sid -or
+      $taskObserved.Principal.UserId -eq $taskExpected.user) { throw 'Principal representation regression setup failed.' }
+  try { Assert-OwnedTask $taskObserved $taskExpected } catch { throw 'Equivalent current-account SID representation was rejected.' }
+  $taskObserved.Principal.UserId = $taskIdentity.Name
   Assert-OwnedTask $taskObserved $taskExpected
+  $wrongSid = if ($taskExpected.sid -ne 'S-1-0-0') { 'S-1-0-0' } else { 'S-1-5-18' }
+  $unknownPrincipal = $env:COMPUTERNAME + '\splyce-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
   foreach ($change in @(
-    @{ key = 'UserId'; value = 'other' }, @{ key = 'Execute'; value = 'C:\other.exe' },
-    @{ key = 'Trigger'; value = [pscustomobject]@{ enabled = $true } }
+    @{ key = 'UserId'; value = $wrongSid; label = 'wrong SID' },
+    @{ key = 'UserId'; value = $unknownPrincipal; label = 'unresolved principal' },
+    @{ key = 'Execute'; value = 'C:\other.exe'; label = 'executable' },
+    @{ key = 'Trigger'; value = [pscustomobject]@{ enabled = $true }; label = 'trigger' }
   )) {
     $badTask = [pscustomobject]@{ TaskName = 'selfcheck'; TaskPath = '\'; Principal = [pscustomobject]@{ UserId = $taskExpected.user; LogonType = 'Interactive'; RunLevel = 'Limited' }; Actions = @([pscustomobject]@{ Execute = $taskExpected.shell; Arguments = $taskExpected.arguments; WorkingDirectory = $taskExpected.root }); Triggers = $null }
     if ($change.key -eq 'UserId') { $badTask.Principal.UserId = $change.value }
@@ -105,7 +114,7 @@ if ($SelfCheck) {
     else { $badTask.Triggers = @($change.value) }
     $rejected = $false
     try { Assert-OwnedTask $badTask $taskExpected } catch { $rejected = $true }
-    if (-not $rejected) { throw "Invalid task $($change.key) was accepted." }
+    if (-not $rejected) { throw "Invalid task $($change.label) was accepted." }
   }
   & (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'standard-desktop-worker.ps1') -SelfCheck
   if ($LASTEXITCODE -ne 0) { throw 'Profile probe collision selfcheck failed.' }
