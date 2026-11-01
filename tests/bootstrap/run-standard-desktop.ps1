@@ -38,6 +38,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -71,6 +72,19 @@ public static class StandardDesktopLauncher {
   public static Observation Controller { get; private set; }
   public static Observation Derived { get; private set; }
   public static Observation Child { get; private set; }
+  public sealed class AclObservation {
+    public bool NullDacl { get; set; }
+    public bool CurrentUserAllowFull { get; set; } public bool CurrentUserDeny { get; set; }
+    public bool SystemAllowFull { get; set; } public bool AdministratorsAllowFull { get; set; }
+    public bool OtherAceTypes { get; set; } public int NativeError { get; set; }
+  }
+  public sealed class SecurityObservation {
+    public bool? OwnerMatchesCurrentUser { get; set; } public AclObservation Dacl { get; set; }
+    public string MandatoryLabel { get; set; } = "Unknown";
+    public int DaclQueryError { get; set; } public int LabelQueryError { get; set; }
+  }
+  public static SecurityObservation ChildSecurity { get; private set; }
+  public static AclObservation TokenDefaultDacl { get; private set; }
   public static uint? NativeExitCode { get; private set; }
   public static string NativeExitHex { get { return FormatExit(NativeExitCode); } }
   public static bool CleanupSucceeded { get; private set; } = true;
@@ -85,6 +99,9 @@ public static class StandardDesktopLauncher {
   [DllImport("advapi32.dll")] static extern bool IsValidSid(IntPtr sid);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool SetTokenInformation(IntPtr token, int kind, IntPtr label, int size);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+  [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(IntPtr handle, int objectType, uint information, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+  [DllImport("advapi32.dll")] static extern bool IsValidSecurityDescriptor(IntPtr descriptor);
+  [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
   [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessAsUserW(IntPtr token, string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref Startup startup, out ProcessInfo process);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessW(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref Startup startup, out ProcessInfo process);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObjectW(IntPtr attributes, string name);
@@ -98,8 +115,8 @@ public static class StandardDesktopLauncher {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process, out uint exit);
   static void Check(bool success, string operation) { if (!success) throw new Win32Exception(Marshal.GetLastWin32Error(), operation); }
   static string FormatExit(uint? exit) { return exit.HasValue ? "0x" + exit.Value.ToString("X8", System.Globalization.CultureInfo.InvariantCulture) : null; }
-  static IntPtr Info(IntPtr token, int kind, int expectedSize = 0) {
-    int length;
+  static IntPtr Info(IntPtr token, int kind, int expectedSize = 0) { int length; return Info(token, kind, out length, expectedSize); }
+  static IntPtr Info(IntPtr token, int kind, out int length, int expectedSize = 0) {
     bool probe = GetTokenInformation(token, kind, IntPtr.Zero, 0, out length);
     int error = Marshal.GetLastWin32Error();
     if (probe || (error != 122 && error != 24) || length <= 0 || length > 65536 || (expectedSize != 0 && length != expectedSize)) throw new InvalidOperationException("Invalid token information length: kind=" + kind + "; bytes=" + length + "; error=" + error);
@@ -107,6 +124,107 @@ public static class StandardDesktopLauncher {
     try { int returned; Check(GetTokenInformation(token, kind, buffer, length, out returned), "Read token information");
       if (returned != length) throw new InvalidOperationException("Incomplete token information."); return buffer;
     } catch { Marshal.FreeHGlobal(buffer); throw; }
+  }
+  static AclObservation SummarizeAcl(RawAcl acl, string currentSid) {
+    var summary = new AclObservation { NullDacl = acl == null };
+    if (acl == null) return summary;
+    foreach (GenericAce generic in acl) {
+      if ((generic.AceFlags & AceFlags.InheritOnly) != 0) continue;
+      CommonAce ace = generic as CommonAce;
+      if (ace == null || (ace.AceType != AceType.AccessAllowed && ace.AceType != AceType.AccessDenied)) { summary.OtherAceTypes = true; continue; }
+      string sid = ace.SecurityIdentifier.Value;
+      uint mask = unchecked((uint)ace.AccessMask);
+      bool full = (mask & 0x1FFFFF) == 0x1FFFFF || (mask & 0x10000000) != 0;
+      bool allowed = ace.AceType == AceType.AccessAllowed;
+      if (sid == currentSid) { summary.CurrentUserAllowFull |= allowed && full; summary.CurrentUserDeny |= !allowed; }
+      if (sid == "S-1-5-18") summary.SystemAllowFull |= allowed && full;
+      if (sid == "S-1-5-32-544") summary.AdministratorsAllowFull |= allowed && full;
+    }
+    return summary;
+  }
+  static string ReadMandatoryLabel(RawAcl sacl) {
+    if (sacl == null) return "Unknown";
+    string label = "Unknown"; int count = 0;
+    foreach (GenericAce ace in sacl) {
+      if ((int)ace.AceType != 17 || (ace.AceFlags & AceFlags.InheritOnly) != 0) continue;
+      byte[] bytes = new byte[ace.BinaryLength]; ace.GetBinaryForm(bytes, 0);
+      string sid = new SecurityIdentifier(bytes, 8).Value; count++;
+      label = sid == "S-1-16-8192" ? "Medium" : sid == "S-1-16-12288" ? "High" : "Unknown";
+    }
+    return count == 1 ? label : "Unknown";
+  }
+  static RawSecurityDescriptor ReadOwnedDescriptor(IntPtr process, uint information) {
+    IntPtr owner, group, dacl, sacl, descriptor = IntPtr.Zero;
+    uint error = GetSecurityInfo(process, 6, information, out owner, out group, out dacl, out sacl, out descriptor);
+    try {
+      if (error != 0) throw new Win32Exception(unchecked((int)error));
+      if (descriptor == IntPtr.Zero || !IsValidSecurityDescriptor(descriptor)) throw new InvalidDataException("Invalid owned descriptor.");
+      uint length = GetSecurityDescriptorLength(descriptor);
+      if (length < 20 || length > 65536) throw new InvalidDataException("Unbounded owned descriptor.");
+      byte[] bytes = new byte[length]; Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+      return new RawSecurityDescriptor(bytes, 0);
+    } finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+  }
+  static SecurityObservation ReadOwnedSecurity(IntPtr process, string currentSid) {
+    var summary = new SecurityObservation();
+    try {
+      RawSecurityDescriptor descriptor = ReadOwnedDescriptor(process, 0x5);
+      summary.OwnerMatchesCurrentUser = descriptor.Owner == null ? (bool?)null : descriptor.Owner.Value == currentSid;
+      summary.Dacl = SummarizeAcl(descriptor.DiscretionaryAcl, currentSid);
+    } catch (Win32Exception error) { summary.DaclQueryError = error.NativeErrorCode; }
+      catch (ArgumentException) { summary.DaclQueryError = 13; }
+      catch (InvalidDataException) { summary.DaclQueryError = 13; }
+    try { summary.MandatoryLabel = ReadMandatoryLabel(ReadOwnedDescriptor(process, 0x10).SystemAcl); }
+    catch (Win32Exception error) { summary.LabelQueryError = error.NativeErrorCode; }
+    catch (ArgumentException) { summary.LabelQueryError = 13; }
+    catch (InvalidDataException) { summary.LabelQueryError = 13; }
+    return summary;
+  }
+  static RawAcl ReadBoundedAcl(IntPtr acl, IntPtr buffer, int length) {
+    long offset = acl.ToInt64() - buffer.ToInt64();
+    if (offset < IntPtr.Size || offset > length - 8) throw new InvalidDataException("Default ACL pointer outside token buffer.");
+    int size = unchecked((ushort)Marshal.ReadInt16(acl, 2));
+    if (size < 8 || size > length - offset) throw new InvalidDataException("Default ACL outside token buffer.");
+    byte[] bytes = new byte[size]; Marshal.Copy(acl, bytes, 0, size); return new RawAcl(bytes, 0);
+  }
+  static AclObservation ReadDefaultDacl(IntPtr token, string currentSid) {
+    IntPtr buffer = IntPtr.Zero;
+    try {
+      int length; buffer = Info(token, 6, out length);
+      if (length < IntPtr.Size) throw new InvalidDataException("Incomplete default ACL information.");
+      IntPtr acl = Marshal.ReadIntPtr(buffer);
+      return SummarizeAcl(acl == IntPtr.Zero ? null : ReadBoundedAcl(acl, buffer, length), currentSid);
+    } catch (Win32Exception error) { return new AclObservation { NativeError = error.NativeErrorCode }; }
+      catch (ArgumentException) { return new AclObservation { NativeError = 13 }; }
+      catch (InvalidDataException) { return new AclObservation { NativeError = 13 }; }
+      catch (InvalidOperationException) { return new AclObservation { NativeError = 13 }; }
+    finally { if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer); }
+  }
+  static RawAcl LabelFixture(int rid) {
+    var sid = new SecurityIdentifier("S-1-16-" + rid);
+    byte[] bytes = new byte[16 + sid.BinaryLength];
+    bytes[0] = 2; BitConverter.GetBytes((ushort)bytes.Length).CopyTo(bytes, 2); bytes[4] = 1;
+    bytes[8] = 17; BitConverter.GetBytes((ushort)(8 + sid.BinaryLength)).CopyTo(bytes, 10); bytes[12] = 1;
+    sid.GetBinaryForm(bytes, 16); return new RawAcl(bytes, 0);
+  }
+  static void SelfCheckMetadata() {
+    var user = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+    var acl = new RawAcl(2, 4);
+    acl.InsertAce(0, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x1FFFFF, user, false, null));
+    acl.InsertAce(1, new CommonAce(AceFlags.None, AceQualifier.AccessDenied, 1, user, false, null));
+    acl.InsertAce(2, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x10000000, new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), false, null));
+    acl.InsertAce(3, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x1FFFFF, new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), false, null));
+    AclObservation full = SummarizeAcl(acl, user.Value), empty = SummarizeAcl(new RawAcl(2, 0), user.Value);
+    if (!full.CurrentUserAllowFull || !full.CurrentUserDeny || !full.SystemAllowFull || !full.AdministratorsAllowFull || full.OtherAceTypes || full.NullDacl ||
+        empty.CurrentUserAllowFull || empty.CurrentUserDeny || empty.NullDacl || !SummarizeAcl(null, user.Value).NullDacl) throw new InvalidOperationException("Direct ACL metadata selfcheck failed.");
+    var inherited = new RawAcl(2, 1);
+    inherited.InsertAce(0, new CommonAce(AceFlags.InheritOnly, AceQualifier.AccessAllowed, 0x1FFFFF, user, false, null));
+    if (SummarizeAcl(inherited, user.Value).CurrentUserAllowFull) throw new InvalidOperationException("Inherit-only ACE was treated as direct access.");
+    if (ReadMandatoryLabel(LabelFixture(8192)) != "Medium" || ReadMandatoryLabel(LabelFixture(12288)) != "High" ||
+        ReadMandatoryLabel(LabelFixture(8448)) != "Unknown" || ReadMandatoryLabel(LabelFixture(4096)) != "Unknown" || ReadMandatoryLabel(null) != "Unknown") throw new InvalidOperationException("Mandatory label metadata selfcheck failed.");
+    bool refused = false;
+    try { ReadBoundedAcl(new IntPtr(100), new IntPtr(100), 32); } catch (InvalidDataException) { refused = true; }
+    if (!refused) throw new InvalidOperationException("Out-of-bounds default ACL pointer was accepted.");
   }
   static int Scalar(IntPtr token, int kind) {
     IntPtr buffer = Info(token, kind, 4);
@@ -162,7 +280,7 @@ public static class StandardDesktopLauncher {
     var command = new StringBuilder(Quote(shell) + " -NoProfile -NonInteractive -File " + Quote(worker) + " -RunDirectory " + Quote(runDirectory) + " -Nonce " + nonce + " -Mode " + mode);
     IntPtr current = IntPtr.Zero, linked = IntPtr.Zero, primary = IntPtr.Zero, restricted = IntPtr.Zero, job = IntPtr.Zero;
     ProcessInfo child = new ProcessInfo(); bool assigned = false;
-    CleanupSucceeded = true; Derived = null; Child = null; NativeExitCode = null;
+    CleanupSucceeded = true; Derived = null; Child = null; NativeExitCode = null; ChildSecurity = null; TokenDefaultDacl = null;
     try {
       Check(OpenProcessToken(GetCurrentProcess(), 0x8B, out current), "Open current primary token");
       Controller = Inspect(current);
@@ -192,6 +310,8 @@ public static class StandardDesktopLauncher {
         Check(OpenProcessToken(child.Process, 8, out childToken), "Inspect suspended worker token");
         Child = Inspect(childToken); RequireWorker(Child, Controller);
       } finally { if (childToken != IntPtr.Zero) CloseHandle(childToken); }
+      ChildSecurity = ReadOwnedSecurity(child.Process, Controller.Sid);
+      TokenDefaultDacl = ReadDefaultDacl(restricted != IntPtr.Zero ? restricted : current, Controller.Sid);
       if (failBeforeResume) throw new InvalidOperationException("Selfcheck: before-resume failure.");
       Check(ResumeThread(child.Thread) != 0xFFFFFFFF, "Resume owned worker");
       uint waited = WaitForSingleObject(child.Process, mode == "Gate" ? 5700000u : mode == "Token" ? 120000u : 720000u);
@@ -228,6 +348,7 @@ public static class StandardDesktopLauncher {
   }
   public static int RunWorker(string shell, string root, string directory, string nonce, string mode) { return Launch(shell, root, directory, nonce, mode, false); }
   public static bool SelfCheck(string shell, string root) {
+    SelfCheckMetadata();
     Startup startup = HiddenStartup();
     if (WorkerCreationFlags != 0x00000004 || startup.Flags != 1 || startup.Show != 0) throw new InvalidOperationException("Suspended hidden worker flags selfcheck failed.");
     if (FormatExit(null) != null || FormatExit(0) != "0x00000000" || FormatExit(255) != "0x000000FF" ||
@@ -416,6 +537,8 @@ try {
       }
       nativeExitCode = [StandardDesktopLauncher]::NativeExitCode
       nativeExitHex = [StandardDesktopLauncher]::NativeExitHex
+      ownedChildSecurity = [StandardDesktopLauncher]::ChildSecurity
+      derivedTokenDefaultDacl = [StandardDesktopLauncher]::TokenDefaultDacl
       completion = @{
         status = if ($completion.status -in @('completed', 'failed')) { $completion.status } else { $null }
         exitCode = if (($completion.exitCode -is [int] -or $completion.exitCode -is [long]) -and
