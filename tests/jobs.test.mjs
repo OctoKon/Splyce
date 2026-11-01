@@ -570,3 +570,53 @@ test("grace must be a non-negative integer", () => {
   });
   assert.deepEqual(ids(strict), []);
 });
+
+test("disabled ticks retain the job and report each missed slot", () => {
+  const job = interval({ catchUp: "latest" });
+  const { plans, states } = run(
+    [job],
+    [
+      HOUR - 1,
+      { now: 3 * HOUR, enabled: false },
+      { now: 5 * HOUR, enabled: false },
+    ],
+  );
+  assert.deepEqual(plans.flatMap(ids), []);
+  assert.deepEqual(
+    plans.slice(1).map((p) => p.missed.map((m) => [m.reason, m.count])),
+    [[["scheduler_disabled", 3]], [["scheduler_disabled", 2]]],
+  );
+  assert.deepEqual(states[0].missed.byReason, { scheduler_disabled: 5 });
+  assert.equal(states[0].enabledAtLastTick, false);
+});
+
+test("re-enable never launches a burst or an implicit catch-up", () => {
+  const job = interval({ catchUp: "latest" });
+  // Disabled, then the process is off for days, then it comes back enabled.
+  const { plans, states } = run(
+    [job],
+    [
+      HOUR - 1,
+      { now: 2 * HOUR, enabled: false },
+      { now: 100 * HOUR, enabled: true },
+    ],
+  );
+  assert.deepEqual(ids(plans[2]), []);
+  assert.deepEqual(
+    plans[2].missed.map((m) => [m.reason, m.count]),
+    [["scheduler_disabled", 98]],
+  );
+  // After re-arming, the next slot runs normally.
+  const next = run([job], [101 * HOUR], { states }).plans[0];
+  assert.deepEqual(
+    next.dispatch.map((d) => [d.occurrenceId, d.catchUp]),
+    [["job-i@r1#101", false]],
+  );
+});
+
+test("a job created while disabled starts disarmed and re-arms on the first enabled tick", () => {
+  const job = interval();
+  const { plans } = run([job], [{ now: 0, enabled: false }, HOUR, 2 * HOUR]);
+  assert.deepEqual(plans.map(ids), [[], [], ["job-i@r1#2"]]);
+  assert.equal(plans[1].missed[0].reason, "scheduler_disabled");
+});

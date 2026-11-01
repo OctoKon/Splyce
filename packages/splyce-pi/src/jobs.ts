@@ -612,7 +612,10 @@ export function planTick(input: TickInput): TickPlan {
     const cursorUtcMs = Math.max(state.cursorUtcMs, now);
     let summary = state.missed;
     let lastDispatchedId = state.lastDispatchedId;
-    if (!enabled) {
+    // The first enabled tick after a disabled one only re-arms the job: the
+    // whole window belongs to the disabled period, so re-enabling never runs
+    // a slot implicitly, not even one catch-up (capability-map.md retention).
+    if (!enabled || !state.enabledAtLastTick) {
       report(job.jobId, "scheduler_disabled", window);
       summary = addMissed(summary, "scheduler_disabled", window);
     } else if (window.latest) {
