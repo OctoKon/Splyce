@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InMemoryModelsStore } from "@earendil-works/pi-ai";
@@ -9,7 +9,7 @@ import { parseAuthCommand } from "../src/cli/auth-command.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 
-const tempDir = join(tmpdir(), `pi-test-auth-check-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+let tempDir: string;
 
 async function createRuntime(credentials: AuthStorage | ReadOnlyAuthStorage): Promise<ModelRuntime> {
 	return ModelRuntime.create({
@@ -23,8 +23,7 @@ async function createRuntime(credentials: AuthStorage | ReadOnlyAuthStorage): Pr
 
 describe("auth check command", () => {
 	beforeEach(() => {
-		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true });
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "pi-test-auth-check-"));
 	});
 
 	afterEach(() => {

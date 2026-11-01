@@ -49,6 +49,9 @@
       "name": "mocha",
       "version": "10.8.2",
       "license": "MIT",
+      "packageSpec": "file:patches/mocha/mocha-10.8.2.tgz",
+      "integrity": "sha512-ie570meHyAylZKzbeVt1VlIy+KlIm0HUTC3AlgQ2FqfpQy1bhjuT8yRLEVwVcfjtfRf/x+1awgq/7DhvJFSKgw==",
+      "backport": "../../patches/mocha/README.md",
       "source": "https://www.npmjs.com/package/mocha"
     },
     {

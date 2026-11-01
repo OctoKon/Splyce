@@ -1,23 +1,29 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type CredentialStore, createModels, type Provider } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.ts";
 
 describe("AuthStorage", () => {
-	const tempDir = join(tmpdir(), `pi-test-auth-storage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-	const authJsonPath = join(tempDir, "auth.json");
+	let tempDir: string;
+	let authJsonPath: string;
 
-	beforeEach(() => {
-		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true });
-		mkdirSync(tempDir, { recursive: true });
+	beforeAll(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-test-auth-storage-"));
+		authJsonPath = join(tempDir, "auth.json");
 	});
 
 	afterEach(() => {
-		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true });
+		if (existsSync(tempDir)) {
+			for (const entry of readdirSync(tempDir)) rmSync(join(tempDir, entry), { recursive: true, force: true });
+		}
 		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		rmSync(tempDir, { recursive: true, force: true });
 	});
 
 	function writeAuthJson(data: Record<string, unknown>): void {
