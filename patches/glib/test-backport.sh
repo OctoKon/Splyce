@@ -31,11 +31,16 @@ set +e
 cargo test --locked --manifest-path "$tmp/glib/Cargo.toml" --release --lib "$test_name" -- --exact 2>&1 | tee "$tmp/mutant.log"
 status=${PIPESTATUS[0]}
 set -e
+failed_test=false
+if grep -Fxq "test $test_name ... FAILED" "$tmp/mutant.log" ||
+    { grep -Fq "'$test_name' --exact" "$tmp/mutant.log" &&
+        grep -Fq '(signal: 11, SIGSEGV:' "$tmp/mutant.log"; }; then
+    failed_test=true
+fi
 if [ "$status" -ne 101 ] ||
     ! grep -Fxq 'running 1 test' "$tmp/mutant.log" ||
-    ! grep -Fq "test $test_name ..." "$tmp/mutant.log" ||
     ! grep -Fq 'error: test failed' "$tmp/mutant.log" ||
-    ! grep -Eq "test $test_name \.\.\. FAILED|signal: [0-9]+" "$tmp/mutant.log"; then
+    [ "$failed_test" != true ]; then
     echo 'ERROR: reversed backport did not produce the expected test failure' >&2
     exit 1
 fi
