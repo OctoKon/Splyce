@@ -473,8 +473,23 @@ export interface JobState {
   /** Whether the scheduler was enabled at the last tick that saw this job. */
   readonly enabledAtLastTick: boolean;
   readonly lastDispatchedId?: string;
+  /** Set while a dispatched occurrence has not been completed; no slot starts meanwhile. */
+  readonly running?: {
+    readonly occurrenceId: string;
+    readonly startedUtcMs: number;
+  };
+  readonly lastOutcome?: {
+    readonly occurrenceId: string;
+    readonly outcome: OccurrenceOutcome;
+  };
+  /** A durably paused job keeps its definition and reports each slot it skips. */
+  readonly paused?: { readonly reason: string; readonly sinceUtcMs: number };
   readonly missed: MissedSummary;
 }
+
+/** How a dispatched occurrence ended; `uncertain` is for an effect whose outcome was not observed. */
+export type OccurrenceOutcome =
+  "succeeded" | "failed" | "cancelled" | "uncertain";
 
 export interface TickInput {
   readonly nowUtcMs: number;
@@ -615,9 +630,17 @@ export function planTick(input: TickInput): TickPlan {
     // The first enabled tick after a disabled one only re-arms the job: the
     // whole window belongs to the disabled period, so re-enabling never runs
     // a slot implicitly, not even one catch-up (capability-map.md retention).
+    let running = state.running;
     if (!enabled || !state.enabledAtLastTick) {
       report(job.jobId, "scheduler_disabled", window);
       summary = addMissed(summary, "scheduler_disabled", window);
+    } else if (state.paused) {
+      report(job.jobId, "paused", window);
+      summary = addMissed(summary, "paused", window);
+    } else if (running) {
+      // A slot never starts while the previous occurrence is unfinished.
+      report(job.jobId, "overlap", window);
+      summary = addMissed(summary, "overlap", window);
     } else if (window.latest) {
       // At most one dispatch per job per tick, and only the latest slot:
       // earlier slots in the window are reported, never run as a burst. A
@@ -635,15 +658,19 @@ export function planTick(input: TickInput): TickPlan {
       if (runs) {
         dispatch.push(Object.freeze({ ...latest, catchUp: !onTime }));
         lastDispatchedId = latest.occurrenceId;
+        running = Object.freeze({
+          occurrenceId: latest.occurrenceId,
+          startedUtcMs: now,
+        });
       }
     }
     states.push(
       Object.freeze({
-        jobId: job.jobId,
-        revision: state.revision,
+        ...state,
         cursorUtcMs,
         enabledAtLastTick: enabled,
         ...(lastDispatchedId !== undefined ? { lastDispatchedId } : {}),
+        ...(running ? { running } : {}),
         missed: summary,
       }),
     );
@@ -654,5 +681,75 @@ export function planTick(input: TickInput): TickPlan {
     dispatch: Object.freeze(dispatch),
     missed: Object.freeze(missed),
     states: Object.freeze(states),
+  });
+}
+
+function stateWithout<K extends keyof JobState>(
+  state: JobState,
+  key: K,
+): JobState {
+  const { [key]: _removed, ...rest } = state;
+  return rest as JobState;
+}
+
+/**
+ * Records how the running occurrence ended and frees the job for its next
+ * slot. Completing anything other than the running occurrence is refused, so
+ * a late or duplicate completion cannot free a newer run.
+ */
+export function completeOccurrence(
+  state: JobState,
+  occurrenceId: string,
+  outcome: OccurrenceOutcome,
+): JobState {
+  if (!state.running || state.running.occurrenceId !== occurrenceId) {
+    throw new JobError("NOT_RUNNING", occurrenceId);
+  }
+  if (!["succeeded", "failed", "cancelled", "uncertain"].includes(outcome)) {
+    throw new JobError("INVALID_OUTCOME", String(outcome));
+  }
+  return Object.freeze({
+    ...stateWithout(state, "running"),
+    lastOutcome: Object.freeze({ occurrenceId, outcome }),
+  });
+}
+
+/** Durably pauses a job with a reason; it keeps its definition and reports each skipped slot. */
+export function pauseJob(
+  state: JobState,
+  reason: string,
+  nowUtcMs: number,
+): JobState {
+  assertInstant("nowUtcMs", nowUtcMs);
+  if (typeof reason !== "string" || reason.trim().length === 0) {
+    throw new JobError("INVALID_PAUSE", "a pause needs a reason");
+  }
+  if (state.paused) return state;
+  return Object.freeze({
+    ...state,
+    paused: Object.freeze({ reason, sinceUtcMs: nowUtcMs }),
+  });
+}
+
+/**
+ * Resumes a paused job from now on. Slots since its last decided instant are
+ * reported as paused rather than replayed, even if no tick ran in between.
+ */
+export function resumeJob(
+  job: JobDefinition,
+  state: JobState,
+  nowUtcMs: number,
+): JobState {
+  assertInstant("nowUtcMs", nowUtcMs);
+  if (!state.paused) return state;
+  const checked = validateJob(job);
+  if (checked.jobId !== state.jobId) {
+    throw new JobError("INVALID_JOB", "definition does not match the state");
+  }
+  const skipped = scanOccurrences(checked, state.cursorUtcMs, nowUtcMs);
+  return Object.freeze({
+    ...stateWithout(state, "paused"),
+    cursorUtcMs: Math.max(state.cursorUtcMs, nowUtcMs),
+    missed: addMissed(state.missed, "paused", skipped),
   });
 }
