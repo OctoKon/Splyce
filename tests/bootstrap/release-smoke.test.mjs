@@ -296,6 +296,8 @@ test("driver provenance rejects tampered bytes and mismatched versions", () => {
       version: "155.0.4283.62",
       sourcePage:
         "https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver",
+      versionSource:
+        "https://msedgedriver.microsoft.com/LATEST_RELEASE_155_WINDOWS",
       downloadUrl:
         "https://msedgedriver.microsoft.com/155.0.4283.62/edgedriver_win64.zip",
       archiveSha256: "c".repeat(64),
@@ -311,6 +313,33 @@ test("driver provenance rejects tampered bytes and mismatched versions", () => {
     runtimeScope: manifest.webview2.registryScope,
   };
   assertDriverProvenance(manifest, pin, actual);
+  assertDriverProvenance(
+    {
+      ...manifest,
+      edgeDriver: {
+        ...manifest.edgeDriver,
+        versionSource: manifest.edgeDriver.sourcePage,
+      },
+    },
+    pin,
+    actual,
+  );
+  for (const versionSource of [
+    undefined,
+    "https://example.invalid/LATEST_RELEASE_155_WINDOWS",
+    "https://msedgedriver.microsoft.com/LATEST_RELEASE_156_WINDOWS",
+  ]) {
+    assert.throws(() =>
+      assertDriverProvenance(
+        {
+          ...manifest,
+          edgeDriver: { ...manifest.edgeDriver, versionSource },
+        },
+        pin,
+        actual,
+      ),
+    );
+  }
 
   assert.throws(() =>
     assertDriverProvenance(

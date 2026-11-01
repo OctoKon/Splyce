@@ -99,6 +99,12 @@ function startCallbackServer(expectedState: string): Promise<CallbackServer> {
 					return;
 				}
 
+				const state = url.searchParams.get("state");
+				if (state !== expectedState) {
+					sendHtml(response, 400, oauthErrorHtml(state ? "OAuth state mismatch" : "Missing OAuth state"));
+					return;
+				}
+
 				const error = url.searchParams.get("error");
 				if (error) {
 					sendHtml(response, 400, oauthErrorHtml("ChatGPT was not connected.", `Error: ${error}`));

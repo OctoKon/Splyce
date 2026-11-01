@@ -59,3 +59,78 @@
     </dl>
   {/if}
 </section>
+
+<style>
+  section.usage {
+    display: flex;
+    flex-direction: column;
+    gap: var(--splyce-space-2, 0.5rem);
+    padding: var(--splyce-space-3, 0.75rem);
+    background: var(--splyce-surface-raised, #ffffff);
+    border: 1px solid var(--splyce-border-default, #e5e7eb);
+    border-radius: var(--radius-md, 8px);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  }
+  [data-testid="usage-loading"] {
+    margin: 0;
+    padding: var(--splyce-space-2, 0.5rem);
+    background: rgba(180, 83, 9, 0.06);
+    border-radius: var(--radius-md, 6px);
+    color: var(--splyce-status-warning, #b45309);
+    font-size: var(--splyce-font-size-xs, 0.75rem);
+    font-weight: 500;
+  }
+  [data-testid="usage-error"] {
+    margin: 0;
+    padding: var(--splyce-space-2, 0.5rem);
+    background: rgba(185, 28, 28, 0.08);
+    border: 1px solid var(--splyce-status-danger, #b91c1c);
+    border-radius: var(--radius-md, 6px);
+    color: var(--splyce-status-danger, #b91c1c);
+    font-size: var(--splyce-font-size-sm, 0.875rem);
+    font-weight: 500;
+  }
+  [data-testid="usage-unavailable-note"],
+  [data-testid="usage-not-reported"],
+  [data-testid="usage-unavailable"] {
+    margin: 0;
+    color: var(--splyce-text-muted, #6b7280);
+    font-size: var(--splyce-font-size-sm, 0.875rem);
+    font-style: italic;
+  }
+  .semantics {
+    margin: 0;
+    font-size: var(--splyce-font-size-xs, 0.75rem);
+    font-weight: 600;
+    color: var(--splyce-text-secondary, #4b5563);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  dl {
+    display: grid;
+    grid-template-columns: minmax(120px, max-content) 1fr;
+    row-gap: var(--splyce-space-1, 0.25rem);
+    column-gap: var(--splyce-space-3, 0.75rem);
+    margin: var(--splyce-space-1, 0.25rem) 0 0;
+    padding: var(--splyce-space-2, 0.5rem);
+    background: var(--splyce-surface, #ffffff);
+    border: 1px solid var(--splyce-border-subtle, #f3f4f6);
+    border-radius: var(--radius-md, 6px);
+    font-size: var(--splyce-font-size-sm, 0.875rem);
+  }
+  dt {
+    color: var(--splyce-text-secondary, #4b5563);
+    font-weight: 500;
+  }
+  dd {
+    margin: 0;
+    color: var(--splyce-text-primary, #111827);
+    font-family: var(
+      --splyce-font-family-mono,
+      "Cascadia Code",
+      Consolas,
+      monospace
+    );
+    font-weight: 600;
+  }
+</style>

@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
@@ -6,11 +6,12 @@ import lockfile from "proper-lockfile";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { FileModelsStore } from "../src/core/models-store.ts";
 
-const sharedTempDir = join(tmpdir(), `pi-models-store-shared-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-const sharedModelsPath = join(sharedTempDir, "models-store.json");
+let sharedTempDir: string;
+let sharedModelsPath: string;
 
 beforeAll(() => {
-	mkdirSync(sharedTempDir, { recursive: true });
+	sharedTempDir = mkdtempSync(join(tmpdir(), "pi-models-store-shared-"));
+	sharedModelsPath = join(sharedTempDir, "models-store.json");
 });
 
 afterAll(() => {
