@@ -55,8 +55,8 @@
     if (diffOpen && diffDialog && !diffDialog.open) diffDialog.showModal();
   });
 
-  function openDiff(path: string | null = null) {
-    diffTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  function openDiff(trigger: HTMLButtonElement, path: string | null = null) {
+    diffTrigger = trigger;
     diffFile = path;
     diffOpen = true;
   }
@@ -586,7 +586,11 @@
             </div>
             <div class="diff-files">
               {#each diffFiles as file (file.path)}
-                <button class="diff-file" type="button" onclick={() => openDiff(file.path)}>
+                <button
+                  class="diff-file"
+                  type="button"
+                  onclick={(event) => openDiff(event.currentTarget, file.path)}
+                >
                   <Icon name="file" size={13} />
                   <span class="df-name">{file.path}</span>
                   <span class="df-add">+{file.additions}</span>
@@ -594,7 +598,11 @@
                 </button>
               {/each}
             </div>
-            <button class="btn secondary sm diff-review" type="button" onclick={() => openDiff()}>
+            <button
+              class="btn secondary sm diff-review"
+              type="button"
+              onclick={(event) => openDiff(event.currentTarget)}
+            >
               Review all changes
             </button>
             <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
