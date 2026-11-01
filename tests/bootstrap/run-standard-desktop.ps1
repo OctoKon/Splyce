@@ -43,6 +43,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 public static class StandardDesktopLauncher {
+  const uint WorkerCreationFlags = 0x00000004; // Assign the suspended worker to its job before any worker code runs.
   [StructLayout(LayoutKind.Sequential)] struct Label { public IntPtr Sid; public uint Attributes; }
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
     public int Size; public string Reserved, Desktop, Title;
@@ -152,6 +153,7 @@ public static class StandardDesktopLauncher {
     int trailing = path.Length - path.TrimEnd('\\').Length;
     return "\"" + path + new string('\\', trailing) + "\"";
   }
+  static Startup HiddenStartup() { return new Startup { Size = Marshal.SizeOf<Startup>(), Desktop = "winsta0\\default", Flags = 1, Show = 0 }; }
   static int Launch(string shell, string root, string runDirectory, string nonce, string mode, bool failBeforeResume) {
     if (!Regex.IsMatch(nonce, "\\A[0-9a-f]{32}\\z") || (mode != "Token" && mode != "Smoke" && mode != "Gate")) throw new ArgumentException("Invalid fixed worker invocation.");
     string worker = Path.Combine(root, "tests", "bootstrap", "standard-desktop-worker.ps1");
@@ -181,10 +183,9 @@ public static class StandardDesktopLauncher {
       job = CreateJobObjectW(IntPtr.Zero, null); Check(job != IntPtr.Zero, "Create owned worker job");
       var limits = new ExtendedLimits { Basic = new BasicLimits { Flags = 0x2000 } };
       Check(SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf<ExtendedLimits>()), "Set kill-on-close job");
-      var startup = new Startup { Size = Marshal.SizeOf<Startup>(), Desktop = "winsta0\\default", Flags = 1, Show = 0 };
-      const uint flags = 0x08000004; // No console; assign to the owned job before any worker code runs.
-      if (Controller.Elevated) Check(CreateProcessAsUserW(restricted, shell, command, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, root, ref startup, out child), "Create restricted worker");
-      else Check(CreateProcessW(shell, command, IntPtr.Zero, IntPtr.Zero, false, flags, IntPtr.Zero, root, ref startup, out child), "Create standard worker");
+      var startup = HiddenStartup();
+      if (Controller.Elevated) Check(CreateProcessAsUserW(restricted, shell, command, IntPtr.Zero, IntPtr.Zero, false, WorkerCreationFlags, IntPtr.Zero, root, ref startup, out child), "Create restricted worker");
+      else Check(CreateProcessW(shell, command, IntPtr.Zero, IntPtr.Zero, false, WorkerCreationFlags, IntPtr.Zero, root, ref startup, out child), "Create standard worker");
       Check(AssignProcessToJobObject(job, child.Process), "Assign suspended worker job"); assigned = true;
       IntPtr childToken = IntPtr.Zero;
       try {
@@ -227,6 +228,8 @@ public static class StandardDesktopLauncher {
   }
   public static int RunWorker(string shell, string root, string directory, string nonce, string mode) { return Launch(shell, root, directory, nonce, mode, false); }
   public static bool SelfCheck(string shell, string root) {
+    Startup startup = HiddenStartup();
+    if (WorkerCreationFlags != 0x00000004 || startup.Flags != 1 || startup.Show != 0) throw new InvalidOperationException("Suspended hidden worker flags selfcheck failed.");
     if (FormatExit(null) != null || FormatExit(0) != "0x00000000" || FormatExit(255) != "0x000000FF" ||
         FormatExit(0xC0000142) != "0xC0000142" || FormatExit(uint.MaxValue) != "0xFFFFFFFF") throw new InvalidOperationException("Native exit formatting selfcheck failed.");
     if (ClassifyIntegrity(0x2000) != "Medium") throw new InvalidOperationException("Exact medium integrity was rejected.");
