@@ -49,6 +49,7 @@
     "eslint-config-prettier": "10.1.8",
     "eslint-plugin-svelte": "3.23.1",
     "globals": "17.13.0",
+    "mocha": "file:../../../patches/mocha/mocha-10.8.2.tgz",
     "prettier": "3.9.10",
     "prettier-plugin-svelte": "4.1.1",
     "svelte": "5.57.2",
@@ -59,5 +60,33 @@
     "typescript-eslint": "8.72.1",
     "vite": "8.3.5",
     "webdriverio": "9.31.9"
+  },
+  "overrides": {
+    "@wdio/utils": {
+      "@puppeteer/browsers": "3.2.6"
+    },
+    "@wdio/config": {
+      "glob": "14.0.2"
+    },
+    "archiver-utils": {
+      "glob": "14.0.2"
+    },
+    "mocha": {
+      ".": "$mocha",
+      "serialize-javascript": "7.1.3",
+      "glob": "14.0.2"
+    },
+    "readdir-glob": {
+      "minimatch": "11.0.1"
+    },
+    "recursive-readdir": {
+      "minimatch": "11.0.1"
+    },
+    "filelist": {
+      "minimatch": "11.0.1"
+    },
+    "shelljs": {
+      "glob": "14.0.2"
+    }
   }
 }
