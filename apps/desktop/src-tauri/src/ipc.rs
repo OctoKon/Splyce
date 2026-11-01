@@ -886,12 +886,23 @@ fn configure_provider(
             .ok_or_else(|| BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"))?,
     };
     let created = !replay && secret.is_some();
-    let present =
-        read_owned(&reference).map_err(|_| BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"))?;
+    let present = match read_owned(&reference) {
+        Ok(present) => present,
+        Err(_) => {
+            if created {
+                delete_owned(&reference)
+                    .map_err(|_| BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"))?;
+            }
+            return Err(BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"));
+        }
+    };
     if secret
         .as_ref()
         .is_some_and(|secret| secret.as_bytes() != present.as_bytes())
     {
+        if created && delete_owned(&reference).is_err() {
+            return Err(BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"));
+        }
         return Err(BridgeError::setup("SETUP_REQUEST_CONFLICT"));
     }
     drop(present);
