@@ -516,6 +516,22 @@ test("shell cancel uses its own lifetime and requires a terminal cleanup acknowl
     () => {},
   );
   await tick();
+  await assert.rejects(
+    p.control.shell(
+      {
+        actionId: "a",
+        workspaceId: "w",
+        sessionId: "s",
+        ownershipEpoch: 1,
+        command: "fixture",
+        timeoutMs: 1000,
+      },
+      undefined,
+      () => {},
+    ),
+    { code: "SHELL_CLEANUP_UNCERTAIN" },
+  );
+  assert.equal(methods.filter((method) => method === "shell.start").length, 1);
   await p.control.credentialStatus({ target: binding().target });
   controller.abort();
   while (!nextPoll) await new Promise((r) => setTimeout(r, 2));

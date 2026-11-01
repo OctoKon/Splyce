@@ -249,12 +249,12 @@ export class NativeControl {
     const { actionId, workspaceId, sessionId, ownershipEpoch } = request;
     const key = { effectId, actionId, workspaceId, sessionId, ownershipEpoch };
     const binding = shellBinding(key);
+    if (this.#shells.has(binding)) throw shellError();
     const start = { ...request, ...key };
     if (
       this.#closed ||
       this.#pending.size >= 8 ||
       this.#shells.size >= 8 ||
-      this.#shells.has(binding) ||
       this.#sequence >= Number.MAX_SAFE_INTEGER ||
       !opaque(request.actionId) ||
       !opaque(request.sessionId) ||
