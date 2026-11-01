@@ -5,6 +5,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  acknowledgeMissed,
+  describeJobs,
   isoWeekday,
   DEFAULT_GRACE_MS,
   JobError,
@@ -791,4 +793,65 @@ test("a revision change keeps a running occurrence recorded", () => {
   });
   assert.equal(plan.states[0].running.occurrenceId, "job-i@r1#1");
   assert.deepEqual(ids(plan), []);
+});
+
+test("inspection shows each job's status, next slot and missed work", () => {
+  const a = interval({ jobId: "a" });
+  const b = interval({ jobId: "b" });
+  const c = daily({ jobId: "c" });
+  let { states } = run([a, b, c], [HOUR - 1, HOUR]);
+  states = states.map((s) =>
+    s.jobId === "b" ? pauseJob(s, "user paused", HOUR) : s,
+  );
+  const views = describeJobs({
+    schedulingEnabled: true,
+    jobs: [a, b, c],
+    states,
+  });
+  assert.deepEqual(
+    views.map((v) => [v.jobId, v.status]),
+    [
+      ["a", "running"],
+      ["b", "paused"],
+      ["c", "scheduled"],
+    ],
+  );
+  assert.equal(views[0].runningOccurrenceId, "a@r1#1");
+  assert.equal(views[1].pausedReason, "user paused");
+  assert.equal(views[0].nextUtcMs, 2 * HOUR);
+  assert.equal(iso(views[2].nextUtcMs), "1970-01-01T09:00:00.000Z");
+  assert.ok(Object.isFrozen(views) && Object.isFrozen(views[0]));
+});
+
+test("disabled and orphaned jobs remain inspectable", () => {
+  const job = interval({ catchUp: "latest" });
+  const { states } = run([job], [HOUR - 1, { now: 4 * HOUR, enabled: false }]);
+  const disabled = describeJobs({
+    schedulingEnabled: false,
+    jobs: [job],
+    states,
+  });
+  assert.equal(disabled[0].status, "scheduler_disabled");
+  assert.deepEqual(disabled[0].missed.byReason, { scheduler_disabled: 4 });
+  const orphaned = describeJobs({ schedulingEnabled: true, jobs: [], states });
+  assert.deepEqual(
+    orphaned.map((v) => [v.jobId, v.status, v.revision, v.nextUtcMs]),
+    [["job-i", "orphaned", "r1", undefined]],
+  );
+});
+
+test("acknowledging missed work clears the summary but keeps the cursor", () => {
+  const { states } = run(
+    [interval()],
+    [HOUR - 1, { now: 4 * HOUR, enabled: false }],
+  );
+  const acked = acknowledgeMissed(states[0]);
+  assert.deepEqual(acked.missed, { count: 0, byReason: {} });
+  assert.equal(acked.cursorUtcMs, states[0].cursorUtcMs);
+  assert.equal(acknowledgeMissed(acked), acked);
+  // Acknowledged slots #1-4 never run; only the next new slot does.
+  const later = run([interval()], [4 * HOUR + 1, 5 * HOUR], {
+    states: [acked],
+  });
+  assert.deepEqual(later.plans.map(ids), [[], ["job-i@r1#5"]]);
 });
