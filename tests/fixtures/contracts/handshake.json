@@ -1,8 +1,8 @@
 {
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "schemaVersion": 1,
-  "engineProtocolVersion": 1,
-  "bridgeProtocolVersion": 1,
+  "engineProtocolVersion": 2,
+  "bridgeProtocolVersion": 2,
   "piRevision": "d5b3de22d0e24a3e9c38a9410d3329b099717283",
   "entryMode": "sdk-host",
   "disabledBuiltinExtensions": ["llama.cpp", "codemode", "tool-search", "mcp"],
@@ -10,6 +10,12 @@
     "state": "unavailable",
     "policy": false,
     "store": false,
-    "receipts": false
+    "receipts": false,
+    "ports": {
+      "generation": false,
+      "provider": false,
+      "workspace": false,
+      "modules": false
+    }
   }
 }

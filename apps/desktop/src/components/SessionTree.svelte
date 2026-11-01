@@ -10,12 +10,14 @@
     onFocus,
     onMove,
     onRetry,
+    canRetry = true,
   }: {
     nav: SessionNavState;
     onSelect: (key: string) => void;
     onFocus: (key: string) => void;
     onMove: (to: "next" | "prev" | "first" | "last") => void;
     onRetry: () => void;
+    canRetry?: boolean;
   } = $props();
 
   const nodes = $derived(visibleNodes(nav));
@@ -61,7 +63,9 @@
   {#if nav.load === "error"}
     <div role="alert" class="state state-error">
       <p>Sessions could not be loaded{nav.error ? `: ${nav.error}` : "."}</p>
-      <button type="button" onclick={onRetry}>Retry</button>
+      {#if canRetry}
+        <button type="button" onclick={onRetry}>Retry</button>
+      {/if}
     </div>
   {:else if nav.load === "loading" && nodes.length === 0}
     <p role="status" class="state">Loading sessions…</p>
@@ -94,7 +98,7 @@
 
 <style>
   .session-tree {
-    padding: 8px;
+    padding: 12px;
   }
   ul {
     list-style: none;

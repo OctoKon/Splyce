@@ -51,6 +51,43 @@ Privileged Tauri application commands must be explicitly enrolled with `AppManif
 
 These are proposed shared contracts, not existing Tauri command names. Use actual Tauri command/channel and Pi SDK APIs after the task's source check. Do not implement another general RPC framework or an unrestricted public localhost service for the desktop bridge.
 
+### Native bootstrap and port readiness
+
+The TD-07 bootstrap uses protocol version 2 while durable record schema version 1
+remains unchanged. Rust resolves the application data directory and initializes
+the owned child before exposing renderer commands. The engine opens its Store and
+snapshot directory beneath that native location; renderer commands cannot select
+a Store path. Bootstrap failure closes the owned child and reports a bounded error.
+
+Core `readiness.state: ready` means the Store passed its structural audit and the
+configuration, policy and receipt services loaded. It does not authorize generation.
+The exact `readiness.ports` object reports boolean `generation`, `provider`,
+`workspace` and `modules` availability. The renderer requires generation, provider
+and workspace availability before reporting a usable generation connection, and
+shows **Generation unconfigured** when the core is ready without those ports.
+An `engine.status` event may carry the same strictly validated `ports` object;
+subscribed clients update availability without reconnecting. Reconnection and
+engine exit invalidate the previous availability and subscription generation.
+
+At this bootstrap checkpoint the workspace registry is empty, no persisted grant
+schema supplies authority, and all runnable ports remain unavailable. Profile and
+configuration reads use the authoritative Store. The structural audit validates
+local record shape, attribution and database integrity; it does not establish live
+reference access or continuing grants. The full audit runs at bootstrap; later
+authority reads validate scoped snapshots without rescanning historical events.
+Profile selection follows the exact applied configuration transition, including
+its pinned profile revision, rather than the latest written profile snapshot.
+Real workspace admission, credential writes,
+provider dispatch and port-flip production require their separate implementations
+and qualification.
+Native dispatch must pass the observed workspace identity on every grant use,
+because the Store cannot verify it under its lock; a use without it is a caller bug.
+
+Existing stored protocol version 1 event envelopes are projected to version 2 in
+memory before full validation and read/replay/export. Stored payload bytes,
+sequence values, scope and deletion evidence remain unchanged. New writes and live
+transport still require protocol version 2; unsupported stored versions fail closed.
+
 ## Windows acceptance and release
 
 V1 release support is **Windows only**. TD-11 fixes advertised Windows version/architecture/runtime cells, the WebView2 Evergreen-or-fixed decision (under Evergreen a cell names a minimum version and each run records the tested version) and installer preparation; untested combinations are unsupported. Linux/macOS remain research/future ports, not required V1 deliverables. Count installer/download/unpacked bytes for the app, WebView provisioning, Node/Pi, native dependencies, optional artifacts and models separately; measure cold/warm startup, idle/peak memory/CPU and full-task quality. No fixed MB/RAM/speed superiority is claimed.

@@ -1,0 +1,22 @@
+--- a/lib/cli/collect-files.js
++++ b/lib/cli/collect-files.js
+@@ -4,7 +4,7 @@
+ const path = require('path');
+ const ansi = require('ansi-colors');
+ const debug = require('debug')('mocha:cli:run:helpers');
+-const minimatch = require('minimatch');
++const {minimatch} = require('minimatch');
+ const {NO_FILES_MATCH_PATTERN} = require('../errors').constants;
+ const lookupFiles = require('./lookup-files');
+ const {castArray} = require('../utils');
+--- a/package.json
++++ b/package.json
+@@ -104,7 +104,7 @@
+     "he": "^1.2.0",
+     "js-yaml": "^4.1.0",
+     "log-symbols": "^4.1.0",
+-    "minimatch": "^5.1.6",
++    "minimatch": "11.0.1",
+     "ms": "^2.1.3",
+     "serialize-javascript": "^6.0.2",
+     "strip-json-comments": "^3.1.1",

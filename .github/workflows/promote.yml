@@ -41,7 +41,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           SHA: ${{ github.event.workflow_run.head_sha }}
-          REQUIRED: "Documentation quality|Analyze Python|Analyze Actions|Analyze JavaScript|Staging release gate"
+          REQUIRED: "Documentation quality|Analyze Python|Analyze Actions|Analyze JavaScript|Analyze Rust|Staging release gate"
         run: |
           set -euo pipefail
           git fetch origin staging
