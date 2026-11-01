@@ -21,6 +21,7 @@
 | [Implementation contracts](implementation-contracts.md)           | Proposed records, transaction/recovery invariants and synthetic end-to-end scenario                          |
 | [Qualification register](qualification-register.md)               | Adoption records, pinned provenance, experiments and explicit unrun status                                   |
 | [Store qualification](store-qualification.md)                     | J0 store candidates, preregistered crash experiment and migration boundary                                   |
+| [Scheduler planner](scheduler-planner.md)                         | TD-45 pure job planning: default deny, no burst on re-enable, DST, catch-up, inspection                      |
 | [Readiness audit](readiness-audit.md)                             | Requirement-to-contract-to-test coverage and remaining research/build blockers                               |
 | [Providers/profiles/sessions](providers-profiles-and-sessions.md) | Multi-provider local/cloud selection, switching, resume/fork, writer ownership and API support cells         |
 | [Custom plugin authoring](plugin-authoring.md)                    | Local/custom Git builds, extension surfaces, trust, API compatibility, reload/migrations and tests           |
