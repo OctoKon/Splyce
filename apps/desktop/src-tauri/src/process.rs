@@ -1597,9 +1597,9 @@ mod windows {
             ] {
                 assert!(native_reply(call("credential.redact", params), &mut scopes).is_err());
             }
-            let copies = MAX_FRAME_BYTES / "redaction-private-lane".len() + 1;
+            let copies = MAX_FRAME_BYTES / ("redaction-private-lane".len() * 2);
             let text = "redaction-private-lane".repeat(copies);
-            assert!(text.len() > MAX_FRAME_BYTES);
+            assert!(text.len() < MAX_FRAME_BYTES / 2);
             let value = reply(
                 native_reply(call("credential.redact", json!({"text":text})), &mut scopes).unwrap(),
             );
@@ -1615,9 +1615,16 @@ mod windows {
                     .unwrap()
                     .contains("redaction-private-lane")
             );
+            let _growth_cleanup = Cleanup(crate::credentials::write_generated("grow-key").unwrap());
+            let expansion = "grow-key".repeat(MAX_FRAME_BYTES / "[REDACTED:credential]".len() + 1);
+            assert!(redaction_frame_fits(&call(
+                "credential.redact",
+                json!({"text":expansion})
+            )));
             for text in [
                 "x".repeat(crate::credentials::MAX_REDACTION_TEXT_BYTES + 1),
                 "redaction-private-lane".repeat(MAX_FRAME_BYTES / 21),
+                expansion,
             ] {
                 let value = reply(
                     native_reply(call("credential.redact", json!({"text":text})), &mut scopes)
