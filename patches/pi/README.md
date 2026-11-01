@@ -222,3 +222,4 @@ and rerun these regressions after donor or wrapper changes.
 - [Session repair](0015-session-repair.md) verifies the loaded file before appending its separator.
 - [Input boundaries](0016-input-boundaries.md) validates pinned refs and own JSON members.
 - [Selected minimatch](0017-selected-minimatch.md) records the updated dependency and workspace closure.
+- [Additional fixture roots](0018-fixture-roots.md) preserves isolated directories and shared-path test semantics.
