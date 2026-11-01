@@ -2,37 +2,116 @@
   "name": "splyce-workspace",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "npm@11.19.1",
+  "engines": {
+    "node": ">=24.22.1 <25"
+  },
   "workspaces": [
     "packages/splyce-pi",
+    "vendor/pi/packages/agent",
+    "vendor/pi/packages/ai",
+    "vendor/pi/packages/codemode",
+    "vendor/pi/packages/coding-agent",
+    "vendor/pi/packages/mcp",
+    "vendor/pi/packages/telemetry",
+    "vendor/pi/packages/tui",
     "apps/desktop"
   ],
   "scripts": {
+    "prepare:runtime": "powershell -NoProfile -NonInteractive -File scripts/prepare-node-runtime.ps1",
     "build:contracts": "tsc -p packages/splyce-pi/tsconfig.json",
+    "build:pi": "npm run build --workspace=@earendil-works/pi-telemetry && npm run build --workspace=@earendil-works/pi-tui && npm run build --workspace=@earendil-works/pi-codemode && npm run build --workspace=@earendil-works/pi-mcp && npm run build:offline --workspace=@earendil-works/pi-ai && npm run build --workspace=@earendil-works/pi-agent-core && npm run build --workspace=@earendil-works/pi-coding-agent",
+    "build:engine": "npm run prepare:runtime && npm run build:contracts && node scripts/generate-bridge-protocol.mjs && npm run build:pi && node scripts/build-engine.mjs",
+    "build:desktop": "npm run build:engine && npm --prefix apps/desktop run build && node scripts/build-tauri.mjs",
+    "build:desktop:e2e": "npm run build:engine && npm --prefix apps/desktop run build && node scripts/build-tauri.mjs --features e2e --config src-tauri/tauri.e2e.conf.json --no-bundle",
     "test:contracts": "node scripts/run-contracts.mjs",
+    "test:engine-frames": "node --test tests/engine-frames.test.mjs",
+    "test:native-host": "node --test tests/native-host.test.mjs",
+    "test:native-host-factory": "node --test tests/native-host-factory.test.mjs",
+    "test:native-control": "node --test tests/native-control.test.mjs tests/native-host-pump.test.mjs",
+    "test:native-provider": "node --test tests/native-provider.test.mjs",
+    "test:native-workspace": "node --test tests/native-workspace-host.test.mjs",
+    "test:native-setup": "node --test tests/native-setup-host.test.mjs",
+    "test:revision-fence": "node --test tests/revision-fence.test.mjs",
+    "test:native-entrypoints": "node --test tests/native-entrypoints.test.mjs",
+    "test:native-owned-session": "node --test tests/native-owned-session.test.mjs",
     "test:gui-fixtures": "node --test tests/gui-fixtures.test.mjs",
     "test:engine-store": "node --test tests/engine-store.test.mjs",
+    "test:native-admission": "node --test tests/native-admission.test.mjs",
+    "test:desktop-embedded": "wdio run apps/desktop/wdio.bootstrap.mjs",
+    "test:desktop-release-smoke": ".\\apps\\desktop\\src-tauri\\resources\\engine\\node.exe tests/bootstrap/release-smoke.mjs",
+    "test:bootstrap-build-mode": "node --test tests/bootstrap-build-mode.test.mjs",
     "test:store-contract": "node scripts/run-store.mjs --case J0_store_contract",
-    "test:receipts-cursor": "node scripts/run-store.mjs --case C1_reconnect_cursor",
-    "test:desktop-bridge": "node scripts/run-store.mjs --case C2_desktop_bridge",
     "test:crash-matrix": "node scripts/run-store.mjs --case C3_crash_matrix",
-    "test:config-transition": "node scripts/run-store.mjs --case C4_config_transition",
+    "test:store": "node scripts/run-store.mjs",
+    "test:session-map": "node scripts/run-store.mjs --case C1_session_catalog",
     "test:credentials": "node scripts/run-store.mjs --case C4_credential_resolution",
+    "test:grants-store": "node scripts/run-store.mjs --case C2_grants_store",
+    "test:policy-grants": "node scripts/run-store.mjs --case C2_policy_grants",
+    "check:vendor-types": "npm ci --prefix vendor/pi --ignore-scripts && npm exec --prefix vendor/pi -- tsc --noEmit -p vendor/pi/tsconfig.json",
     "test:dirty-snapshot": "node scripts/run-store.mjs --case C5_dirty_snapshot",
-    "test:release-gate": "npm run test:contracts && npm run test:store-contract && npm run test:receipts-cursor && npm run test:desktop-bridge && npm run test:crash-matrix && npm run test:config-transition && npm run test:credentials && npm run test:dirty-snapshot && npm run test:gui-fixtures && npm run test:engine-store && npm run test:desktop",
+    "test:release-gate": "npm run test:contracts && npm run check:vendor-types && npm run test:native-openai && npm run test:store && npm run test:store-contract && npm run test:credentials && npm run test:crash-matrix && npm run test:receipts-cursor && npm run test:desktop-bridge && npm run test:grants-store && npm run test:policy-grants && npm run test:config-transition && npm run test:dirty-snapshot && npm run test:engine-frames && npm run test:native-entrypoints && npm run test:native-admission && npm run test:native-owned-session && npm run test:native-host && npm run test:native-host-factory && npm run test:native-control && npm run test:native-provider && npm run test:native-workspace && npm run test:native-setup && npm run test:revision-fence && npm run test:gui-fixtures && npm run test:engine-store && npm run test:bootstrap-build-mode && npm run test:desktop && npm run test:desktop-release-smoke && npm run build:desktop:e2e && npm run test:session-map && npm run test:desktop-embedded",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "lint:markdown": "markdownlint-cli2 \"**/*.md\" \".skills/**/*.md\" \".github/**/*.md\" \"#node_modules\"",
     "check:docs": "python scripts/check_docs.py",
-    "test:docs": "python -m unittest tests/test_check_docs.py",
-    "test:desktop": "npm run check --workspace=@splyce/desktop && npm run test --workspace=@splyce/desktop"
+    "test:docs": "python -m unittest discover -s tests -p test_check_docs.py",
+    "test:receipts-cursor": "node scripts/run-store.mjs --case C1_reconnect_cursor",
+    "test:desktop-bridge": "node scripts/run-store.mjs --case C2_desktop_bridge",
+    "test:config-transition": "node scripts/run-store.mjs --case C4_config_transition",
+    "test:desktop": "npm run check --workspace=@splyce/desktop && npm run test --workspace=@splyce/desktop",
+    "test:native-openai": "npm run build:contracts && npm run build:pi && node --test tests/native-openai-chat.test.mjs tests/native-provider-sdk.test.mjs"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.3.5",
+    "@biomejs/wasm-nodejs": "2.3.5",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@tauri-apps/api": "2.12.4",
+    "@tauri-apps/cli": "2.12.4",
+    "@tsconfig/svelte": "5.0.5",
+    "@wdio/cli": "9.30.1",
+    "@wdio/local-runner": "9.30.1",
+    "@wdio/mocha-framework": "9.30.1",
+    "@wdio/tauri-service": "1.4.0",
+    "esbuild": "0.28.2",
     "markdownlint-cli2": "0.24.0",
+    "mocha": "file:patches/mocha/mocha-10.8.2.tgz",
     "prettier": "3.9.10",
-    "typescript": "7.0.2"
+    "svelte": "5.57.3",
+    "svelte-check": "4.7.7",
+    "typescript": "6.0.3",
+    "vite": "8.3.5"
   },
   "overrides": {
-    "katex": "0.18.11"
+    "katex": "0.18.11",
+    "@wdio/utils": {
+      "@puppeteer/browsers": "3.2.6"
+    },
+    "deepmerge-ts": "8.0.0",
+    "re2js": "2.8.7",
+    "@wdio/config": {
+      "glob": "14.0.2"
+    },
+    "archiver-utils": {
+      "glob": "14.0.2"
+    },
+    "mocha": {
+      ".": "$mocha",
+      "serialize-javascript": "7.1.3",
+      "glob": "14.0.2"
+    },
+    "readdir-glob": {
+      "minimatch": "11.0.1"
+    },
+    "recursive-readdir": {
+      "minimatch": "11.0.1"
+    },
+    "filelist": {
+      "minimatch": "11.0.1"
+    },
+    "shelljs": {
+      "glob": "14.0.2"
+    }
   },
   "license": "AGPL-3.0-only"
 }

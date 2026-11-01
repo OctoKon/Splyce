@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Splyce native bridge for the owned main window",
+  "windows": ["main"],
+  "permissions": [
+    "allow-handshake",
+    "allow-send",
+    "allow-cancel",
+    "allow-subscribe",
+    "allow-dialog-select-workspace"
+  ]
+}

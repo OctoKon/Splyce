@@ -48,6 +48,7 @@ export interface CredentialResolverDeps {
   /** OS credential store read (e.g. Windows Credential Manager); undefined = absent. */
   readonly readCredentialStore?: (
     target: string,
+    request: CredentialRequest,
   ) => Promise<string | undefined>;
   readonly helpers?: Readonly<Record<string, HelperCommand>>;
   /** Returns null to deny. Absent = every helper is denied. */
@@ -72,7 +73,7 @@ const fail = (code: CredentialError["code"], message: string): never => {
 export class NativeCredentialResolver implements CredentialResolver {
   readonly #deps: CredentialResolverDeps;
   readonly #bindings = new Map<string, CredentialBinding>();
-  readonly #active = new Set<{ secret: string }>();
+  readonly #active = new Set<{ secret: string; forms: string[] }>();
 
   constructor(deps: CredentialResolverDeps) {
     this.#deps = deps;
@@ -101,8 +102,9 @@ export class NativeCredentialResolver implements CredentialResolver {
   /** Replace every active secret in `text`. */
   readonly redact: Redactor = (text) => {
     let out = text;
-    for (const { secret } of this.#active)
-      out = out.split(secret).join("[REDACTED]");
+    const forms = [...this.#active].flatMap((entry) => entry.forms);
+    forms.sort((a, b) => b.length - a.length);
+    for (const form of forms) out = out.split(form).join("[REDACTED]");
     return out;
   };
 
@@ -151,7 +153,7 @@ export class NativeCredentialResolver implements CredentialResolver {
       const read =
         this.#deps.readCredentialStore ??
         fail("CREDENTIAL_UNAVAILABLE", "no OS credential store reader");
-      return read(source.target);
+      return read(source.target, request);
     }
     const command =
       this.#deps.helpers?.[source.commandRef] ??
@@ -192,7 +194,28 @@ export class NativeCredentialResolver implements CredentialResolver {
     signal: AbortSignal | undefined,
     current: () => boolean,
   ): SecretLease {
-    const entry = { secret: value };
+    let url: string;
+    try {
+      url = encodeURIComponent(value);
+    } catch {
+      return fail("CREDENTIAL_UNAVAILABLE", "credential contains invalid text");
+    }
+    let bytes = "";
+    for (const byte of new TextEncoder().encode(value))
+      bytes += String.fromCharCode(byte);
+    const base64 = btoa(bytes);
+    const entry = {
+      secret: value,
+      forms: [
+        ...new Set([
+          value,
+          base64,
+          base64.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""),
+          url,
+          JSON.stringify(value).slice(1, -1),
+        ]),
+      ],
+    };
     const active = this.#active;
     const redact = this.redact;
     active.add(entry);
@@ -203,6 +226,7 @@ export class NativeCredentialResolver implements CredentialResolver {
     const drop = () => {
       if (live || pending > 0) return;
       entry.secret = "";
+      entry.forms.length = 0;
       active.delete(entry);
     };
     const revoke = () => {

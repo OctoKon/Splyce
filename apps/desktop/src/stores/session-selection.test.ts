@@ -12,7 +12,7 @@ import { createTurnStreamTransport } from "./turns";
 function started(sessionId: string, scopeId: string): SplyceEventEnvelope {
   return {
     schemaVersion: 1,
-    protocolVersion: 1,
+    protocolVersion: 2,
     recordId: "rec_1",
     eventId: `evt_${sessionId}_${scopeId}`,
     createdAt: "2026-10-26T00:00:00.000Z",
