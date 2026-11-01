@@ -223,3 +223,12 @@ and rerun these regressions after donor or wrapper changes.
 client without the seam is refused with `CredentialPreflightError`, so an SDK change fails closed instead of sending
 unguarded. Both `google-generative-ai.ts` and `google-vertex.ts` use it on the lease path only; the API-key path is
 unchanged. See [0016-google-leased-redirect-refusal.md](0016-google-leased-redirect-refusal.md) for evidence and limits.
+
+## Library maintenance
+
+- [Callback correlation](0013-oauth-callback-correlation.md) keeps unrelated callback requests from completing a pending login.
+- [Fixture roots](0014-test-fixture-roots.md) gives each test its own atomically allocated directory.
+- [Session repair](0015-session-repair.md) verifies the loaded file before appending its separator.
+- [Input boundaries](0016-input-boundaries.md) validates pinned refs and own JSON members.
+- [Selected minimatch](0017-selected-minimatch.md) records the updated dependency and workspace closure.
+- [Additional fixture roots](0018-fixture-roots.md) preserves isolated directories and shared-path test semantics.

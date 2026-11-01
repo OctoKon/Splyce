@@ -247,21 +247,25 @@
 <style>
   .mode-select {
     display: grid;
-    gap: 4px;
+    gap: var(--splyce-space-1, 0.25rem);
     max-width: 420px;
-    color: #111827;
+    color: var(--splyce-text-primary, #111827);
   }
   label {
     font-weight: 600;
-    font-size: 0.875rem;
+    font-size: var(--splyce-font-size-sm, 0.875rem);
+    color: var(--splyce-text-secondary, #4b5563);
   }
   select {
-    font: inherit;
-    padding: 4px 8px;
-    border: 1px solid #9ca3af;
-    border-radius: 6px;
-    background: #ffffff;
+    font-family: inherit;
+    font-size: var(--splyce-font-size-sm, 0.875rem);
+    padding: var(--splyce-space-1, 0.25rem) var(--splyce-space-2, 0.5rem);
+    border: 1px solid var(--splyce-border-default, #d1d5db);
+    border-radius: var(--radius-md, 6px);
+    background: var(--splyce-surface, #ffffff);
     color: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
   }
   select:disabled {
     opacity: 0.6;
@@ -269,50 +273,63 @@
   }
   p {
     margin: 0;
-    font-size: 0.875rem;
+    font-size: var(--splyce-font-size-sm, 0.875rem);
   }
   .pending {
-    color: #92400e;
+    color: var(--splyce-status-warning, #92400e);
+    font-weight: 500;
   }
   .reason {
-    color: #991b1b;
+    color: var(--splyce-status-danger, #b91c1c);
+    font-weight: 500;
   }
   .announcement {
     min-height: 1em;
   }
   dialog {
     max-width: 460px;
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
+    border: 1px solid var(--splyce-border-default, #e5e7eb);
+    border-radius: var(--radius-md, 8px);
     padding: 20px;
-    background: #ffffff;
-    color: #111827;
+    background: var(--splyce-surface-raised, #ffffff);
+    color: var(--splyce-text-primary, #111827);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
   }
   dialog::backdrop {
-    background: rgb(17 24 39 / 45%);
+    background: rgba(17, 24, 39, 0.45);
   }
   .actions {
     display: flex;
-    gap: 8px;
+    gap: var(--splyce-space-2, 0.5rem);
     margin-top: 16px;
   }
   button {
-    font: inherit;
-    padding: 6px 12px;
-    border: 1px solid #9ca3af;
-    border-radius: 6px;
-    background: #ffffff;
+    font-family: inherit;
+    font-size: var(--splyce-font-size-sm, 0.875rem);
+    padding: 6px 14px;
+    border: 1px solid var(--splyce-border-default, #d1d5db);
+    border-radius: var(--radius-md, 6px);
+    background: var(--splyce-surface, #ffffff);
     color: inherit;
     cursor: pointer;
+    transition:
+      background-color 0.15s ease,
+      opacity 0.15s ease;
+  }
+  button:hover {
+    background: var(--splyce-surface-raised, #f3f4f6);
   }
   .danger {
-    border-color: #b91c1c;
-    color: #b91c1c;
+    border-color: var(--splyce-status-danger, #b91c1c);
+    color: var(--splyce-status-danger, #b91c1c);
     font-weight: 600;
+  }
+  .danger:hover {
+    background: rgba(185, 28, 28, 0.08);
   }
   button:focus-visible,
   select:focus-visible {
-    outline: 2px solid currentColor;
+    outline: 2px solid var(--focus, #2563eb);
     outline-offset: 2px;
   }
 </style>

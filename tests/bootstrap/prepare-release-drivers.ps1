@@ -39,6 +39,66 @@ function Assert-PinnedCrateArchive {
   $hash
 }
 
+$pageUrl = "https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver"
+
+function Get-EdgeDriverLatestReleaseUrl {
+  param([string]$RuntimeBuild)
+  "https://msedgedriver.microsoft.com/LATEST_RELEASE_$($RuntimeBuild.Split('.')[0])_WINDOWS"
+}
+
+function ConvertFrom-DriverVersionResponse {
+  param([byte[]]$Bytes)
+  if (-not $Bytes -or $Bytes.Length -eq 0) { return $null }
+  if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) { $text = [System.Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2) }
+  elseif ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) { $text = [System.Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Bytes.Length - 2) }
+  else { $text = [System.Text.Encoding]::UTF8.GetString($Bytes) }
+  $text.Trim([char[]]@([char]0xFEFF, [char]0, ' ', "`r", "`n", "`t"))
+}
+
+# Only a four-part version on the runtime's exact major.minor.build qualifies,
+# whichever Microsoft record names it; no other build is ever substituted.
+function Select-EdgeDriverVersion {
+  param([string]$RuntimeBuild, [string]$CatalogPage, [string]$LatestRelease, [string]$LatestReleaseUrl)
+  $candidates = @()
+  foreach ($match in [regex]::Matches([string]$CatalogPage, 'href="https://msedgedriver\.microsoft\.com/(\d+\.\d+\.\d+\.\d+)/edgedriver_win64\.zip"')) {
+    $candidates += [pscustomobject]@{ Version = $match.Groups[1].Value; Source = $pageUrl }
+  }
+  if ($LatestRelease -match '^\d+\.\d+\.\d+\.\d+$') {
+    $candidates += [pscustomobject]@{ Version = $LatestRelease; Source = $LatestReleaseUrl }
+  }
+  $candidates |
+    Where-Object { ($_.Version.Split('.')[0..2] -join '.') -eq $RuntimeBuild } |
+    Sort-Object { [version]$_.Version } -Descending |
+    Select-Object -First 1
+}
+
+function Test-EdgeDriverVersionSelection {
+  $build = "155.0.4283"
+  $latestUrl = Get-EdgeDriverLatestReleaseUrl $build
+  if ($latestUrl -ne "https://msedgedriver.microsoft.com/LATEST_RELEASE_155_WINDOWS") { throw "The WebDriver release record URL is wrong." }
+  $currentOnly = '<a href="https://msedgedriver.microsoft.com/156.0.4314.58/edgedriver_win64.zip">'
+  $listed = $currentOnly + '<a href="https://msedgedriver.microsoft.com/155.0.4283.40/edgedriver_win64.zip">'
+
+  $selected = Select-EdgeDriverVersion $build $currentOnly "155.0.4283.62" $latestUrl
+  if (-not $selected -or $selected.Version -ne "155.0.4283.62" -or $selected.Source -ne $latestUrl) {
+    throw "A runtime build that left the catalog page was not resolved from its release record."
+  }
+  $selected = Select-EdgeDriverVersion $build $listed $null $latestUrl
+  if (-not $selected -or $selected.Version -ne "155.0.4283.40" -or $selected.Source -ne $pageUrl) {
+    throw "A catalog-listed build was not selected without a release record."
+  }
+  $selected = Select-EdgeDriverVersion $build $listed "155.0.4283.62" $latestUrl
+  if (-not $selected -or $selected.Version -ne "155.0.4283.62") { throw "The newest exact-build WebDriver was not selected." }
+  foreach ($other in @("155.0.4284.1", "156.0.4314.58", "155.0.4283", "not-a-version", "")) {
+    if (Select-EdgeDriverVersion $build $currentOnly $other $latestUrl) { throw "A WebDriver outside build $build was accepted from '$other'." }
+  }
+
+  $utf16 = [byte[]](@(0xFF, 0xFE) + [System.Text.Encoding]::Unicode.GetBytes("155.0.4283.62`r`n"))
+  if ((ConvertFrom-DriverVersionResponse $utf16) -ne "155.0.4283.62") { throw "A UTF-16 release record was misread." }
+  if ((ConvertFrom-DriverVersionResponse ([System.Text.Encoding]::UTF8.GetBytes("155.0.4283.62"))) -ne "155.0.4283.62") { throw "A UTF-8 release record was misread." }
+  if ($null -ne (ConvertFrom-DriverVersionResponse ([byte[]]@()))) { throw "An empty release record was not rejected." }
+}
+
 function Test-DriverPreparationGuards {
   $rootPath = Join-Path $env:TEMP "release-driver-guard-test-$([guid]::NewGuid().ToString('N'))"
   Assert-SafeArchiveEntries $rootPath @(
@@ -54,6 +114,7 @@ function Test-DriverPreparationGuards {
   }
 
   Test-WebView2RuntimeSelection
+  Test-EdgeDriverVersionSelection
 
   $cratePath = Join-Path $env:TEMP "tauri-driver-hash-test-$([guid]::NewGuid().ToString('N')).crate"
   try {
@@ -131,15 +192,20 @@ $runtimeRegistration = Get-InstalledWebView2Runtime
 if (-not $runtimeRegistration) { throw "The Evergreen WebView2 Runtime is not registered." }
 $runtimeVersion = $runtimeRegistration.Version
 
-$pageUrl = "https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver"
-$page = (Invoke-WebRequest -Uri $pageUrl -UseBasicParsing -TimeoutSec 30).Content
 $runtimeBuild = ($runtimeVersion.Split('.')[0..2] -join '.')
-$availableVersions = [regex]::Matches($page, 'href="https://msedgedriver\.microsoft\.com/(\d+\.\d+\.\d+\.\d+)/edgedriver_win64\.zip"') |
-  ForEach-Object { $_.Groups[1].Value } |
-  Where-Object { ($_.Split('.')[0..2] -join '.') -eq $runtimeBuild } |
-  Select-Object -Unique
-$edgeVersion = $availableVersions | Sort-Object { [version]$_ } -Descending | Select-Object -First 1
-if (-not $edgeVersion) { throw "Microsoft's driver catalog has no x64 WebDriver matching WebView2 $runtimeBuild." }
+$page = (Invoke-WebRequest -Uri $pageUrl -UseBasicParsing -TimeoutSec 30).Content
+# The catalog page only links current channel builds; an older Evergreen runtime
+# still has its driver, which Microsoft's per-major release record names.
+$latestReleaseUrl = Get-EdgeDriverLatestReleaseUrl $runtimeBuild
+$latestRelease = $null
+try {
+  $response = Invoke-WebRequest -Uri $latestReleaseUrl -UseBasicParsing -TimeoutSec 30
+  $latestRelease = ConvertFrom-DriverVersionResponse $response.RawContentStream.ToArray()
+}
+catch { $latestRelease = $null }
+$selection = Select-EdgeDriverVersion $runtimeBuild $page $latestRelease $latestReleaseUrl
+if (-not $selection) { throw "Microsoft's driver catalog has no x64 WebDriver matching WebView2 $runtimeBuild." }
+$edgeVersion = $selection.Version
 
 $edgeUrl = "https://msedgedriver.microsoft.com/$edgeVersion/edgedriver_win64.zip"
 $edgeDirectory = Join-Path $tools "edge-$edgeVersion"
@@ -185,6 +251,7 @@ $manifest = [ordered]@{
   edgeDriver = [ordered]@{
     version = $edgeVersion
     sourcePage = $pageUrl
+    versionSource = $selection.Source
     downloadUrl = $edgeUrl
     archiveSha256 = $archiveHash
     binarySha256 = $edgeHash

@@ -33,6 +33,11 @@ const CHILD = fileURLToPath(
 );
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "td24-snapshots-"));
+// Fixtures are plain directories unless a test runs `git init` in one. Stop
+// git's repository discovery at tmpRoot, so a repository enclosing the OS temp
+// directory (e.g. a home-directory dotfiles repo on Windows) cannot classify
+// fixture files by its own index. createSnapshot and the kill child inherit it.
+process.env.GIT_CEILING_DIRECTORIES = tmpRoot;
 let counter = 0;
 const freshDir = () => {
   counter += 1;

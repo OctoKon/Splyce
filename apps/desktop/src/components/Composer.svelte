@@ -114,7 +114,7 @@
     placeholder="Type a message or prompt…"
   ></textarea>
   <div class="composer-footer">
-    <p id="composer-status" role="status">
+    <p id="composer-status" role="status" class:has-error={!!error} class:is-blocked={!!reason}>
       {#if error}Send failed: {error}{:else if reason}{reason}{/if}
     </p>
     <div class="composer-actions">
@@ -132,92 +132,102 @@
   .composer {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 12px 16px;
     box-sizing: border-box;
     width: 100%;
     max-width: 960px;
     margin: 0 auto;
+    gap: var(--splyce-space-2, 0.5rem);
+    padding: var(--splyce-space-3, 0.75rem);
+    background: var(--splyce-surface-raised, #ffffff);
+    border: 1px solid var(--splyce-border-default, #e5e7eb);
+    border-radius: var(--radius-md, 8px);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   }
   label {
-    font-size: 0.75rem;
+    font-size: var(--splyce-font-size-xs, 0.75rem);
     font-weight: 600;
+    color: var(--splyce-text-secondary, #4b5563);
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: #4b5563;
   }
   textarea {
     width: 100%;
     box-sizing: border-box;
-    padding: 8px 12px;
+    padding: var(--splyce-space-2, 0.5rem) var(--splyce-space-3, 0.75rem);
     font-family: inherit;
-    font-size: 0.875rem;
-    line-height: 1.4;
-    color: #111827;
-    background: #ffffff;
-    border: 1px solid #d1d5db;
-    border-radius: 6px;
+    font-size: var(--splyce-font-size-base, 0.9375rem);
+    line-height: var(--splyce-line-height-normal, 1.5);
+    color: var(--splyce-text-primary, #111827);
+    background: var(--splyce-surface, #ffffff);
+    border: 1px solid var(--splyce-border-default, #d1d5db);
+    border-radius: var(--radius-md, 6px);
     resize: vertical;
     min-height: 56px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
   textarea:focus {
-    border-color: #3b82f6;
+    border-color: var(--focus, #2563eb);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+  }
+  textarea:focus-visible,
+  button:focus-visible {
+    outline: 2px solid var(--focus, #2563eb);
+    outline-offset: 2px;
   }
   .composer-footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    min-height: 32px;
+    gap: var(--splyce-space-3, 0.75rem);
+    min-height: 2rem;
   }
   #composer-status {
     margin: 0;
-    font-size: 0.8125rem;
-    color: #6b7280;
-    line-height: 1.3;
+    font-size: var(--splyce-font-size-xs, 0.8125rem);
+    color: var(--splyce-text-muted, #6b7280);
     flex: 1;
+    overflow-wrap: anywhere;
+  }
+  #composer-status.has-error {
+    color: var(--status-danger, #b91c1c);
+    font-weight: 500;
+  }
+  #composer-status.is-blocked {
+    color: var(--status-warning, #b45309);
   }
   .composer-actions {
     display: flex;
     align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
+    gap: var(--splyce-space-2, 0.5rem);
+    margin-left: auto;
+  }
+  button {
+    font-family: inherit;
+    font-size: var(--splyce-font-size-sm, 0.875rem);
+    font-weight: 600;
+    padding: 6px 16px;
+    border-radius: var(--radius-md, 6px);
+    cursor: pointer;
+    transition: background-color 0.15s ease, opacity 0.15s ease;
   }
   .btn-send {
-    padding: 6px 16px;
-    font-size: 0.875rem;
-    font-weight: 500;
+    background: var(--focus, #2563eb);
     color: #ffffff;
-    background: #111827;
     border: 1px solid transparent;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: background 0.15s;
   }
   .btn-send:hover:not(:disabled) {
-    background: #374151;
+    background: #1d4ed8;
   }
   .btn-send:disabled {
-    background: #e5e7eb;
-    color: #9ca3af;
+    opacity: 0.5;
     cursor: not-allowed;
   }
   .btn-cancel {
-    padding: 6px 12px;
-    font-size: 0.8125rem;
-    font-weight: 500;
-    color: #b91c1c;
-    background: #fef2f2;
-    border: 1px solid #fecaca;
-    border-radius: 6px;
-    cursor: pointer;
+    background: transparent;
+    color: var(--status-danger, #b91c1c);
+    border: 1px solid var(--status-danger, #b91c1c);
   }
   .btn-cancel:hover {
     background: #fee2e2;
-  }
-  textarea:focus-visible,
-  button:focus-visible {
-    outline: 2px solid currentColor;
-    outline-offset: 2px;
   }
 </style>
