@@ -1,0 +1,293 @@
+import { Buffer } from "node:buffer";
+import { assertNoCallerAuthHeaders } from "../splyce-credentials.ts";
+import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model } from "../types.ts";
+import { normalizeContext } from "../utils/transcript.ts";
+import { streamSimple as streamChat } from "./openai-completions.ts";
+import { streamSimple as streamResponses } from "./openai-responses.ts";
+
+/** Structural contract only. The native factory owns scopes, admission and revocation. */
+export interface NativeOpenAIRequest {
+	readonly apiKey: string;
+	readonly fetch: typeof globalThis.fetch;
+	readonly signal: AbortSignal;
+	readonly redact: (text: string) => string;
+	readonly transport: "sse";
+	readonly maxRetries: 0;
+}
+
+export interface NativeOpenAIRequestPort<TScope extends object> {
+	withRequest<T>(scope: TScope, consume: (request: NativeOpenAIRequest) => Promise<T>): Promise<T>;
+}
+
+export interface NativeOpenAIChatInput<TScope extends object> {
+	readonly port: NativeOpenAIRequestPort<TScope>;
+	readonly scope: TScope;
+	readonly model: Model<Api>;
+	readonly context: Context;
+	readonly onEvent: (event: AssistantMessageEvent) => void | Promise<void>;
+}
+
+function redactedCopy<T>(value: T, redact: (text: string) => string, redactKey: (text: string) => string = redact): T {
+	const seen = new WeakMap<object, unknown>();
+	const copy = (item: unknown): unknown => {
+		if (typeof item === "string") return redact(item);
+		if (typeof item === "function") throw new Error("Native OpenAI data is not serializable");
+		if (item === null || typeof item !== "object") return item;
+		if (seen.has(item)) return seen.get(item);
+		if (Array.isArray(item)) {
+			const result: unknown[] = [];
+			seen.set(item, result);
+			for (const child of item) result.push(copy(child));
+			return result;
+		}
+		const result: Record<PropertyKey, unknown> = {};
+		seen.set(item, result);
+		for (const key of Reflect.ownKeys(item)) {
+			const descriptor = Object.getOwnPropertyDescriptor(item, key);
+			if (!descriptor || !("value" in descriptor)) throw new Error("Native OpenAI data is not serializable");
+			// Preserve schema symbols used by Pi's tool definitions, never inherited methods.
+			Object.defineProperty(result, typeof key === "string" ? redactKey(key) : key, {
+				value: copy(descriptor.value),
+				enumerable: descriptor.enumerable,
+				configurable: true,
+				writable: true,
+			});
+		}
+		return result;
+	};
+	return copy(value) as T;
+}
+
+type DeltaEvent = Extract<AssistantMessageEvent, { type: "text_delta" | "thinking_delta" | "toolcall_delta" }>;
+interface Channel {
+	pending: string;
+	last: DeltaEvent;
+}
+
+/**
+ * Consume the actual owned adapters entirely inside the native request lifetime.
+ * This function creates no native scope, lease, grant or authority of its own.
+ */
+export async function runNativeOpenAIChat<TScope extends object>(
+	input: NativeOpenAIChatInput<TScope>,
+): Promise<AssistantMessage> {
+	try {
+		// Admission may await I/O. Do not keep caller-mutable request graphs across it.
+		const model = redactedCopy(input.model, (text) => text);
+		const contextSnapshot = redactedCopy(input.context, (text) => text);
+		if (model.api !== "openai-completions" && model.api !== "openai-responses") {
+			throw new Error("Native OpenAI API is unavailable");
+		}
+		assertNoCallerAuthHeaders(model.headers);
+		const endpoint = new URL(model.baseUrl);
+		const loopback =
+			endpoint.hostname === "localhost" ||
+			endpoint.hostname === "[::1]" ||
+			/^127(?:\.\d{1,3}){3}$/.test(endpoint.hostname);
+		if (
+			endpoint.username ||
+			endpoint.password ||
+			(endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback))
+		)
+			throw new Error("Native OpenAI endpoint is unavailable");
+		return await input.port.withRequest(input.scope, async (request) => {
+			if (
+				typeof request.apiKey !== "string" ||
+				request.apiKey.trim().length === 0 ||
+				typeof request.fetch !== "function" ||
+				typeof request.redact !== "function" ||
+				!(request.signal instanceof AbortSignal) ||
+				request.transport !== "sse" ||
+				request.maxRetries !== 0 ||
+				request.signal.aborted
+			)
+				throw new Error("Native OpenAI request is unavailable");
+			const redact = (text: string): string => {
+				const result = request.redact(text);
+				if (typeof result !== "string" || result.includes(request.apiKey))
+					throw new Error("Native OpenAI redaction failed");
+				return result;
+			};
+			redact(request.apiKey);
+			const variants = [
+				...new Set([
+					request.apiKey,
+					encodeURIComponent(request.apiKey),
+					JSON.stringify(request.apiKey).slice(1, -1),
+					Buffer.from(request.apiKey).toString("base64"),
+					Buffer.from(request.apiKey).toString("base64url"),
+				]),
+			].filter((value) => value.length > 0 && redact(value) !== value);
+			const pendingSuffixLength = (text: string): number => {
+				let held = 0;
+				for (const variant of variants) {
+					for (let length = Math.min(text.length, variant.length); length > held; length--) {
+						if (text.endsWith(variant.slice(0, length))) {
+							held = length;
+							break;
+						}
+					}
+				}
+				return held;
+			};
+			const liveContent = (text: string): string => {
+				const safe = redact(text);
+				return safe.slice(0, safe.length - pendingSuffixLength(safe));
+			};
+			const channels = new Map<string, Channel>();
+			const completedBlocks = new WeakSet<object>();
+			const localAbort = new AbortController();
+			const signal = AbortSignal.any([request.signal, localAbort.signal]);
+			const pendingCleanup = new Set<Promise<void>>();
+			let cleanupFailed = false;
+			const trackCleanup = <T>(pending: Promise<T>): Promise<T> => {
+				const settled = pending.then(
+					() => undefined,
+					() => {
+						cleanupFailed = true;
+					},
+				);
+				pendingCleanup.add(settled);
+				void settled.then(() => pendingCleanup.delete(settled));
+				return pending;
+			};
+			const trackedResponse = (response: Response): Response => {
+				const body = response.body;
+				if (!body) return response;
+				// Keep the genuine response metadata and native methods. Only observe
+				// body/reader cancellation promises that the SDK may detach on abort.
+				const trackedBody = new Proxy(body, {
+					get(target, property) {
+						if (property === "cancel") return (reason?: unknown) => trackCleanup(target.cancel(reason));
+						if (property === "values" || property === Symbol.asyncIterator) {
+							return (...args: Parameters<typeof target.values>) => {
+								const iterator = target.values(...args);
+								return new Proxy(iterator, {
+									get(activeIterator, iteratorProperty) {
+										const value: unknown = Reflect.get(activeIterator, iteratorProperty, activeIterator);
+										if (iteratorProperty === "return" && typeof value === "function")
+											return (...args: unknown[]) =>
+												trackCleanup(Reflect.apply(value, activeIterator, args) as Promise<unknown>);
+										return typeof value === "function" ? value.bind(activeIterator) : value;
+									},
+								});
+							};
+						}
+						if (property === "getReader") {
+							return (...args: Parameters<typeof body.getReader>) => {
+								const reader: ReadableStreamDefaultReader<Uint8Array> | ReadableStreamBYOBReader =
+									Reflect.apply(target.getReader, target, args);
+								return new Proxy(reader, {
+									get(activeReader, readerProperty) {
+										if (readerProperty === "cancel")
+											return (reason?: unknown) => trackCleanup(activeReader.cancel(reason));
+										const value: unknown = Reflect.get(activeReader, readerProperty, activeReader);
+										return typeof value === "function" ? value.bind(activeReader) : value;
+									},
+								});
+							};
+						}
+						const value: unknown = Reflect.get(target, property, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				});
+				return new Proxy(response, {
+					get(target, property) {
+						if (property === "body") return trackedBody;
+						if (property === "clone") return () => trackedResponse(target.clone());
+						const value: unknown = Reflect.get(target, property, target);
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				});
+			};
+			const context = normalizeContext(redactedCopy(contextSnapshot, redact));
+			const options = {
+				apiKey: request.apiKey,
+				fetch: async (input: Parameters<typeof request.fetch>[0], init?: Parameters<typeof request.fetch>[1]) =>
+					trackedResponse(await request.fetch(input, { ...init, redirect: "manual" })),
+				signal,
+				transport: "sse" as const,
+				maxRetries: 0,
+				cacheRetention: "none" as const,
+			};
+			const stream =
+				model.api === "openai-completions"
+					? streamChat(model as Model<"openai-completions">, context, options)
+					: streamResponses(model as Model<"openai-responses">, context, options);
+			// ponytail: Pi-compatible partial redaction is O(deltas * output); callers must bound model output.
+			// Incremental partial projection is deferred to preserve the current progress snapshot contract.
+			const emit = async (event: AssistantMessageEvent) => {
+				const safe = redactedCopy(event, redact);
+				if ("partial" in safe && "partial" in event) {
+					// Pi can populate a shared partial before its *_start observer runs.
+					// Sanitize live content independently of delta-channel registration.
+					for (const [index, block] of safe.partial.content.entries()) {
+						const original = event.partial.content[index];
+						if (original && completedBlocks.has(original)) continue;
+						if (block.type === "text") block.text = liveContent(block.text);
+						else if (block.type === "thinking") block.thinking = liveContent(block.thinking);
+						else if (block.type === "toolCall")
+							block.arguments = redactedCopy(block.arguments, liveContent, redact);
+					}
+				}
+				await input.onEvent(safe);
+			};
+			const flush = async (key: string) => {
+				const channel = channels.get(key);
+				if (!channel) return;
+				channels.delete(key);
+				if (channel.pending.length > 0) await emit({ ...channel.last, delta: redact(channel.pending) });
+			};
+			let result: AssistantMessage;
+			try {
+				for await (const event of stream) {
+					if (event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta") {
+						const key = `${event.type}:${event.contentIndex}`;
+						const channel = channels.get(key) ?? { pending: "", last: event };
+						channel.last = event;
+						const text = redact(channel.pending + event.delta);
+						const held = pendingSuffixLength(text);
+						channel.pending = text.slice(text.length - held);
+						channels.set(key, channel);
+						const ready = text.slice(0, text.length - held);
+						if (ready.length > 0) await emit({ ...event, delta: redact(ready) });
+						continue;
+					}
+					if (event.type === "text_end" || event.type === "thinking_end") {
+						const block = event.partial.content[event.contentIndex];
+						if (
+							block &&
+							((event.type === "text_end" && block.type === "text" && block.text === event.content) ||
+								(event.type === "thinking_end" &&
+									block.type === "thinking" &&
+									block.thinking === event.content))
+						)
+							completedBlocks.add(block);
+						await flush(`${event.type.replace("_end", "_delta")}:${event.contentIndex}`);
+					} else if (event.type === "toolcall_end") {
+						completedBlocks.add(event.toolCall);
+						await flush(`toolcall_delta:${event.contentIndex}`);
+					} else if (event.type === "done" || event.type === "error") {
+						for (const key of [...channels.keys()]) {
+							if (event.type === "error" && key.startsWith("toolcall_delta:")) channels.delete(key);
+							else await flush(key);
+						}
+					}
+					await emit(event);
+				}
+				result = redactedCopy(await stream.result(), redact);
+			} catch {
+				localAbort.abort();
+				await stream.result();
+				throw new Error("Native OpenAI consumer failed");
+			} finally {
+				while (pendingCleanup.size > 0) await Promise.all([...pendingCleanup]);
+			}
+			if (cleanupFailed && !signal.aborted) throw new Error("Native OpenAI response cleanup failed");
+			return result;
+		});
+	} catch {
+		// A denial may precede a usable redactor; never export a raw dependency error.
+		throw new Error("Native OpenAI request failed");
+	}
+}

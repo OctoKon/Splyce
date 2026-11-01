@@ -1,0 +1,10 @@
+{
+  "app": {
+    "security": {
+      "capabilities": ["main", "e2e"]
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

@@ -2,11 +2,18 @@
   "name": "@splyce/pi",
   "version": "0.0.0",
   "private": true,
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "file:../../vendor/pi/packages/coding-agent"
+  },
   "type": "module",
   "exports": {
     "./contracts": {
       "types": "./dist/contracts.d.ts",
       "import": "./dist/contracts.js"
+    },
+    "./session-map": {
+      "types": "./dist/session-map.d.ts",
+      "import": "./dist/session-map.js"
     },
     "./provider-auth": {
       "types": "./dist/provider-auth.d.ts",
@@ -19,6 +26,10 @@
     "./provider-admission": {
       "types": "./dist/provider-admission.d.ts",
       "import": "./dist/provider-admission.js"
+    },
+    "./provider-profiles": {
+      "types": "./dist/provider-profiles.d.ts",
+      "import": "./dist/provider-profiles.js"
     }
   },
   "files": [

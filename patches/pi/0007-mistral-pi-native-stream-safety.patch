@@ -1,0 +1,312 @@
+diff --git a/vendor/pi/packages/ai/src/api/mistral-conversations.ts b/vendor/pi/packages/ai/src/api/mistral-conversations.ts
+index 69e3f1d..ca3e33d 100644
+--- a/vendor/pi/packages/ai/src/api/mistral-conversations.ts
++++ b/vendor/pi/packages/ai/src/api/mistral-conversations.ts
+@@ -1,4 +1,13 @@
+ import { calculateCost, clampThinkingLevel } from "../models.ts";
++import {
++	assertCredentialApiIdentity,
++	assertCredentialOptions,
++	CredentialPreflightError,
++	createLeasedFetch,
++	redactEventWithLease,
++	redactResponseWithLease,
++	redactWithLease,
++} from "../splyce-credentials.ts";
+ import type {
+ 	AssistantMessage,
+ 	Message,
+@@ -131,14 +140,32 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
+ 	const stream = new AssistantMessageEventStream();
+ 	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+ 
++	// Captured before any caller callback runs: onPayload may mutate options, and error/observer paths must keep the
++	// credentials the call was admitted with.
++	const leasedCredentials = options?.credentials;
+ 	(async () => {
+ 		const output = createOutput(model);
+ 
+ 		try {
+-			const apiKey = options?.apiKey;
++			assertCredentialApiIdentity(model.api, "mistral-conversations", options);
++			assertCredentialOptions(options ?? {}, model.headers);
++			// Splyce: with a lease the request carries a placeholder and a fetch that leases the real key on every send.
++			const credentials = leasedCredentials;
++			const apiKey = credentials ? "splyce-leased-placeholder" : options?.apiKey;
+ 			if (!apiKey) {
+ 				throw new Error(`No API key for provider: ${model.provider}`);
+ 			}
++			const requestOptions: MistralOptions | undefined = credentials
++				? {
++						...options,
++						fetch: createLeasedFetch(
++							credentials,
++							"authorization",
++							options?.fetch,
++							(secret) => `Bearer ${secret}`,
++						),
++					}
++				: options;
+ 
+ 			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
+ 			const transformedMessages = transformMessages(normalizedContext.messages, model, (id) =>
+@@ -150,9 +177,20 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
+ 			if (nextPayload !== undefined) {
+ 				payload = nextPayload as MistralChatPayload;
+ 			}
+-			const mistralStream = await requestMistralStream(model, payload, apiKey, options);
++			const mistralStream = await requestMistralStream(model, payload, apiKey, requestOptions);
+ 			stream.push({ type: "start", partial: output });
+-			await consumeChatStream(model, output, stream, mistralStream, options?.onProviderStreamEvent);
++			await consumeChatStream(
++				model,
++				output,
++				stream,
++				mistralStream,
++				options?.onProviderStreamEvent &&
++					(async (chunk, m) =>
++						options.onProviderStreamEvent?.(
++							(await redactEventWithLease(leasedCredentials, chunk)) as typeof chunk,
++							m,
++						)),
++			);
+ 
+ 			if (options?.signal?.aborted) {
+ 				throw new Error("Request was aborted");
+@@ -168,8 +206,13 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
+ 			stream.push({ type: "done", reason: output.stopReason, message: output });
+ 			stream.end();
+ 		} catch (error) {
++			// An errored or aborted response never carries tool calls into dispatch or persistence.
++			output.content = output.content.filter((block) => block.type !== "toolCall");
+ 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+-			output.errorMessage = formatMistralError(error);
++			output.errorMessage = await redactWithLease(
++				error instanceof CredentialPreflightError ? undefined : leasedCredentials,
++				formatMistralError(error),
++			);
+ 			stream.push({ type: "error", reason: output.stopReason, error: output });
+ 			stream.end();
+ 		}
+@@ -187,7 +230,7 @@ export const streamSimple: StreamFunction<"mistral-conversations", SimpleStreamO
+ 	options?: SimpleStreamOptions,
+ ): AssistantMessageEventStream => {
+ 	const apiKey = options?.apiKey;
+-	if (!apiKey) {
++	if (!apiKey && !options?.credentials) {
+ 		throw new Error(`No API key for provider: ${model.provider}`);
+ 	}
+ 
+@@ -319,7 +362,13 @@ async function requestMistralStream(
+ 		combinedSignal.cleanup();
+ 	}
+ 
+-	await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
++	await options?.onResponse?.(
++		await redactResponseWithLease(options?.credentials, {
++			status: response.status,
++			headers: headersToRecord(response.headers),
++		}),
++		model,
++	);
+ 
+ 	if (!response.ok) {
+ 		const body = await response.text();
+diff --git a/vendor/pi/packages/ai/src/api/pi-messages.ts b/vendor/pi/packages/ai/src/api/pi-messages.ts
+index 59b5456..3afa646 100644
+--- a/vendor/pi/packages/ai/src/api/pi-messages.ts
++++ b/vendor/pi/packages/ai/src/api/pi-messages.ts
+@@ -9,6 +9,16 @@
+  * models.json custom provider with `"api": "pi-messages"`.
+  */
+ 
++import {
++	assertCredentialApiIdentity,
++	assertCredentialOptions,
++	CredentialPreflightError,
++	createLeasedFetch,
++	redactEventWithLease,
++	redactResponseWithLease,
++	redactWithLease,
++	type SplyceCredentials,
++} from "../splyce-credentials.ts";
+ import type {
+ 	AssistantMessage,
+ 	AssistantMessageEvent,
+@@ -181,6 +191,9 @@ function appendRewriteDiagnostic(message: AssistantMessage, rewrite: PiMessagesR
+ 	});
+ }
+ 
++const DONE_REASONS: ReadonlySet<string> = new Set(["stop", "length", "toolUse"]);
++const ERROR_REASONS: ReadonlySet<string> = new Set(["aborted", "error"]);
++
+ function createEventConverter(model: Model<"pi-messages">) {
+ 	const partial: AssistantMessage = {
+ 		role: "assistant",
+@@ -197,6 +210,14 @@ function createEventConverter(model: Model<"pi-messages">) {
+ 	return (event: PiMessagesEvent): AssistantMessageEvent => {
+ 		switch (event.type) {
+ 			case "done":
++				// The wire contract: a done event ends a completed message. Anything else is a mismatch, not a result.
++				if (!DONE_REASONS.has(event.reason))
++					throw new Error(`pi-messages done event has unsupported reason: ${String(event.reason)}`);
++				if (toolArguments.size > 0)
++					throw new Error("pi-messages done event arrived while a tool call was still open");
++				if (event.reason === "toolUse" && !partial.content.some((block) => block?.type === "toolCall")) {
++					throw new Error("pi-messages done event reports toolUse but the message has no tool call");
++				}
+ 				Object.assign(partial, {
+ 					stopReason: event.reason,
+ 					usage: event.usage,
+@@ -211,6 +232,10 @@ function createEventConverter(model: Model<"pi-messages">) {
+ 				appendRewriteDiagnostic(partial, event.rewrite);
+ 				return { type: "done", reason: event.reason, message: partial };
+ 			case "error":
++				if (!ERROR_REASONS.has(event.reason))
++					throw new Error(`pi-messages error event has unsupported reason: ${String(event.reason)}`);
++				// An errored or aborted response never carries tool calls into dispatch or persistence.
++				partial.content = partial.content.filter((block) => block?.type !== "toolCall");
+ 				Object.assign(partial, {
+ 					stopReason: event.reason,
+ 					usage: event.usage,
+@@ -276,6 +301,8 @@ function createEventConverter(model: Model<"pi-messages">) {
+ 					toolCall: partial.content[event.contentIndex] as ToolCall,
+ 					partial,
+ 				};
++			default:
++				throw new Error(`pi-messages: unknown event type ${String((event as { type?: unknown }).type)}`);
+ 		}
+ 
+ 		return { ...event, partial } as AssistantMessageEvent;
+@@ -329,7 +356,12 @@ function parsePiMessagesEvent(raw: string): PiMessagesEvent | undefined {
+ 	return data && data !== "[DONE]" ? (JSON.parse(data) as PiMessagesEvent) : undefined;
+ }
+ 
+-function createErrorEvent(model: Model<"pi-messages">, error: unknown, aborted: boolean): AssistantMessageEvent {
++async function createErrorEvent(
++	model: Model<"pi-messages">,
++	error: unknown,
++	aborted: boolean,
++	credentials?: SplyceCredentials,
++): Promise<AssistantMessageEvent> {
+ 	const reason = aborted ? "aborted" : "error";
+ 	const assistantMessage: AssistantMessage = {
+ 		role: "assistant",
+@@ -339,15 +371,32 @@ function createErrorEvent(model: Model<"pi-messages">, error: unknown, aborted:
+ 		model: model.id,
+ 		usage: createEmptyUsage(),
+ 		stopReason: reason,
+-		errorMessage: error instanceof Error ? error.message : String(error),
++		// A native redactor knows the secret only inside the lease: redact there, and if the lease is gone the message
++		// degrades to a generic one rather than risking raw provider text.
++		errorMessage: await redactWithLease(
++			error instanceof CredentialPreflightError ? undefined : credentials,
++			error instanceof Error ? error.message : String(error),
++		),
+ 		timestamp: Date.now(),
+ 	};
+ 
+ 	if (!aborted && error instanceof PiMessagesResponseError) {
+-		appendAssistantMessageDiagnostic(
+-			assistantMessage,
+-			createAssistantMessageDiagnostic("pi_messages_response_failure", error, error.diagnosticDetails),
++		const diagnostic = createAssistantMessageDiagnostic(
++			"pi_messages_response_failure",
++			error,
++			error.diagnosticDetails,
+ 		);
++		// The diagnostic embeds the error and the response body. The shared lease-scoped sanitizer redacts every string
++		// key and value before serialization. If the lease is revoked or the redactor fails the diagnostic is dropped:
++		// the terminal event is still delivered and no unredacted byte is ever kept.
++		try {
++			appendAssistantMessageDiagnostic(
++				assistantMessage,
++				(await redactEventWithLease(credentials, diagnostic)) as typeof diagnostic,
++			);
++		} catch {
++			// generic terminal only
++		}
+ 	}
+ 
+ 	return { type: "error", reason, error: assistantMessage };
+@@ -369,9 +418,19 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
+ 	const eventStream = new AssistantMessageEventStream();
+ 	const convertEvent = createEventConverter(model);
+ 
++	// Captured before any caller callback runs: onPayload may mutate options, and error/observer paths must keep the
++	// credentials the call was admitted with.
++	const leasedCredentials = options?.credentials;
+ 	void (async () => {
+ 		try {
+-			const apiKey = options?.apiKey;
++			assertCredentialApiIdentity(model.api, "pi-messages", options);
++			assertCredentialOptions(options ?? {}, model.headers);
++			// Splyce: with a lease the request carries a placeholder and a fetch that leases the real key on every send.
++			const credentials = leasedCredentials;
++			const apiKey = credentials ? "splyce-leased-placeholder" : options?.apiKey;
++			const sendFetch = credentials
++				? createLeasedFetch(credentials, "authorization", options?.fetch, (secret) => `Bearer ${secret}`)
++				: (options?.fetch ?? globalThis.fetch);
+ 			if (!apiKey) {
+ 				throw new Error(`No API key provided for provider "${model.provider}"`);
+ 			}
+@@ -398,7 +457,7 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
+ 				payload = nextPayload;
+ 			}
+ 
+-			const response = await (options?.fetch ?? globalThis.fetch)(url, {
++			const response = await sendFetch(url, {
+ 				method: "POST",
+ 				headers: providerHeadersToRecord(
+ 					getIdentityHeaders(model, options?.identity),
+@@ -413,7 +472,13 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
+ 				signal: options?.signal,
+ 			});
+ 
+-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
++			await options?.onResponse?.(
++				await redactResponseWithLease(leasedCredentials, {
++					status: response.status,
++					headers: headersToRecord(response.headers),
++				}),
++				model,
++			);
+ 
+ 			if (!response.ok) {
+ 				const body = await response.text();
+@@ -424,8 +489,11 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
+ 			}
+ 
+ 			for await (const piEvent of readPiMessagesEvents(response.body)) {
+-				await options?.onProviderStreamEvent?.(piEvent, model);
+-				const event = convertEvent(piEvent);
++				// Sanitized once inside the lease and used for BOTH the observer and the conversion: a provider error
++				// event's errorMessage and rewrite diagnostic must not carry the credential into the message.
++				const safeEvent = (await redactEventWithLease(leasedCredentials, piEvent)) as typeof piEvent;
++				await options?.onProviderStreamEvent?.(safeEvent, model);
++				const event = convertEvent(safeEvent);
+ 				eventStream.push(event);
+ 				if (event.type === "done" || event.type === "error") {
+ 					return;
+@@ -434,7 +502,7 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
+ 
+ 			throw new Error(`${model.provider} stream ended without a terminal event`);
+ 		} catch (error) {
+-			eventStream.push(createErrorEvent(model, error, options?.signal?.aborted ?? false));
++			eventStream.push(await createErrorEvent(model, error, options?.signal?.aborted ?? false, leasedCredentials));
+ 		}
+ 	})();
+ 
+diff --git a/vendor/pi/packages/ai/src/utils/model-operations.ts b/vendor/pi/packages/ai/src/utils/model-operations.ts
+index e034cd3..c675d65 100644
+--- a/vendor/pi/packages/ai/src/utils/model-operations.ts
++++ b/vendor/pi/packages/ai/src/utils/model-operations.ts
+@@ -24,6 +24,8 @@ export const CREDENTIAL_APIS: ReadonlySet<string> = new Set([
+ 	"anthropic-messages",
+ 	"google-generative-ai",
+ 	"google-vertex",
++	"mistral-conversations",
++	"pi-messages",
+ ]);
+ 
+ export function assertCredentialsSupported(api: string, options: { credentials?: unknown } | undefined): void {

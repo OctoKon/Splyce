@@ -1,0 +1,245 @@
+diff --git a/vendor/pi/packages/coding-agent/src/core/session-manager.ts b/vendor/pi/packages/coding-agent/src/core/session-manager.ts
+index 57f9655..7d8fe1e 100644
+--- a/vendor/pi/packages/coding-agent/src/core/session-manager.ts
++++ b/vendor/pi/packages/coding-agent/src/core/session-manager.ts
+@@ -15,8 +15,10 @@ import { randomUUID } from "crypto";
+ import {
+ 	appendFileSync,
+ 	closeSync,
++	constants,
+ 	createReadStream,
+ 	existsSync,
++	fstatSync,
+ 	mkdirSync,
+ 	openSync,
+ 	readdirSync,
+@@ -24,6 +26,7 @@ import {
+ 	type Stats,
+ 	statSync,
+ 	writeFileSync,
++	writeSync,
+ } from "fs";
+ import { readdir, stat } from "fs/promises";
+ import { basename, join, resolve } from "path";
+@@ -630,14 +633,17 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
+ 
+ 	const entries: FileEntry[] = [];
+ 	let pending = "";
++	let totalBytesRead = 0n;
+ 	const fd = openSync(resolvedFilePath, "r");
+ 	try {
++		const initialStat = fstatSync(fd, { bigint: true });
+ 		const decoder = new StringDecoder("utf8");
+ 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
+ 
+ 		while (true) {
+ 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+ 			if (bytesRead === 0) break;
++			totalBytesRead += BigInt(bytesRead);
+ 
+ 			pending += decoder.write(buffer.subarray(0, bytesRead));
+ 			let lineStart = 0;
+@@ -654,19 +660,47 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
+ 		pending += decoder.end();
+ 		const finalEntry = parseSessionEntryLine(pending);
+ 		if (finalEntry) entries.push(finalEntry);
++
++		// Validate session header before repairing the file.
++		if (entries.length === 0) return entries;
++		const header = entries[0];
++		if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
++			return [];
++		}
++
++		if (pending) {
++			let appendFd: number;
++			try {
++				appendFd = openSync(resolvedFilePath, constants.O_WRONLY | constants.O_APPEND);
++			} catch (error) {
++				if ((error as NodeJS.ErrnoException).code === "ENOENT")
++					throw new Error("Session file changed while loading");
++				throw error;
++			}
++			try {
++				const readStat = fstatSync(fd, { bigint: true });
++				const appendStat = fstatSync(appendFd, { bigint: true });
++				if (
++					readStat.dev !== appendStat.dev ||
++					readStat.ino !== appendStat.ino ||
++					readStat.size !== totalBytesRead ||
++					appendStat.size !== totalBytesRead ||
++					readStat.mtimeNs !== initialStat.mtimeNs ||
++					readStat.ctimeNs !== initialStat.ctimeNs ||
++					appendStat.mtimeNs !== initialStat.mtimeNs ||
++					appendStat.ctimeNs !== initialStat.ctimeNs
++				) {
++					throw new Error("Session file changed while loading");
++				}
++				writeSync(appendFd, "\n");
++			} finally {
++				closeSync(appendFd);
++			}
++		}
++		return entries;
+ 	} finally {
+ 		closeSync(fd);
+ 	}
+-
+-	// Validate session header before repairing the file.
+-	if (entries.length === 0) return entries;
+-	const header = entries[0];
+-	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
+-		return [];
+-	}
+-
+-	if (pending) appendFileSync(resolvedFilePath, "\n");
+-	return entries;
+ }
+ 
+ /**
+diff --git a/vendor/pi/packages/coding-agent/test/session-manager/file-operations.test.ts b/vendor/pi/packages/coding-agent/test/session-manager/file-operations.test.ts
+index 8353ccd..097e035 100644
+--- a/vendor/pi/packages/coding-agent/test/session-manager/file-operations.test.ts
++++ b/vendor/pi/packages/coding-agent/test/session-manager/file-operations.test.ts
+@@ -1,19 +1,22 @@
++import { syncBuiltinESMExports } from "node:module";
+ import { constants as bufferConstants } from "buffer";
+-import {
++import fs, {
+ 	appendFileSync,
++	chmodSync,
+ 	closeSync,
+ 	existsSync,
+ 	mkdirSync,
+ 	mkdtempSync,
+ 	openSync,
+ 	readFileSync,
++	renameSync,
+ 	rmSync,
+ 	writeFileSync,
+ 	writeSync,
+ } from "fs";
+ import { tmpdir } from "os";
+ import { join } from "path";
+-import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ import { findMostRecentSession, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
+ import { assistantMsg, readSessionFileRoles, userMsg } from "../utilities.ts";
+ 
+@@ -23,8 +26,7 @@ describe("loadEntriesFromFile", () => {
+ 	let tempDir: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
+-		mkdirSync(tempDir, { recursive: true });
++		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
+ 	});
+ 
+ 	afterEach(() => {
+@@ -113,6 +115,106 @@ describe("loadEntriesFromFile", () => {
+ 		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
+ 	});
+ 
++	it("does not repair a file that replaced the loaded session", () => {
++		const file = join(tempDir, "session.jsonl");
++		const original = '{"type":"session","id":"one"}';
++		const replacement = '{"type":"session","id":"two"}';
++		writeFileSync(file, original);
++		const actualRead = fs.readSync;
++		let replaced = false;
++		const read = vi.spyOn(fs, "readSync").mockImplementation((...args) => {
++			const count = Reflect.apply(actualRead, fs, args) as number;
++			if (count === 0 && !replaced) {
++				replaced = true;
++				renameSync(file, join(tempDir, "loaded.jsonl"));
++				writeFileSync(file, replacement);
++			}
++			return count;
++		});
++		syncBuiltinESMExports();
++		try {
++			expect(() => loadEntriesFromFile(file)).toThrow("Session file changed while loading");
++			expect(replaced).toBe(true);
++			expect(readFileSync(file, "utf8")).toBe(replacement);
++			expect(readFileSync(join(tempDir, "loaded.jsonl"), "utf8")).toBe(original);
++		} finally {
++			read.mockRestore();
++			syncBuiltinESMExports();
++		}
++	});
++
++	it("does not repair a session that grows while loading", () => {
++		const file = join(tempDir, "growing.jsonl");
++		const content = '{"type":"session","id":"one"}';
++		writeFileSync(file, content);
++		const actualRead = fs.readSync;
++		let changed = false;
++		const read = vi.spyOn(fs, "readSync").mockImplementation((...args) => {
++			const count = Reflect.apply(actualRead, fs, args) as number;
++			if (count === 0 && !changed) {
++				changed = true;
++				appendFileSync(file, "extra");
++			}
++			return count;
++		});
++		syncBuiltinESMExports();
++		try {
++			expect(() => loadEntriesFromFile(file)).toThrow("Session file changed while loading");
++			expect(changed).toBe(true);
++			expect(readFileSync(file, "utf8")).toBe(`${content}extra`);
++		} finally {
++			read.mockRestore();
++			syncBuiltinESMExports();
++		}
++	});
++
++	it("does not repair a session rewritten at the same length while loading", () => {
++		const file = join(tempDir, "rewritten.jsonl");
++		const original = '{"type":"session","id":"one"}';
++		const replacement = '{"type":"session","id":"two"}';
++		writeFileSync(file, original);
++		const actualRead = fs.readSync;
++		let changed = false;
++		const read = vi.spyOn(fs, "readSync").mockImplementation((...args) => {
++			const count = Reflect.apply(actualRead, fs, args) as number;
++			if (count === 0 && !changed) {
++				changed = true;
++				writeFileSync(file, replacement);
++			}
++			return count;
++		});
++		syncBuiltinESMExports();
++		try {
++			expect(() => loadEntriesFromFile(file)).toThrow("Session file changed while loading");
++			expect(changed).toBe(true);
++			expect(readFileSync(file, "utf8")).toBe(replacement);
++		} finally {
++			read.mockRestore();
++			syncBuiltinESMExports();
++		}
++	});
++
++	it("reads a terminated read-only session without requiring write access", () => {
++		const file = join(tempDir, "read-only.jsonl");
++		const content = '{"type":"session","id":"read-only"}\n';
++		writeFileSync(file, content);
++		chmodSync(file, 0o444);
++		const actualOpen = fs.openSync;
++		const open = vi.spyOn(fs, "openSync").mockImplementation((...args) => {
++			if (args[1] !== "r") throw new Error("Unexpected write open");
++			return Reflect.apply(actualOpen, fs, args) as number;
++		});
++		syncBuiltinESMExports();
++		try {
++			expect(loadEntriesFromFile(file)).toHaveLength(1);
++			expect(readFileSync(file, "utf8")).toBe(content);
++		} finally {
++			open.mockRestore();
++			syncBuiltinESMExports();
++			chmodSync(file, 0o666);
++		}
++	});
++
+ 	it("does not modify an unterminated non-session file", () => {
+ 		const file = join(tempDir, "invalid.jsonl");
+ 		const content = '{"type":"message","id":"1"}';

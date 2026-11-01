@@ -12,15 +12,26 @@
  * - Uses native @tauri-apps/api/core invoke with zero mock fallback.
  */
 
+import { Channel, invoke as invokeNative } from "@tauri-apps/api/core";
 import {
   PROTOCOL_VERSION,
   type CommandOp,
   type CommandPayloads,
   type Handshake,
+  type PortAvailability,
   type SplyceCommand,
   type SplyceEvent,
   validateHandshake,
+  validatePortAvailability,
 } from "@splyce/pi/contracts";
+
+interface EngineLifecycleEvent {
+  protocolVersion: number;
+  kind: "engine_exited";
+  expected: boolean;
+  exitCode: number | null;
+  cleanupComplete: boolean;
+}
 
 export type EngineConnectionState =
   "disconnected" | "connecting" | "unavailable" | "ready" | "busy" | "error";
@@ -58,6 +69,31 @@ export interface EngineStore {
 // Internal reactive state
 let currentState: EngineConnectionState = "disconnected";
 let lastHandshake: Handshake | null = null;
+let currentPorts: PortAvailability | null = null;
+let epoch = 0;
+const portListeners = new Set<(ports: PortAvailability | null) => void>();
+
+function notifyPorts(ports: PortAvailability | null) {
+  currentPorts = ports;
+  for (const listener of portListeners) listener(ports);
+}
+
+export const portAvailability = {
+  subscribe(fn: (ports: PortAvailability | null) => void): Unsubscribe {
+    fn(currentPorts);
+    portListeners.add(fn);
+    return () => portListeners.delete(fn);
+  },
+};
+
+function projectPorts(ports: PortAvailability): boolean {
+  return (
+    lastHandshake?.readiness.state === "ready" &&
+    ports.generation &&
+    ports.provider &&
+    ports.workspace
+  );
+}
 const stateListeners = new Set<(state: EngineConnectionState) => void>();
 const eventListeners = new Set<EventCallback>();
 const sessionCursors = new Map<string, number>();
@@ -70,43 +106,25 @@ function notifyState(next: EngineConnectionState) {
   }
 }
 
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 async function getTauriInvoke(): Promise<
   ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null
 > {
-  if (typeof window === "undefined") return null;
-  try {
-    // Dynamic import to satisfy @tauri-apps/api/core module resolution in packaged Tauri WebView
-    const core = (await import("@tauri-apps/api/core" as string)) as {
-      invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
-    };
-    return core.invoke;
-  } catch {
-    if (typeof window !== "undefined") {
-      const win = window as unknown as {
-        __TAURI_INTERNALS__?: {
-          invoke?: (
-            cmd: string,
-            args?: Record<string, unknown>,
-          ) => Promise<unknown>;
-        };
-        __TAURI__?: {
-          core?: {
-            invoke: (
-              cmd: string,
-              args?: Record<string, unknown>,
-            ) => Promise<unknown>;
-          };
-        };
-      };
-      if (win.__TAURI_INTERNALS__?.invoke) {
-        return win.__TAURI_INTERNALS__.invoke;
-      }
-      if (win.__TAURI__?.core?.invoke) {
-        return win.__TAURI__.core.invoke;
-      }
-    }
-    return null;
-  }
+  return isTauriRuntime() ? invokeNative : null;
+}
+
+function handleLifecycle(event: EngineLifecycleEvent): boolean {
+  if (event.protocolVersion !== PROTOCOL_VERSION) return false;
+  if (event.kind !== "engine_exited") return false;
+  epoch++;
+  lastHandshake = null;
+  notifyPorts(null);
+  notifyState("disconnected");
+  for (const dispose of [...activeSubscriptions.values()]) dispose();
+  return true;
 }
 
 /**
@@ -124,6 +142,9 @@ export const connectionState = {
  * Perform native handshake and establish verified readiness
  */
 export async function handshake(): Promise<Handshake> {
+  const handshakeEpoch = ++epoch;
+  lastHandshake = null;
+  notifyPorts(null);
   notifyState("connecting");
   const invokeTauri = await getTauriInvoke();
   if (!invokeTauri) {
@@ -131,21 +152,29 @@ export async function handshake(): Promise<Handshake> {
     throw new Error("TAURI_IPC_UNAVAILABLE: Native backend bridge not found");
   }
 
+  const lifecycle = new Channel<EngineLifecycleEvent>();
+  let exited = false;
+  lifecycle.onmessage = (event) => {
+    if (handshakeEpoch === epoch) exited = handleLifecycle(event) || exited;
+  };
+
   try {
     const raw = await invokeTauri("handshake", {
       protocolVersion: PROTOCOL_VERSION,
       schemaVersion: 1,
+      onLifecycle: lifecycle,
     });
     const verified = validateHandshake(raw);
-    lastHandshake = verified;
-    if (verified.readiness.state === "ready") {
-      notifyState("ready");
-    } else {
-      notifyState("unavailable");
+    if (!exited && handshakeEpoch === epoch) {
+      lastHandshake = verified;
+      const ports = validatePortAvailability(verified.readiness.ports);
+      notifyPorts(ports);
+      notifyState(projectPorts(ports) ? "ready" : "unavailable");
     }
     return verified;
   } catch (err) {
-    notifyState("error");
+    lifecycle.onmessage = () => {};
+    if (!exited && handshakeEpoch === epoch) notifyState("error");
     throw err;
   }
 }
@@ -162,6 +191,43 @@ export function onEvent(callback: EventCallback): Unsubscribe {
  * Internal/testing event dispatcher used by Tauri IPC or fixture harnesses
  */
 export function dispatchEngineEvent(event: SplyceEvent): void {
+  if (lastHandshake && event.kind === "engine.status") {
+    try {
+      const payload = event.payload;
+      if (
+        event.protocolVersion !== PROTOCOL_VERSION ||
+        !payload ||
+        !["ready", "busy", "stopping", "stopped"].includes(payload.state) ||
+        !Number.isSafeInteger(payload.activeWorkers) ||
+        payload.activeWorkers < 0 ||
+        Object.keys(payload).some(
+          (key) => !["state", "activeWorkers", "ports"].includes(key),
+        )
+      )
+        throw new Error("Invalid engine status");
+      const ports = validatePortAvailability(payload.ports);
+      if (
+        lastHandshake.readiness.state !== "ready" &&
+        Object.values(ports).some(Boolean)
+      )
+        throw new Error("Invalid engine status");
+      notifyPorts(ports);
+      notifyState(
+        projectPorts(ports) && payload.state === "ready"
+          ? "ready"
+          : projectPorts(ports) && payload.state === "busy"
+            ? "busy"
+            : "unavailable",
+      );
+    } catch {
+      lastHandshake = null;
+      notifyPorts(null);
+      notifyState("error");
+      return;
+    }
+  } else if (event.kind === "engine.status" && !lastHandshake) {
+    return;
+  }
   for (const listener of eventListeners) {
     listener(event);
   }
@@ -183,15 +249,30 @@ export async function subscribe(
   activeSubscriptions.get(sessionId)?.();
 
   const fromSeq = afterSeq ?? sessionCursors.get(sessionId) ?? 0;
-  await invokeTauri("subscribe", { sessionId, afterSeq: fromSeq });
+  const subscriptionEpoch = epoch;
+  const events = new Channel<SplyceEvent>();
+  events.onmessage = (event) => {
+    if (subscriptionEpoch === epoch) dispatchEngineEvent(event);
+  };
+  const lifecycle = new Channel<EngineLifecycleEvent>();
+  lifecycle.onmessage = (event) => {
+    if (subscriptionEpoch === epoch) handleLifecycle(event);
+  };
+  await invokeTauri("subscribe", {
+    sessionId,
+    afterSeq: fromSeq,
+    onEvent: events,
+    onLifecycle: lifecycle,
+  });
 
   let disposed = false;
   const dispose = () => {
     if (disposed) return;
     disposed = true;
-    // The native subscription ends with its channel (#61). Unsubscribing never
-    // reaches the engine as a cancel: cancel always means cancel the run.
+    events.onmessage = () => {};
+    lifecycle.onmessage = () => {};
     activeSubscriptions.delete(sessionId);
+    // Cancel stops a run; native subscription disposal has a separate contract.
   };
 
   activeSubscriptions.set(sessionId, dispose);
