@@ -42,9 +42,19 @@ function Get-RootTask([string]$Name, [scriptblock]$Enumerate = { Get-ScheduledTa
   return $null
 }
 
+function Resolve-TaskPrincipalSid([string]$Principal) {
+  if ([string]::IsNullOrWhiteSpace($Principal)) { throw 'Task principal could not be resolved.' }
+  try {
+    if ($Principal -match '^S-\d+(?:-\d+)+$') {
+      return [Security.Principal.SecurityIdentifier]::new($Principal).Value
+    }
+    return ([Security.Principal.NTAccount]::new($Principal)).Translate([Security.Principal.SecurityIdentifier]).Value
+  } catch { throw 'Task principal could not be resolved.' }
+}
+
 function Assert-OwnedTask($Task, $Expected) {
   if ($null -eq $Task -or $Task.TaskName -ne $Expected.name -or $Task.TaskPath -ne '\' -or
-      $Task.Principal.UserId -ne $Expected.user -or $Task.Principal.LogonType -ne 'Interactive' -or
+      (Resolve-TaskPrincipalSid $Task.Principal.UserId) -ne $Expected.sid -or $Task.Principal.LogonType -ne 'Interactive' -or
       $Task.Principal.RunLevel -ne 'Limited' -or @($Task.Actions | Where-Object { $null -ne $_ }).Count -ne 1 -or
       $Task.Actions[0].Execute -ne $Expected.shell -or $Task.Actions[0].Arguments -ne $Expected.arguments -or
       $Task.Actions[0].WorkingDirectory -ne $Expected.root -or
@@ -191,7 +201,7 @@ try {
   $startedAfter = [datetime]::UtcNow
   $taskInfo = $null
   $arguments = '-NoProfile -NonInteractive -File {0} -RunDirectory {1} -Nonce {2} -Mode {3}' -f (Quote-TaskPath $worker), (Quote-TaskPath $runDirectory), $nonce, $Mode
-  $taskExpected = [pscustomobject]@{ name = $taskName; user = $identity.Name; shell = $shell; arguments = $arguments; root = $root }
+  $taskExpected = [pscustomobject]@{ name = $taskName; sid = $identity.User.Value; shell = $shell; arguments = $arguments; root = $root }
   if ($controllerElevation.elevated -eq $false) {
     $workerProcess = Start-Process -FilePath $shell -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden -Wait -PassThru
     $workerExit = $workerProcess.ExitCode
