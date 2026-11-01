@@ -123,6 +123,7 @@ function selectedProfile(writer) {
           providerConnectionId:
             fixtures.providerConnection.providerConnectionId,
           connectionRevision: "c1",
+          modelId: "fixture-model",
         },
       ],
       egressPolicyRefs: [],
@@ -173,6 +174,7 @@ test("current uses the exact applied immutable profile with its selected config 
           providerConnectionId:
             fixtures.providerConnection.providerConnectionId,
           connectionRevision: "c1",
+          modelId: "fixture-model",
         },
       ],
       egressPolicyRefs: [],
