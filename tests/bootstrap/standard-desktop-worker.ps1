@@ -74,11 +74,34 @@ using System.Runtime.InteropServices;
 public static class StandardDesktopIntegrity {
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, int access, out IntPtr token);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr buffer, int length, out int returned);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint id);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
-  public static int ReadRid(IntPtr process) {
+  public sealed class AccessResult { public bool Success { get; set; } public int Win32Error { get; set; } }
+  static AccessResult ProbeProcess(uint access) {
+    IntPtr handle = OpenProcess(access, false, GetCurrentProcessId());
+    int error = handle == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+    try { return new AccessResult { Success = handle != IntPtr.Zero, Win32Error = error }; }
+    finally { if (handle != IntPtr.Zero) CloseHandle(handle); }
+  }
+  static AccessResult ProbeToken(int access) {
+    IntPtr handle = IntPtr.Zero;
+    bool opened = OpenProcessToken(GetCurrentProcess(), access, out handle);
+    int error = opened ? 0 : Marshal.GetLastWin32Error();
+    try { return new AccessResult { Success = opened, Win32Error = error }; }
+    finally { if (handle != IntPtr.Zero) CloseHandle(handle); }
+  }
+  public static System.Collections.Generic.Dictionary<string, AccessResult> ReadSelfAccess() {
+    return new System.Collections.Generic.Dictionary<string, AccessResult> {
+      { "processLimitedQuery", ProbeProcess(0x1000) }, { "processAllAccess", ProbeProcess(0x1FFFFF) },
+      { "tokenQuery", ProbeToken(8) }, { "tokenDuplicate", ProbeToken(2) }
+    };
+  }
+  public static int ReadRid() {
     IntPtr token = IntPtr.Zero, buffer = IntPtr.Zero;
     try {
-      if (!OpenProcessToken(process, 8, out token)) return -1;
+      if (!OpenProcessToken(GetCurrentProcess(), 8, out token)) return -1;
       int length;
       GetTokenInformation(token, 25, IntPtr.Zero, 0, out length);
       if (length <= 0) return -1;
@@ -95,7 +118,9 @@ public static class StandardDesktopIntegrity {
   }
 }
 '@
-  $rid = [StandardDesktopIntegrity]::ReadRid($process.Handle)
+  $rid = [StandardDesktopIntegrity]::ReadRid()
+  $selfAccess = [StandardDesktopIntegrity]::ReadSelfAccess() | ConvertTo-Json -Compress
+  [IO.File]::WriteAllText((Join-Path $RunDirectory 'diagnostics/self-access.json'), $selfAccess, [Text.UTF8Encoding]::new($false))
   $profileSame = [IO.Path]::GetFullPath($env:USERPROFILE) -eq [IO.Path]::GetFullPath([string]$runConfig.userProfile)
   $profileWritable = Test-ProfileWritable $env:USERPROFILE $Nonce
   $attestation = @{

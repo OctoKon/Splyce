@@ -147,5 +147,6 @@ jobs:
             apps/desktop/src-tauri/target/bootstrap-smoke/*/diagnostics/result.json
             apps/desktop/src-tauri/target/bootstrap-smoke/*/diagnostics/driver.log
             apps/desktop/src-tauri/target/bootstrap-standard-ci/*/diagnostics/result.json
+            apps/desktop/src-tauri/target/bootstrap-standard-ci/*/diagnostics/self-access.json
           if-no-files-found: ignore
           retention-days: 7
