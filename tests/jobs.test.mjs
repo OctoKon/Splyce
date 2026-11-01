@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   isoWeekday,
+  DEFAULT_GRACE_MS,
   JobError,
   MIN_INTERVAL_MS,
   nextOccurrence,
@@ -470,4 +471,102 @@ test("planner outputs are frozen", () => {
   assert.ok(Object.isFrozen(plans[1].dispatch));
   assert.ok(Object.isFrozen(plans[1].dispatch[0]));
   assert.ok(Object.isFrozen(plans[1].states[0]));
+});
+
+test("a tick within the grace period runs the slot on time", () => {
+  const { plans } = run([interval()], [HOUR - 1, HOUR + DEFAULT_GRACE_MS]);
+  assert.deepEqual(plans[1].dispatch, [
+    {
+      jobId: "job-i",
+      revision: "r1",
+      occurrenceId: "job-i@r1#1",
+      scheduledUtcMs: HOUR,
+      catchUp: false,
+    },
+  ]);
+});
+
+test("skip policy: a slot past the grace period is reported, not run", () => {
+  const { plans, states } = run(
+    [interval()],
+    [HOUR - 1, HOUR + DEFAULT_GRACE_MS + 1],
+  );
+  assert.deepEqual(ids(plans[1]), []);
+  assert.deepEqual(plans[1].missed, [
+    {
+      jobId: "job-i",
+      reason: "late",
+      count: 1,
+      firstUtcMs: HOUR,
+      latestUtcMs: HOUR,
+    },
+  ]);
+  assert.equal(states[0].lastDispatchedId, undefined);
+  // The cursor passed the slot, so a later tick does not resurrect it.
+  assert.deepEqual(
+    ids(run([interval()], [HOUR + 2 * DEFAULT_GRACE_MS], { states }).plans[0]),
+    [],
+  );
+});
+
+test("latest policy: after downtime exactly one catch-up run, marked as such", () => {
+  const job = interval({ catchUp: "latest" });
+  const { plans } = run(
+    [job],
+    [HOUR - 1, 10 * HOUR + 30 * 60_000, 10 * HOUR + 31 * 60_000],
+  );
+  assert.deepEqual(
+    plans[1].dispatch.map((d) => [d.occurrenceId, d.catchUp]),
+    [["job-i@r1#10", true]],
+  );
+  assert.deepEqual(plans[1].missed, [
+    {
+      jobId: "job-i",
+      reason: "late",
+      count: 9,
+      firstUtcMs: HOUR,
+      latestUtcMs: 9 * HOUR,
+    },
+  ]);
+  assert.deepEqual(ids(plans[2]), []);
+});
+
+test("daily catch-up after a multi-day outage runs one slot at most", () => {
+  const job = daily({ catchUp: "latest", timeZone: "Asia/Kolkata" });
+  const start = Date.UTC(2026, 10, 1);
+  const { plans, states } = run([job], [start, start + 6 * 24 * HOUR]);
+  assert.equal(plans[1].dispatch.length, 1);
+  assert.equal(plans[1].dispatch[0].occurrenceId, "job-a@r1#2026-11-06");
+  assert.equal(plans[1].dispatch[0].catchUp, true);
+  // 09:00 IST slots on Nov 1-6 fall in the window: one runs, five are late.
+  assert.equal(states[0].missed.byReason.late, 5);
+});
+
+test("grace must be a non-negative integer", () => {
+  for (const graceMs of [-1, 0.5, Number.NaN]) {
+    rejects(
+      () =>
+        planTick({
+          nowUtcMs: 0,
+          schedulingEnabled: true,
+          jobs: [],
+          states: [],
+          graceMs,
+        }),
+      "INVALID_TICK",
+    );
+  }
+  const { plans } = run(
+    [interval()],
+    [HOUR - 1, { now: HOUR + 1, jobs: undefined }],
+  );
+  assert.deepEqual(ids(plans[1]), ["job-i@r1#1"]);
+  const strict = planTick({
+    nowUtcMs: HOUR + 1,
+    schedulingEnabled: true,
+    jobs: [interval()],
+    states: run([interval()], [HOUR - 1]).states,
+    graceMs: 0,
+  });
+  assert.deepEqual(ids(strict), []);
 });

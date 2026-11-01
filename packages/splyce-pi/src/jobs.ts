@@ -482,6 +482,16 @@ export interface TickInput {
   readonly schedulingEnabled: unknown;
   readonly jobs: readonly JobDefinition[];
   readonly states: readonly JobState[];
+  /** How long after its scheduled instant a slot still counts as on time (default DEFAULT_GRACE_MS). */
+  readonly graceMs?: number;
+}
+
+/** A tick that runs within five minutes of a slot still runs it on time. */
+export const DEFAULT_GRACE_MS = 5 * 60_000;
+
+/** A planned occurrence; `catchUp` marks one run under the job's `latest` policy after it was late. */
+export interface Dispatch extends Occurrence {
+  readonly catchUp: boolean;
 }
 
 /** One planning decision for a job in this tick. */
@@ -495,7 +505,7 @@ export interface MissedReport {
 
 export interface TickPlan {
   /** At most one occurrence per job; each still needs native admission before any effect. */
-  readonly dispatch: readonly Occurrence[];
+  readonly dispatch: readonly Dispatch[];
   readonly missed: readonly MissedReport[];
   /** Next states for every input state and every new job, in job order then retained states. */
   readonly states: readonly JobState[];
@@ -539,6 +549,13 @@ export function planTick(input: TickInput): TickPlan {
   assertInstant("nowUtcMs", input.nowUtcMs);
   const now = input.nowUtcMs;
   const enabled = input.schedulingEnabled === true;
+  const graceMs = input.graceMs ?? DEFAULT_GRACE_MS;
+  if (!Number.isSafeInteger(graceMs) || graceMs < 0) {
+    throw new JobError(
+      "INVALID_TICK",
+      "graceMs must be a non-negative integer",
+    );
+  }
   const jobs = input.jobs.map(validateJob);
   const ids = new Set<string>();
   for (const job of jobs) {
@@ -554,7 +571,7 @@ export function planTick(input: TickInput): TickPlan {
     previous.set(state.jobId, state);
   }
 
-  const dispatch: Occurrence[] = [];
+  const dispatch: Dispatch[] = [];
   const missed: MissedReport[] = [];
   const states: JobState[] = [];
   const report = (
@@ -599,18 +616,22 @@ export function planTick(input: TickInput): TickPlan {
       report(job.jobId, "scheduler_disabled", window);
       summary = addMissed(summary, "scheduler_disabled", window);
     } else if (window.latest) {
-      // At most one dispatch per job per tick: the latest slot. Earlier slots
-      // in the same window are reported, never run as a burst.
-      const earlier = scanOccurrences(
-        job,
-        state.cursorUtcMs,
-        window.latest.scheduledUtcMs - 1,
-      );
-      report(job.jobId, "late", earlier);
-      summary = addMissed(summary, "late", earlier);
-      if (window.latest.occurrenceId !== lastDispatchedId) {
-        dispatch.push(window.latest);
-        lastDispatchedId = window.latest.occurrenceId;
+      // At most one dispatch per job per tick, and only the latest slot:
+      // earlier slots in the window are reported, never run as a burst. A
+      // latest slot past the grace period runs only under the `latest`
+      // catch-up policy; under `skip` it is reported too.
+      const latest = window.latest;
+      const onTime = now - latest.scheduledUtcMs <= graceMs;
+      const alreadyDispatched = latest.occurrenceId === lastDispatchedId;
+      const runs = !alreadyDispatched && (onTime || job.catchUp === "latest");
+      const lateUntil =
+        runs || alreadyDispatched ? latest.scheduledUtcMs - 1 : now;
+      const late = scanOccurrences(job, state.cursorUtcMs, lateUntil);
+      report(job.jobId, "late", late);
+      summary = addMissed(summary, "late", late);
+      if (runs) {
+        dispatch.push(Object.freeze({ ...latest, catchUp: !onTime }));
+        lastDispatchedId = latest.occurrenceId;
       }
     }
     states.push(
