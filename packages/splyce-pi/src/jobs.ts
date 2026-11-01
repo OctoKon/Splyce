@@ -121,6 +121,121 @@ function assertSchedule(schedule: unknown): asserts schedule is Schedule {
   throw new JobError("INVALID_SCHEDULE", "unknown schedule kind");
 }
 
+/** A calendar date and wall-clock time in some time zone (month 1-12, ISO weekday 1-7). */
+export interface WallTime {
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
+  readonly hour: number;
+  readonly minute: number;
+}
+
+/** How a wall time resolved to an instant across DST transitions. */
+export type WallTimeResolution =
+  | "exact"
+  /** The wall time does not exist (clocks sprang forward); the instant is shifted past the gap. */
+  | "gap"
+  /** The wall time happens twice (clocks fell back); the first occurrence is used. */
+  | "ambiguous";
+
+const formatters = new Map<string, Intl.DateTimeFormat>();
+function formatterFor(timeZone: string): Intl.DateTimeFormat {
+  let formatter = formatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric",
+      second: "numeric",
+    });
+    formatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
+/** The wall time (to the minute) an instant shows in `timeZone`. */
+export function wallTimeAt(utcMs: number, timeZone: string): WallTime {
+  const fields: Record<string, number> = {};
+  for (const part of formatterFor(timeZone).formatToParts(utcMs)) {
+    if (part.type !== "literal") fields[part.type] = Number(part.value);
+  }
+  return {
+    year: fields.year ?? NaN,
+    month: fields.month ?? NaN,
+    day: fields.day ?? NaN,
+    hour: fields.hour ?? NaN,
+    minute: fields.minute ?? NaN,
+  };
+}
+
+/** UTC offset of `timeZone` at an instant, in ms (local = utc + offset). */
+export function zoneOffsetMs(utcMs: number, timeZone: string): number {
+  const second = Math.floor(utcMs / 1000) * 1000;
+  const w = wallTimeAt(second, timeZone);
+  const seconds = new Date(second).getUTCSeconds();
+  return (
+    Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, seconds) - second
+  );
+}
+
+function sameWallTime(a: WallTime, b: WallTime): boolean {
+  return (
+    a.year === b.year &&
+    a.month === b.month &&
+    a.day === b.day &&
+    a.hour === b.hour &&
+    a.minute === b.minute
+  );
+}
+
+// Real zones differ from UTC by at most 14h, and transitions are rarer than
+// daily, so the offsets 14h either side cover both sides of any transition.
+const OFFSET_PROBE_MS = 14 * 3_600_000;
+
+/**
+ * The instant at which `wall` happens in `timeZone`. A nonexistent wall time
+ * (spring-forward gap) maps to the instant the pre-gap offset gives, which is
+ * just past the gap; a repeated wall time (fall-back overlap) maps to its first
+ * occurrence. Either way exactly one instant is returned, so a daily slot can
+ * neither vanish nor run twice on a transition day.
+ */
+export function resolveWallTime(
+  wall: WallTime,
+  timeZone: string,
+): { readonly utcMs: number; readonly resolution: WallTimeResolution } {
+  const naive = Date.UTC(
+    wall.year,
+    wall.month - 1,
+    wall.day,
+    wall.hour,
+    wall.minute,
+  );
+  const before = zoneOffsetMs(naive - OFFSET_PROBE_MS, timeZone);
+  const after = zoneOffsetMs(naive + OFFSET_PROBE_MS, timeZone);
+  const matches = [...new Set([before, after])]
+    .map((offset) => naive - offset)
+    .filter((utcMs) => sameWallTime(wallTimeAt(utcMs, timeZone), wall))
+    .sort((a, b) => a - b);
+  const first = matches[0];
+  if (first !== undefined) {
+    return {
+      utcMs: first,
+      resolution: matches.length > 1 ? "ambiguous" : "exact",
+    };
+  }
+  return { utcMs: naive - before, resolution: "gap" };
+}
+
+/** ISO weekday (1 = Monday … 7 = Sunday) of a calendar date. */
+export function isoWeekday(year: number, month: number, day: number): number {
+  const d = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return d === 0 ? 7 : d;
+}
+
 /**
  * Validates a definition and returns a frozen copy, so a caller cannot change a
  * schedule after it was checked.

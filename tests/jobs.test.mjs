@@ -5,9 +5,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isoWeekday,
   JobError,
   MIN_INTERVAL_MS,
+  resolveWallTime,
   validateJob,
+  wallTimeAt,
+  zoneOffsetMs,
 } from "../packages/splyce-pi/dist/jobs.js";
 
 const HOUR = 3_600_000;
@@ -98,4 +102,79 @@ test("unknown time zones are rejected", () => {
     validateJob(daily({ timeZone: "America/New_York" })).timeZone,
     "America/New_York",
   );
+});
+
+const wall = (year, month, day, hour, minute) => ({
+  year,
+  month,
+  day,
+  hour,
+  minute,
+});
+const iso = (ms) => new Date(ms).toISOString();
+
+test("wall time and offset follow the zone, including half-hour zones", () => {
+  const t = Date.UTC(2026, 0, 15, 12, 0);
+  assert.deepEqual(wallTimeAt(t, "Asia/Kolkata"), wall(2026, 1, 15, 17, 30));
+  assert.equal(zoneOffsetMs(t, "Asia/Kolkata"), 5.5 * HOUR);
+  assert.equal(zoneOffsetMs(t, "America/New_York"), -5 * HOUR);
+  assert.equal(
+    zoneOffsetMs(Date.UTC(2026, 6, 1), "America/New_York"),
+    -4 * HOUR,
+  );
+  assert.equal(zoneOffsetMs(t, "UTC"), 0);
+});
+
+test("an ordinary wall time resolves exactly", () => {
+  assert.deepEqual(
+    resolveWallTime(wall(2026, 7, 4, 9, 0), "America/New_York"),
+    {
+      utcMs: Date.UTC(2026, 6, 4, 13, 0),
+      resolution: "exact",
+    },
+  );
+  assert.deepEqual(resolveWallTime(wall(2026, 1, 1, 0, 0), "Asia/Kolkata"), {
+    utcMs: Date.UTC(2025, 11, 31, 18, 30),
+    resolution: "exact",
+  });
+});
+
+test("a wall time inside the spring-forward gap runs once, just past the gap", () => {
+  // New York 2026-03-08: 02:00 EST jumps to 03:00 EDT; 02:30 never happens.
+  const r = resolveWallTime(wall(2026, 3, 8, 2, 30), "America/New_York");
+  assert.equal(r.resolution, "gap");
+  assert.equal(iso(r.utcMs), "2026-03-08T07:30:00.000Z");
+  assert.deepEqual(
+    wallTimeAt(r.utcMs, "America/New_York"),
+    wall(2026, 3, 8, 3, 30),
+  );
+});
+
+test("a wall time repeated by fall-back resolves to its first occurrence only", () => {
+  // New York 2026-11-01: 02:00 EDT falls back to 01:00 EST; 01:30 happens twice.
+  const r = resolveWallTime(wall(2026, 11, 1, 1, 30), "America/New_York");
+  assert.equal(r.resolution, "ambiguous");
+  assert.equal(iso(r.utcMs), "2026-11-01T05:30:00.000Z");
+  assert.deepEqual(
+    wallTimeAt(r.utcMs + HOUR, "America/New_York"),
+    wall(2026, 11, 1, 1, 30),
+  );
+});
+
+test("transition handling also holds for a southern-hemisphere zone", () => {
+  // Sydney 2026-04-05: 03:00 AEDT falls back to 02:00 AEST; 2026-10-04: 02:00 jumps to 03:00.
+  assert.equal(
+    resolveWallTime(wall(2026, 4, 5, 2, 30), "Australia/Sydney").resolution,
+    "ambiguous",
+  );
+  assert.equal(
+    resolveWallTime(wall(2026, 10, 4, 2, 30), "Australia/Sydney").resolution,
+    "gap",
+  );
+});
+
+test("ISO weekdays run Monday 1 to Sunday 7", () => {
+  assert.equal(isoWeekday(2026, 11, 2), 1);
+  assert.equal(isoWeekday(2026, 11, 1), 7);
+  assert.equal(isoWeekday(2024, 2, 29), 4);
 });
