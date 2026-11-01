@@ -769,3 +769,76 @@ export function resumeJob(
     missed: addMissed(state.missed, "paused", skipped),
   });
 }
+
+/** What a job is doing now, for inspection; it grants nothing. */
+export type JobStatus =
+  "scheduler_disabled" | "paused" | "running" | "scheduled" | "orphaned";
+
+export interface JobView {
+  readonly jobId: string;
+  readonly revision: string;
+  readonly status: JobStatus;
+  /** Next slot after the decided cursor, when the job has a definition. */
+  readonly nextUtcMs?: number;
+  readonly pausedReason?: string;
+  readonly runningOccurrenceId?: string;
+  readonly lastOutcome?: JobState["lastOutcome"];
+  readonly missed: MissedSummary;
+}
+
+/**
+ * A read-only view of every job: definitions with their state, and states
+ * whose definition is gone (`orphaned`), so pending and missed work stays
+ * inspectable whether or not the scheduler is enabled.
+ */
+export function describeJobs(input: {
+  readonly schedulingEnabled: unknown;
+  readonly jobs: readonly JobDefinition[];
+  readonly states: readonly JobState[];
+}): readonly JobView[] {
+  const enabled = input.schedulingEnabled === true;
+  const states = new Map(input.states.map((s) => [s.jobId, s]));
+  const views: JobView[] = [];
+  const view = (
+    state: JobState | undefined,
+    job: JobDefinition | undefined,
+  ): JobView => {
+    const jobId = job?.jobId ?? state?.jobId ?? "";
+    const status: JobStatus = !job
+      ? "orphaned"
+      : state?.paused
+        ? "paused"
+        : state?.running
+          ? "running"
+          : enabled
+            ? "scheduled"
+            : "scheduler_disabled";
+    const next =
+      job && state ? nextOccurrence(job, state.cursorUtcMs) : undefined;
+    return Object.freeze({
+      jobId,
+      revision: job?.revision ?? state?.revision ?? "",
+      status,
+      ...(next ? { nextUtcMs: next.scheduledUtcMs } : {}),
+      ...(state?.paused ? { pausedReason: state.paused.reason } : {}),
+      ...(state?.running
+        ? { runningOccurrenceId: state.running.occurrenceId }
+        : {}),
+      ...(state?.lastOutcome ? { lastOutcome: state.lastOutcome } : {}),
+      missed: state?.missed ?? NO_MISSED,
+    });
+  };
+  for (const raw of input.jobs) {
+    const job = validateJob(raw);
+    views.push(view(states.get(job.jobId), job));
+    states.delete(job.jobId);
+  }
+  for (const state of states.values()) views.push(view(state, undefined));
+  return Object.freeze(views);
+}
+
+/** Clears the missed summary once the user has seen it; the slots stay decided. */
+export function acknowledgeMissed(state: JobState): JobState {
+  if (state.missed.count === 0) return state;
+  return Object.freeze({ ...state, missed: NO_MISSED });
+}
