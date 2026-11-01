@@ -56,6 +56,8 @@ vi.mock("@google/genai", () => {
 		constructor(opts: Record<string, unknown>) {
 			sdk.googleOpts.push(opts);
 		}
+		// The pinned SDK's request seam, which leased clients wrap to refuse redirects (#138).
+		apiClient = { apiCall: async () => undefined };
 		models = {
 			generateContentStream: async function* () {
 				if (sdk.failWith) throw new Error(sdk.failWith);

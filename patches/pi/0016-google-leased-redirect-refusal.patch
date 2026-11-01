@@ -1,0 +1,214 @@
+diff --git a/vendor/pi/packages/ai/src/api/google-generative-ai.ts b/vendor/pi/packages/ai/src/api/google-generative-ai.ts
+index c3ab772..74479ed 100644
+--- a/vendor/pi/packages/ai/src/api/google-generative-ai.ts
++++ b/vendor/pi/packages/ai/src/api/google-generative-ai.ts
+@@ -12,6 +12,7 @@ import {
+ 	CredentialPreflightError,
+ 	redactEventWithLease,
+ 	redactWithLease,
++	refuseGoogleClientRedirects,
+ 	withLeasedSecret,
+ } from "../splyce-credentials.ts";
+ import type {
+@@ -118,9 +119,9 @@ export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
+ 				() =>
+ 					credentials
+ 						? withLeasedSecret(credentials, (secret) =>
+-								createClient(model, secret, options?.headers, options?.identity).models.generateContentStream(
+-									params,
+-								),
++								refuseGoogleClientRedirects(
++									createClient(model, secret, options?.headers, options?.identity),
++								).models.generateContentStream(params),
+ 							)
+ 						: client!.models.generateContentStream(params),
+ 				options,
+diff --git a/vendor/pi/packages/ai/src/api/google-vertex.ts b/vendor/pi/packages/ai/src/api/google-vertex.ts
+index 60c6148..b853426 100644
+--- a/vendor/pi/packages/ai/src/api/google-vertex.ts
++++ b/vendor/pi/packages/ai/src/api/google-vertex.ts
+@@ -14,6 +14,7 @@ import {
+ 	CredentialPreflightError,
+ 	redactEventWithLease,
+ 	redactWithLease,
++	refuseGoogleClientRedirects,
+ 	withLeasedSecret,
+ } from "../splyce-credentials.ts";
+ import type {
+@@ -136,11 +137,8 @@ export const stream: StreamFunction<"google-vertex", GoogleVertexOptions> = (
+ 				() =>
+ 					credentials
+ 						? withLeasedSecret(credentials, (secret) =>
+-								createClientWithApiKey(
+-									model,
+-									secret,
+-									options?.headers,
+-									options?.identity,
++								refuseGoogleClientRedirects(
++									createClientWithApiKey(model, secret, options?.headers, options?.identity),
+ 								).models.generateContentStream(params),
+ 							)
+ 						: client!.models.generateContentStream(params),
+diff --git a/vendor/pi/packages/ai/src/splyce-credentials.ts b/vendor/pi/packages/ai/src/splyce-credentials.ts
+index 93a8835..822c9ad 100644
+--- a/vendor/pi/packages/ai/src/splyce-credentials.ts
++++ b/vendor/pi/packages/ai/src/splyce-credentials.ts
+@@ -158,6 +158,34 @@ export function assertSafeLeasedGooglePayload(params: unknown): void {
+ 	}
+ }
+ 
++/**
++ * The pinned `@google/genai` client sends every request through its own `ApiClient.apiCall(url, requestInit, ...)`,
++ * which spreads `requestInit` into the global `fetch` and cannot be handed a custom fetch. With a leased key, force
++ * `redirect: "error"` on that one client's requests so a redirect from the admitted endpoint never carries
++ * `x-goog-api-key` to another host. If the SDK no longer has that seam the send is refused rather than left unguarded.
++ */
++export function refuseGoogleClientRedirects<T extends object>(client: T): T {
++	const apiClient = (client as { apiClient?: { apiCall?: unknown } }).apiClient;
++	const apiCall = apiClient?.apiCall;
++	if (!apiClient || typeof apiCall !== "function") {
++		throw new CredentialPreflightError("the Google SDK client no longer exposes a request seam to refuse redirects");
++	}
++	apiClient.apiCall = function (
++		this: unknown,
++		url: unknown,
++		requestInit: RequestInit | undefined,
++		...rest: unknown[]
++	) {
++		return (apiCall as (...args: unknown[]) => unknown).call(
++			this,
++			url,
++			{ ...requestInit, redirect: "error" },
++			...rest,
++		);
++	};
++	return client;
++}
++
+ /** Runs `consume` with a freshly leased secret; a denied or revoked lease throws and nothing runs. */
+ export async function withLeasedSecret<T>(
+ 	credentials: SplyceCredentials,
+diff --git a/vendor/pi/packages/ai/test/splyce-credentials-wire.test.ts b/vendor/pi/packages/ai/test/splyce-credentials-wire.test.ts
+index 66b1f21..3e373df 100644
+--- a/vendor/pi/packages/ai/test/splyce-credentials-wire.test.ts
++++ b/vendor/pi/packages/ai/test/splyce-credentials-wire.test.ts
+@@ -6,9 +6,15 @@ import type { AddressInfo } from "node:net";
+ import { afterEach, describe, expect, it } from "vitest";
+ import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
+ import { stream as streamGoogle } from "../src/api/google-generative-ai.ts";
++import { stream as streamVertex } from "../src/api/google-vertex.ts";
+ import { getModel } from "../src/compat.ts";
+-import { createLeasedFetch, type SplyceCredentials } from "../src/splyce-credentials.ts";
+-import type { Context } from "../src/types.ts";
++import {
++	CredentialPreflightError,
++	createLeasedFetch,
++	refuseGoogleClientRedirects,
++	type SplyceCredentials,
++} from "../src/splyce-credentials.ts";
++import type { Api, Context, Model } from "../src/types.ts";
+ import { normalizeContext } from "../src/utils/transcript.ts";
+ 
+ const SECRET = "wire-secret-0123456789";
+@@ -76,6 +82,21 @@ const googleOk = (res: ServerResponse) => {
+ 
+ const claude = (origin: string) => ({ ...getModel("anthropic", "claude-haiku-4-5"), baseUrl: origin });
+ const gemini = (origin: string) => ({ ...getModel("google", "gemini-2.5-flash"), baseUrl: origin });
++// Catalog-free models for the redirect cases, so they run without the generated provider data.
++const inline = <TApi extends Api>(provider: string, api: TApi, baseUrl: string): Model<TApi> => ({
++	id: "gemini-2.5-flash",
++	name: "gemini-2.5-flash",
++	api,
++	provider,
++	baseUrl,
++	reasoning: false,
++	input: ["text"],
++	cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
++	contextWindow: 100000,
++	maxTokens: 8000,
++});
++const geminiInline = (origin: string) => inline("google", "google-generative-ai", origin);
++const vertexInline = (origin: string) => inline("google-vertex", "google-vertex", origin);
+ 
+ describe("shared leased fetch on the wire", () => {
+ 	it.each(["Request", "init"])(
+@@ -226,8 +247,62 @@ describe("Google on the wire (real SDK)", () => {
+ 		expect(counted.state.uses).toBe(local.seen.length);
+ 	});
+ 
+-	// The pinned SDK calls the global fetch with its own request options, follows redirects and cannot be given our
+-	// leased fetch, so a redirect from the admitted endpoint would carry x-goog-api-key along. This is why Google and
+-	// Vertex stay behind the native transport's final per-send check (TD-13) and are not claimed end-to-end safe here.
+-	it.todo("denies a cross-origin redirect (needs native egress mediation or an SDK transport hook)");
++	// The pinned SDK calls the global fetch with its own request options and cannot be given our leased fetch, so the
++	// leased client's request seam forces redirect: "error" (#138); the key must never reach the redirect target.
++	it("denies a cross-origin redirect, so the key never reaches the other origin", async () => {
++		const other = await listen((_req, res) => googleOk(res));
++		const first = await listen((_req, res) => {
++			res.writeHead(307, { location: `${other.origin}/models/gemini-2.5-flash:streamGenerateContent?alt=sse` });
++			res.end();
++		});
++		const result = await streamGoogle(geminiInline(first.origin), context, { credentials: creds() }).result();
++		expect(result.stopReason).toBe("error");
++		expect(first.seen).toHaveLength(1);
++		expect(first.seen[0]!.headers["x-goog-api-key"]).toBe(SECRET);
++		expect(other.seen).toHaveLength(0);
++		expect(JSON.stringify(result)).not.toContain(SECRET);
++	});
++});
++
++describe("Google Vertex on the wire (real SDK)", () => {
++	it("denies a cross-origin redirect, so the key never reaches the other origin", async () => {
++		const other = await listen((_req, res) => googleOk(res));
++		const first = await listen((_req, res) => {
++			res.writeHead(302, { location: `${other.origin}/v1/publishers/google/models/gemini-2.5-flash` });
++			res.end();
++		});
++		const result = await streamVertex(vertexInline(first.origin), context, {
++			credentials: creds(),
++			project: "p",
++			location: "us-central1",
++		}).result();
++		expect(result.stopReason).toBe("error");
++		expect(first.seen).toHaveLength(1);
++		expect(other.seen).toHaveLength(0);
++		expect(JSON.stringify(result)).not.toContain(SECRET);
++	});
++});
++
++describe("refuseGoogleClientRedirects", () => {
++	it("forces redirect: error on the client's request seam and keeps the other request options", async () => {
++		const calls: unknown[][] = [];
++		const client = {
++			apiClient: {
++				apiCall(...args: unknown[]) {
++					calls.push(args);
++					return "sent";
++				},
++			},
++		};
++		refuseGoogleClientRedirects(client);
++		const result = client.apiClient.apiCall("https://x.example", { method: "POST", redirect: "follow" }, 1, 2);
++		expect(result).toBe("sent");
++		expect(calls).toEqual([["https://x.example", { method: "POST", redirect: "error" }, 1, 2]]);
++	});
++
++	it("refuses a client without that seam instead of sending unguarded", () => {
++		for (const client of [{}, { apiClient: {} }, { apiClient: { apiCall: "nope" } }]) {
++			expect(() => refuseGoogleClientRedirects(client)).toThrow(CredentialPreflightError);
++		}
++	});
+ });
+diff --git a/vendor/pi/packages/ai/test/splyce-credentials.test.ts b/vendor/pi/packages/ai/test/splyce-credentials.test.ts
+index 2fd387b..f85b9ee 100644
+--- a/vendor/pi/packages/ai/test/splyce-credentials.test.ts
++++ b/vendor/pi/packages/ai/test/splyce-credentials.test.ts
+@@ -56,6 +56,8 @@ vi.mock("@google/genai", () => {
+ 		constructor(opts: Record<string, unknown>) {
+ 			sdk.googleOpts.push(opts);
+ 		}
++		// The pinned SDK's request seam, which leased clients wrap to refuse redirects (#138).
++		apiClient = { apiCall: async () => undefined };
+ 		models = {
+ 			generateContentStream: async function* () {
+ 				if (sdk.failWith) throw new Error(sdk.failWith);
