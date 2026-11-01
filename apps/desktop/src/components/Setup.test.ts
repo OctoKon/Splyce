@@ -1,49 +1,90 @@
-import { describe, expect, it } from "vitest";
-import { mount } from "@vue/test-utils";
-import { Setup, type SetupResult } from "./Setup";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { flushSync, mount, unmount } from "svelte";
+import Setup from "./Setup.svelte";
 
-describe("Setup", () => {
-  it("renders base-only option by default", () => {
-    const wrapper = mount(Setup, { props: { defaultOption: "base-only" } });
-    expect(wrapper.element).toContain("Continue with base only");
-    expect(wrapper.element).not.toContain("Skip Setup");
-  });
+const mounted: object[] = [];
+afterEach(() => {
+  mounted.splice(0).forEach((component) => unmount(component));
+  document.body.innerHTML = "";
+});
 
-  it("renders optional-modules option", () => {
-    const wrapper = mount(Setup, { props: { defaultOption: "optional-modules" } });
-    expect(wrapper.element).toContain("Choose optional modules");
-  });
+function render(
+  defaultOption: "base-only" | "optional-modules" | "skip-setup" = "base-only",
+) {
+  const target = document.createElement("div");
+  document.body.append(target);
+  const onSetupOption = vi.fn();
+  mounted.push(
+    mount(Setup, { target, props: { defaultOption, onSetupOption } }),
+  );
+  flushSync();
+  return {
+    target,
+    onSetupOption,
+    option: (name: string) =>
+      target.querySelector<HTMLElement>(`[data-testid="setup-${name}"]`)!,
+  };
+}
 
-  it("renders skip-setup option", () => {
-    const wrapper = mount(Setup, { props: { defaultOption: "skip-setup" } });
-    expect(wrapper.element).toContain("Skip Setup");
-    expect(wrapper.element).not.toContain("Continue with base only");
-  });
+describe("setup choices", () => {
+  it.each(["base-only", "optional-modules", "skip-setup"] as const)(
+    "reads the supplied %s default while retaining all choices",
+    (option) => {
+      const view = render(option);
+      expect(view.target.querySelector("h3")?.textContent).toBe(
+        option === "skip-setup" ? "Skip Setup" : "Welcome to Splyce Setup",
+      );
+      expect(view.option("base").textContent).toContain(
+        "Continue with base only",
+      );
+      expect(view.option("modules").textContent).toContain(
+        "Choose optional modules",
+      );
+      expect(view.option("skip").textContent).toContain("Skip setup");
+    },
+  );
 
-  it("emits setup-option event with base-only detail", async () => {
-    const wrapper = mount(Setup, { props: { defaultOption: "base-only" } });
-    await wrapper.find("[data-testid='setup-base']").trigger("click");
-    const event = wrapper.emitted("setup-option")[0][0];
-    expect(event.option).toBe("base-only");
-  });
+  it.each([
+    ["base", "base-only"],
+    ["modules", "optional-modules"],
+    ["skip", "skip-setup"],
+  ] as const)(
+    "delivers %s only to its component's callback",
+    (name, option) => {
+      const selected = render();
+      const other = render();
+      selected.option(name).click();
+      expect(selected.onSetupOption).toHaveBeenCalledExactlyOnceWith({
+        option,
+      });
+      expect(other.onSetupOption).not.toHaveBeenCalled();
+    },
+  );
 
-  it("emits setup-option event with optional-modules detail", async () => {
-    const wrapper = mount(Setup, { props: { defaultOption: "optional-modules" } });
-    await wrapper.find("[data-testid='setup-modules']").trigger("click");
-    const event = wrapper.emitted("setup-option")[0][0];
-    expect(event.option).toBe("optional-modules");
-  });
+  it.each(["Enter", " "])(
+    "activates once with %j and prevents the browser default",
+    (key) => {
+      const view = render();
+      const event = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      view.option("base").dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(view.onSetupOption).toHaveBeenCalledExactlyOnceWith({
+        option: "base-only",
+      });
+    },
+  );
 
-  it("emits setup-option event with skip-setup detail", async () => {
-    const wrapper = mount(Setup, { props: { defaultOption: "skip-setup" } });
-    await wrapper.find("[data-testid='setup-skip']").trigger("click");
-    const event = wrapper.emitted("setup-option")[0][0];
-    expect(event.option).toBe("skip-setup");
-  });
-
-  it("passes through custom defaultOption", () => {
-    const wrapper = mount(Setup, { props: { defaultOption: "skip-setup" } });
-    const title = wrapper.find("h3");
-    expect(title.text()).toBe("Skip Setup");
+  it("does not choose a setup option for unrelated keys", () => {
+    const view = render();
+    view
+      .option("base")
+      .dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    expect(view.onSetupOption).not.toHaveBeenCalled();
   });
 });

@@ -1,85 +1,99 @@
 <script lang="ts">
-  import { statusLabel } from "../status-labels";
-
-  export type SetupOption =
-    | "base-only"
-    | "optional-modules"
-    | "skip-setup";
+  export type SetupOption = "base-only" | "optional-modules" | "skip-setup";
 
   export interface SetupResult {
     option: SetupOption;
     selectedModules?: string[];
   }
 
-  let { defaultOption = "base-only" }: {
+  let {
+    defaultOption = "base-only",
+    onSetupOption,
+  }: {
     defaultOption?: SetupOption;
-  } = {};
+    onSetupOption?: (result: SetupResult) => void;
+  } = $props();
 
   function handleOption(option: SetupOption) {
-    // Dispatch custom event for parent to handle
-    const event = new CustomEvent("setup-option", {
-      detail: { option },
-      bubbles: true,
-      cancelable: true,
-    });
-    dispatchEvent(event);
+    onSetupOption?.({ option });
+  }
+
+  function handleKeydown(event: KeyboardEvent, option: SetupOption) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    handleOption(option);
   }
 </script>
 
-<section class="setup-flow" data-testid="setup-flow" aria-labelledby="setup-title">
-  <h3 id="setup-title">{defaultOption === "skip-setup" ? "Skip Setup" : "Welcome to Splyce Setup"}</h3>
+<section
+  class="setup-flow"
+  data-testid="setup-flow"
+  aria-labelledby="setup-title"
+>
+  <h3 id="setup-title">
+    {defaultOption === "skip-setup" ? "Skip Setup" : "Welcome to Splyce Setup"}
+  </h3>
 
   <p class="setup-description">
-    Choose how you'd like to start using Splyce. You can begin with the base installation,
-    select optional modules, or skip setup entirely to access the workbench later.
+    Choose how you'd like to start using Splyce. You can begin with the base
+    installation, select optional modules, or skip setup entirely to access the
+    workbench later.
   </p>
 
   <div class="setup-options">
     <!-- Base-only option -->
     <div
       class="setup-option"
-      on:click={() => handleOption("base-only")}
+      onclick={() => handleOption("base-only")}
       data-testid="setup-base"
       role="button"
       tabindex="0"
-      on:keydown={({ key }) => key === "Enter" || key === "Space" ? handleOption("base-only") : null}
+      onkeydown={(event) => handleKeydown(event, "base-only")}
     >
       <span class="setup-icon">🏠</span>
       <div>
         <h4>Continue with base only</h4>
-        <p>Start with the core Splyce engine and default settings. Optional modules can be added later.</p>
+        <p>
+          Start with the core Splyce engine and default settings. Optional
+          modules can be added later.
+        </p>
       </div>
     </div>
 
     <!-- Optional modules option -->
     <div
       class="setup-option"
-      on:click={() => handleOption("optional-modules")}
+      onclick={() => handleOption("optional-modules")}
       data-testid="setup-modules"
       role="button"
       tabindex="0"
-      on:keydown={({ key }) => key === "Enter" || key === "Space" ? handleOption("optional-modules") : null}
+      onkeydown={(event) => handleKeydown(event, "optional-modules")}
     >
       <span class="setup-icon">⚙️</span>
       <div>
         <h4>Choose optional modules</h4>
-        <p>Select additional features and integrations for your Splyce setup.</p>
+        <p>
+          Select additional features and integrations for your Splyce setup.
+        </p>
       </div>
     </div>
 
     <!-- Skip setup option -->
     <div
       class="setup-option"
-      on:click={() => handleOption("skip-setup")}
+      onclick={() => handleOption("skip-setup")}
       data-testid="setup-skip"
       role="button"
       tabindex="0"
-      on:keydown={({ key }) => key === "Enter" || key === "Space" ? handleOption("skip-setup") : null}
+      onkeydown={(event) => handleKeydown(event, "skip-setup")}
     >
       <span class="setup-icon">⏭️</span>
       <div>
         <h4>Skip setup</h4>
-        <p>Enter the workbench directly without setup. Settings are accessible from the menu.</p>
+        <p>
+          Enter the workbench directly without setup. Settings are accessible
+          from the menu.
+        </p>
       </div>
     </div>
   </div>
@@ -167,4 +181,3 @@
     color: var(--text-secondary, #6b7280);
   }
 </style>
-</script>
