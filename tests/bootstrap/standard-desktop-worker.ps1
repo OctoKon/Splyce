@@ -67,7 +67,7 @@ try {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
   $process = [Diagnostics.Process]::GetCurrentProcess()
   $creationMs = [DateTimeOffset]::new($process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()
-  $elevation = & (Get-Command powershell.exe -CommandType Application -ErrorAction Stop).Source -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'process-elevation.ps1') -ProcessId $PID -CreationTimeMs $creationMs -Details | ConvertFrom-Json
+  $elevation = & (Join-Path $PSScriptRoot 'process-elevation.ps1') -ProcessId $PID -CreationTimeMs $creationMs -Details | ConvertFrom-Json
   Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
