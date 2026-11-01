@@ -95,11 +95,22 @@ if ($SelfCheck) {
   $taskDefinition = New-ScheduledTask -Action $taskAction -Principal $taskPrincipal
   $taskExpected = [pscustomobject]@{ name = 'selfcheck'; user = $taskIdentity.Name; sid = $taskIdentity.User.Value; shell = $taskAction.Execute; arguments = $taskAction.Arguments; root = $taskAction.WorkingDirectory }
   $taskObserved = [pscustomobject]@{ TaskName = 'selfcheck'; TaskPath = '\'; Principal = $taskDefinition.Principal; Actions = $taskDefinition.Actions; Triggers = $taskDefinition.Triggers }
-  if ([Security.Principal.SecurityIdentifier]::new($taskObserved.Principal.UserId).Value -ne $taskExpected.sid -or
-      $taskObserved.Principal.UserId -eq $taskExpected.user) { throw 'Principal representation regression setup failed.' }
-  try { Assert-OwnedTask $taskObserved $taskExpected } catch { throw 'Equivalent current-account SID representation was rejected.' }
-  $taskObserved.Principal.UserId = $taskIdentity.Name
-  Assert-OwnedTask $taskObserved $taskExpected
+  $materializedPrincipalSid = if ($taskObserved.Principal.UserId -match '^S-\d+(?:-\d+)+$') {
+    [Security.Principal.SecurityIdentifier]::new($taskObserved.Principal.UserId).Value
+  } else {
+    ([Security.Principal.NTAccount]::new($taskObserved.Principal.UserId)).Translate([Security.Principal.SecurityIdentifier]).Value
+  }
+  if ($materializedPrincipalSid -ne $taskExpected.sid) { throw 'Principal representation regression setup failed.' }
+  $nativeLiteralExpected = [pscustomobject]@{ name = $taskExpected.name; user = $taskObserved.Principal.UserId; sid = $taskExpected.sid; shell = $taskExpected.shell; arguments = $taskExpected.arguments; root = $taskExpected.root }
+  try { Assert-OwnedTask $taskObserved $nativeLiteralExpected } catch { throw 'Native principal fixture failed its literal-positive control.' }
+  try { Assert-OwnedTask $taskObserved $taskExpected } catch { throw 'Equivalent current-account native principal representation was rejected.' }
+  $sidTaskObserved = [pscustomobject]@{ TaskName = $taskObserved.TaskName; TaskPath = $taskObserved.TaskPath; Principal = [pscustomobject]@{ UserId = $taskExpected.sid; LogonType = $taskDefinition.Principal.LogonType; RunLevel = $taskDefinition.Principal.RunLevel }; Actions = $taskObserved.Actions; Triggers = $taskObserved.Triggers }
+  if ($sidTaskObserved.Principal.UserId -eq $taskExpected.user) { throw 'SID representation regression setup failed.' }
+  $sidLiteralExpected = [pscustomobject]@{ name = $taskExpected.name; user = $taskExpected.sid; sid = $taskExpected.sid; shell = $taskExpected.shell; arguments = $taskExpected.arguments; root = $taskExpected.root }
+  try { Assert-OwnedTask $sidTaskObserved $sidLiteralExpected } catch { throw 'SID fixture failed its literal-positive control.' }
+  try { Assert-OwnedTask $sidTaskObserved $taskExpected } catch { throw 'Equivalent current-account SID representation was rejected.' }
+  $sidTaskObserved.Principal.UserId = $taskIdentity.Name
+  Assert-OwnedTask $sidTaskObserved $taskExpected
   $wrongSid = if ($taskExpected.sid -ne 'S-1-0-0') { 'S-1-0-0' } else { 'S-1-5-18' }
   $unknownPrincipal = $env:COMPUTERNAME + '\splyce-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
   foreach ($change in @(
