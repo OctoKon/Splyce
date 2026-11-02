@@ -10,7 +10,9 @@
 
   type Decision = "approve" | "deny";
 
+  const defaultSessionId = "ses_test_01";
   let state = $state.raw<TurnsState>(createTurnsState());
+  let allowApprovals = false;
   let resyncs: number[] = [];
   let errors: string[] = [];
   let dispatches: {
@@ -20,7 +22,7 @@
   }[] = [];
 
   const transport = createTurnStreamTransport({
-    sessionId: "ses_test_01",
+    sessionId: defaultSessionId,
     scopeId: "w-demo",
     onState: (next) => {
       state = next;
@@ -71,6 +73,15 @@
 
   function play(events: SplyceEventEnvelope[]) {
     for (const event of events) transport.enqueue(event);
+  }
+
+  function setApprovals(allowed: boolean) {
+    allowApprovals = allowed;
+  }
+
+  function useSession(sessionId: string) {
+    transport.unfollow(defaultSessionId);
+    transport.follow(sessionId, "w-demo");
   }
 
   function burst(count: number) {
@@ -152,16 +163,28 @@
           burst: typeof burst;
           overflow: typeof overflow;
           recover: typeof recover;
+          setApprovals: typeof setApprovals;
+          useSession: typeof useSession;
           snapshot: typeof snapshot;
         };
       }
-    ).__td18 = { start, play, burst, overflow, recover, snapshot };
+    ).__td18 = {
+      start,
+      play,
+      burst,
+      overflow,
+      recover,
+      setApprovals,
+      useSession,
+      snapshot,
+    };
   });
 </script>
 
 {#if run}
   <TurnStream
     {run}
+    canRespond={() => allowApprovals}
     onApproval={(approvalRequestId, _runId, actionId, decision) => {
       dispatches.push({ approvalRequestId, actionId, decision });
     }}

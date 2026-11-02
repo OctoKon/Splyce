@@ -15,6 +15,11 @@ type Snapshot = {
   resyncCount: number;
   resyncs: number[];
   errors: string[];
+  dispatches: {
+    approvalRequestId: string;
+    actionId: string;
+    decision: "approve" | "deny";
+  }[];
 };
 
 declare global {
@@ -25,6 +30,8 @@ declare global {
       burst(count: number): void;
       overflow(): void;
       recover(): void;
+      setApprovals(allowed: boolean): void;
+      useSession(sessionId: string): void;
       snapshot(): Snapshot;
     };
   }
@@ -101,6 +108,42 @@ test("10x render-rate burst keeps the rendered bytes identical to the store", as
   expect(visible).toHaveLength(10_000);
   expect(fnv(visible)).toBe(fnv(snapshot.run?.text ?? ""));
   expect(visible).toBe(snapshot.run?.text);
+});
+
+test("FUI-W5 approval prompt shows target and args and allows once from the keyboard", async ({
+  page,
+}) => {
+  const events = fixtureEvents("fui-w5-approval-race.json").filter(
+    (event) => event.kind !== "turn.canceled",
+  );
+  await page.evaluate((sequence) => {
+    window.__td18.useSession("ses_test_race");
+    window.__td18.setApprovals(true);
+    window.__td18.play(sequence);
+  }, events);
+
+  const prompt = page.getByTestId("approval-card");
+  await expect(prompt).toContainText("scripts/deploy.ps1");
+  await expect(prompt).toContainText("target_deploy_sh");
+  await expect(prompt).toContainText(
+    "./scripts/deploy.ps1 --environment staging",
+  );
+  await expect(page.getByTestId("approval-allow-button")).toHaveText(
+    "Allow once",
+  );
+  await expect(page.getByTestId("approval-deny-button")).toBeFocused();
+
+  await page.keyboard.press("y");
+  await expect(prompt).toContainText("Resolved: Approved");
+
+  const snapshot = await page.evaluate(() => window.__td18.snapshot());
+  expect(snapshot.dispatches).toEqual([
+    {
+      approvalRequestId: "app_req_w5_01",
+      actionId: "act_w5_exec",
+      decision: "approve",
+    },
+  ]);
 });
 
 test("overflow requests exactly one resync from the durable cursor and recovers", async ({

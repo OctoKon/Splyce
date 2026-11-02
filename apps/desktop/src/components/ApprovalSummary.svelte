@@ -9,17 +9,32 @@
    * engine sent: this component decides nothing and causes no effect.
    */
   import type { EventPayloads } from "@splyce/pi/contracts";
+  import { redactToolText } from "../tool-view";
 
   type ApprovalRequestedPayload = EventPayloads["approval.requested"];
 
   let {
     request,
+    target = undefined,
+    argsSummary = undefined,
     riskId = undefined,
   }: {
     request: ApprovalRequestedPayload;
+    /** Exact intent target, when an inline caller has it. */
+    target?: string;
+    /** Requested arguments, when an inline caller has them. */
+    argsSummary?: string;
     /** Id for the rationale, so an enclosing dialog can use it as its description. */
     riskId?: string;
   } = $props();
+
+  let exactTarget = $derived(target ? redactToolText(target) : "");
+  let requestedArgs = $derived(
+    argsSummary ? redactToolText(argsSummary) : "",
+  );
+  let showsExactTarget = $derived(
+    exactTarget !== "" && exactTarget !== request.normalizedTarget,
+  );
 </script>
 
 <p id={riskId} class="rationale" data-testid="approval-risk">
@@ -29,8 +44,16 @@
 <dl class="kv-list" data-testid="approval-target">
   <dt>Capability</dt>
   <dd data-testid="approval-capability">{request.capabilityId}</dd>
-  <dt>Target</dt>
+  {#if showsExactTarget}
+    <dt>Requested target</dt>
+    <dd data-testid="approval-requested-target">{exactTarget}</dd>
+  {/if}
+  <dt>{showsExactTarget ? "Normalized target" : "Target"}</dt>
   <dd data-testid="approval-normalized-target">{request.normalizedTarget}</dd>
+  {#if requestedArgs}
+    <dt>Requested arguments</dt>
+    <dd class="args" data-testid="approval-arguments">{requestedArgs}</dd>
+  {/if}
   <dt>Scope</dt>
   <dd>{request.targetScope}</dd>
   <dt>Run / action</dt>
@@ -59,5 +82,8 @@
     font-family: monospace;
     margin: 0;
     overflow-wrap: anywhere;
+  }
+  .kv-list dd.args {
+    white-space: pre-wrap;
   }
 </style>

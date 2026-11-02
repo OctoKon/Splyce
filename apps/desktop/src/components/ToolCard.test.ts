@@ -165,6 +165,98 @@ describe("tool activity card", () => {
     expect(text()).not.toContain("sk-live-secret123");
   });
 
+  it("shows the exact target and redacted args in the approval prompt and allows once from the keyboard", () => {
+    const onApproval = render({
+      action: {
+        actionId: "act_1",
+        capabilityId: "shell.run",
+        target: "scripts/deploy.ps1",
+        argsSummary:
+          "./scripts/deploy.ps1 --environment staging --token=sk-live-secret123",
+        status: "pending",
+        approval: {
+          ...approval("requested"),
+          actionId: "act_1",
+          capabilityId: "cap_shell_execute",
+          normalizedTarget: "target_deploy_sh",
+        },
+      },
+      canRespond: () => true,
+    });
+
+    const prompt = document.querySelector('[data-testid="approval-card"]');
+    expect(prompt?.textContent).toContain("scripts/deploy.ps1");
+    expect(prompt?.textContent).toContain("target_deploy_sh");
+    expect(prompt?.textContent).toContain(
+      "./scripts/deploy.ps1 --environment staging",
+    );
+    expect(prompt?.textContent).toContain("--token=[redacted]");
+    expect(prompt?.textContent).not.toContain("sk-live-secret123");
+
+    const allow = document.querySelector<HTMLButtonElement>(
+      '[data-testid="approval-allow-button"]',
+    );
+    const deny = document.querySelector<HTMLButtonElement>(
+      '[data-testid="approval-deny-button"]',
+    );
+    expect(allow?.textContent?.trim()).toBe("Allow once");
+    expect(allow?.getAttribute("aria-keyshortcuts")).toBe("y");
+    expect(deny?.getAttribute("aria-keyshortcuts")).toBe("n Escape");
+    expect(prompt?.textContent).toContain("Y allow once");
+    expect(prompt?.textContent).toContain("N or Esc deny");
+    expect(document.activeElement).toBe(deny);
+
+    deny?.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "y",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    expect(onApproval).toHaveBeenCalledWith(
+      "apr_1",
+      "run_1",
+      "act_1",
+      "approve",
+    );
+  });
+
+  it("offers Allow once for a write approval and shows its requested arguments", () => {
+    const onApproval = render({
+      action: {
+        actionId: "act_write",
+        capabilityId: "fs.write",
+        target: "src/app.ts",
+        argsSummary: "write src/app.ts",
+        status: "pending",
+        approval: {
+          ...approval("requested"),
+          actionId: "act_write",
+          normalizedTarget: "src/app.ts",
+        },
+      },
+      canRespond: () => true,
+    });
+
+    const prompt = document.querySelector('[data-testid="approval-card"]');
+    expect(prompt?.textContent).toContain("Write");
+    expect(prompt?.textContent).toContain("src/app.ts");
+    expect(prompt?.textContent).toContain("write src/app.ts");
+
+    const allow = document.querySelector<HTMLButtonElement>(
+      '[data-testid="approval-allow-button"]',
+    );
+    expect(allow?.textContent?.trim()).toBe("Allow once");
+    allow?.click();
+    expect(onApproval).toHaveBeenCalledWith(
+      "apr_1",
+      "run_1",
+      "act_write",
+      "approve",
+    );
+  });
+
   it("keeps approval controls fail-closed unless the caller opts in", () => {
     render({
       action: {

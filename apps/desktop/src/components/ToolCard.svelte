@@ -188,6 +188,8 @@
       <div class="approval" use:approvalKeys use:focusDeny>
         <ApprovalCard
           request={approvalRequest(action.approval)}
+          target={action.target}
+          argsSummary={action.argsSummary}
           decision={sending[action.approval.approvalRequestId] ?? null}
           onRespond={respond}
         />

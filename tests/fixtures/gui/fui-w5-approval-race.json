@@ -33,17 +33,40 @@
       }
     },
     {
-      "delayMs": 10,
+      "delayMs": 5,
       "event": {
         "schemaVersion": 1,
         "protocolVersion": 1,
         "recordId": "rec_w5_02",
         "eventId": "evt_01W5_02",
-        "createdAt": "2026-10-26T12:00:00.010Z",
+        "createdAt": "2026-10-26T12:00:00.005Z",
         "sourceIds": ["src_01"],
         "scopeId": "w-demo",
         "sessionId": "ses_test_race",
         "seq": 2,
+        "durable": true,
+        "kind": "turn.tool_intent",
+        "payload": {
+          "runId": "run_w5_race",
+          "actionId": "act_w5_exec",
+          "capabilityId": "cap_shell_execute",
+          "target": "target_deploy_sh",
+          "argsSummary": "./scripts/deploy.ps1 --environment staging"
+        }
+      }
+    },
+    {
+      "delayMs": 10,
+      "event": {
+        "schemaVersion": 1,
+        "protocolVersion": 1,
+        "recordId": "rec_w5_03",
+        "eventId": "evt_01W5_03",
+        "createdAt": "2026-10-26T12:00:00.010Z",
+        "sourceIds": ["src_01"],
+        "scopeId": "w-demo",
+        "sessionId": "ses_test_race",
+        "seq": 3,
         "durable": true,
         "kind": "approval.requested",
         "payload": {
@@ -63,13 +86,13 @@
       "event": {
         "schemaVersion": 1,
         "protocolVersion": 1,
-        "recordId": "rec_w5_03",
-        "eventId": "evt_01W5_03",
+        "recordId": "rec_w5_04",
+        "eventId": "evt_01W5_04",
         "createdAt": "2026-10-26T12:00:00.025Z",
         "sourceIds": ["src_01"],
         "scopeId": "w-demo",
         "sessionId": "ses_test_race",
-        "seq": 3,
+        "seq": 4,
         "durable": true,
         "kind": "turn.canceled",
         "payload": {
