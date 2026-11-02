@@ -58,21 +58,21 @@ Each step lists **Action**, **Expected UI**, **Pass / Fail** and **If a port is 
 
 Type these verbatim, in order. Each names its step and the state to watch. If a step's port is unavailable, say so out loud and move to the next prompt — never paste a canned reply or hand-build a card.
 
-| #   | Prompt (type verbatim)                           | Proves                   | Watch for                                                                                                                                                           |
-| --- | ------------------------------------------------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `Say hello in one sentence.`                     | Step 4, chat streams     | Text arrives incrementally, turn ends without error                                                                                                                 |
-| 2   | `Read README.txt and tell me what it says.`      | Step 5, read             | Card `Read`: Running → `OK`, answer `demo`; no approval for an in-workspace read                                                                                    |
-| 3   | `Create notes.txt containing hello.` (run twice) | Step 6, write + approval | First run: `Approval required` → `Deny` → card `Denied`, file absent. Second run → `Approve once` → card `OK`, `notes.txt` contains `hello`; a third run asks again |
-| 4   | `Run echo hi in the workspace.`                  | Step 7, shell approval   | `Approval required`, then card `Run shell` with `Exit code 0` and `Output preview`                                                                                  |
-| 5   | `Read a file that sits outside the demo folder.` | Step 8, escape denied    | Card `Denied`, `Blocked: the target is outside the admitted workspace.` (`WORKSPACE_ESCAPE`); the outside marker text never appears                                 |
-| 6   | `Find where hello appears in the project.`       | Step 11, code search     | Read-only card, no approval, results from the workspace index                                                                                                       |
-| 7   | `Search memory for demo.`                        | Step 11, memory          | Read-only card; results cite source event ids. If it returns nothing, say memory has not captured anything yet — do not improvise a result                          |
+| #   | Prompt (type verbatim)                           | Proves                    | Watch for                                                                                                                                                           |
+| --- | ------------------------------------------------ | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `Say hello in one sentence.`                     | Step 4, chat streams      | Text arrives incrementally, turn ends without error                                                                                                                 |
+| 2   | `Read README.txt and tell me what it says.`      | Step 5, read              | Card `Read`: Running → `OK`, answer `demo`; no approval for an in-workspace read                                                                                    |
+| 3   | `Create notes.txt containing hello.` (run twice) | Step 6, write + approval  | First run: `Approval required` → `Deny` → card `Denied`, file absent. Second run → `Approve once` → card `OK`, `notes.txt` contains `hello`; a third run asks again |
+| 4   | `Run echo hi in the workspace.`                  | Step 7, shell approval    | `Approval required`, then card `Run shell` with `Exit code 0` and `Output preview`                                                                                  |
+| 5   | Qualification receipt only                       | Step 8, boundary evidence | A separately qualified denial receipt for this exact build; otherwise record unavailable/not exercised                                                              |
+| 6   | `Find where hello appears in the project.`       | Step 11, code search      | Read-only card, no approval, results from the workspace index                                                                                                       |
+| 7   | `Search memory for demo.`                        | Step 11, memory           | Read-only card; results cite source event ids. If it returns nothing, say memory has not captured anything yet — do not improvise a result                          |
 
 If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than typing something new on stage. If Send disables mid-demo, read the composer's own status line aloud — it states the exact reason — instead of retrying blindly.
 
 ## 0. Preflight
 
-- **Action:** install the packaged Windows build (not `vite dev`). Confirm Windows Credential Manager is reachable (open it from Start). Have a test API key for an OpenAI-compatible endpoint (revocable, low limit, never a production key), plus its endpoint URL, API family (for the expo: `openai-completions`), chat model id, context window and max output tokens from the vendor's page — all are explicit form fields, and a custom model needs both token limits (the form never guesses them; cost reads unknown for custom models). Create an empty demo folder outside any repository, seeded with nothing but a `README.txt` (content: `demo`), and place one inert marker file one directory above it, outside the folder, for the escape-denial case; the presenter never types its path. Confirm network to the endpoint, or run a loopback OpenAI-compatible server on `http://127.0.0.1:<port>`.
+- **Action:** install the packaged Windows build (not `vite dev`). Confirm Windows Credential Manager is reachable (open it from Start). Have a test API key for an OpenAI-compatible endpoint (revocable, low limit, never a production key), plus its endpoint URL, API family (for the expo: `openai-completions`), chat model id, context window and max output tokens from the vendor's page — all are explicit form fields, and a custom model needs both token limits (the form never guesses them; cost reads unknown for custom models). Create an empty demo folder outside any repository, seeded with nothing but a `README.txt` (content: `demo`). Have a separately qualified boundary-denial receipt for the exact packaged build if step 8 will be presented; otherwise mark that step unavailable. Confirm network to the endpoint, or run a loopback OpenAI-compatible server on `http://127.0.0.1:<port>`.
 - **Do not demo:** modules/catalog install, usage view ("unavailable"), fork or export unless the Session actions buttons are actually enabled, any plugin/MCP, any cloud sync, anything this runbook marks planned that the build still shows as unavailable.
 - **Expected UI:** none yet.
 - **Pass / Fail:** pass when every item above exists and the key is in a password manager, not on screen or in a file in the demo folder. Fail if any item is missing; fix before going on stage.
@@ -142,12 +142,12 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 - **Pass / Fail:** pass when the exit code matches reality, truncation is flagged, and the timed-out process is gone (check Task Manager). Fail on a missing exit code, an unflagged cut, or a surviving child process.
 - **If a port is unavailable:** if `Workspace tools unavailable` shows above the composer, record this step unavailable and diagnose readiness and the tool bind; the banner is not evidence about the build's contents. The denial copy is wired in `apps/desktop/src/tool-view.ts` on the demo build but needs live engine events — do not fabricate the card. Remember the shell is not OS-confined (see Known limits); never run anything destructive on stage.
 
-## 8. Path escape is denied
+## 8. Boundary-denial qualification evidence
 
-- **Action:** ask the agent, in words, to read a file that sits outside the demo folder; no path is typed, because the escape attempt is the test.
-- **Expected UI:** the card reads "Denied" with "Blocked: the target is outside the admitted workspace." and code `WORKSPACE_ESCAPE`. No content of that outside file appears.
-- **Pass / Fail:** pass when the card is "Denied" and the marker text never appears in the transcript, preview or logs. Fail if any part of the file is returned or an approval is offered that would allow it.
-- **If a port is unavailable:** on the demo build the denial copy is wired (`WORKSPACE_ESCAPE` in `tool-view.ts`) but renders only from engine events; with tools OFF there is no card. Say so. Do not fabricate the card.
+- **Action:** present a separately qualified boundary-denial receipt bound to the exact packaged build, using only its case identifier and outcome. This runbook supplies no live probe. Without that receipt, record the step unavailable/not exercised.
+- **Expected evidence:** the exact build identity, qualification case identifier and observed denial outcome. Keep target details private.
+- **Pass / Fail:** pass only when the supplied qualification record establishes a denial for this build. An inferred denial, an unobserved card or a receipt for a different build is not a pass.
+- **If evidence is unavailable:** say that this case was not exercised. Do not fabricate an engine event or denial card.
 
 ## 9. Secret hygiene
 
@@ -194,7 +194,8 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 | Tools bound in the packaged build                    | No `Workspace tools unavailable` bar; prompt 2 returns `demo` | Banner present while steps 5-8, 11 are claimed live |
 | Step 1 readiness (Send disabled with reason)         | Reason visible                                                | Send enabled while a port is false                  |
 | Steps 2, 3 (credential store, project dialog)        | Native, no key or path in UI                                  | Any echo of key, path or `credentialRef`            |
-| Steps 6, 8 (approvals, path escape)                  | Filesystem matches the card                                   | File written after Deny, or escape read             |
+| Step 6 approvals                                     | Filesystem matches the card                                   | File written after Deny                             |
+| Step 8 boundary qualification                        | Build-bound denial receipt; otherwise unavailable             | Unobserved denial or unrelated-build claim          |
 | Step 9 secret hygiene                                | Zero hits                                                     | Any hit                                             |
 | Step 10 recovery                                     | No duplicate effect                                           | Duplicate effect or frozen "Running"                |
 | Any step whose port is unavailable                   | Shown as honest unavailable, not live                         | Faked, mocked or narrated as working                |
