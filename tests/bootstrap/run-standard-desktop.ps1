@@ -37,6 +37,7 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -46,6 +47,7 @@ using System.Threading;
 public static class StandardDesktopLauncher {
   const uint WorkerCreationFlags = 0x00000004; // Assign the suspended worker to its job before any worker code runs.
   [StructLayout(LayoutKind.Sequential)] struct Label { public IntPtr Sid; public uint Attributes; }
+  [StructLayout(LayoutKind.Sequential)] struct PipeAttributes { public int Length; public IntPtr Descriptor; public int Inherit; }
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
     public int Size; public string Reserved, Desktop, Title;
     public uint X, Y, Width, Height, XChars, YChars, Fill, Flags;
@@ -68,6 +70,7 @@ public static class StandardDesktopLauncher {
     public string Sid { get; internal set; } public int Session { get; internal set; }
     public int ElevationType { get; internal set; } public bool Elevated { get; internal set; }
     public string Integrity { get; internal set; }
+    internal int IntegrityRid { get; set; }
   }
   public static Observation Controller { get; private set; }
   public static Observation Derived { get; private set; }
@@ -89,8 +92,15 @@ public static class StandardDesktopLauncher {
   public static string NativeExitHex { get { return FormatExit(NativeExitCode); } }
   public static bool CleanupSucceeded { get; private set; } = true;
   [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentThread();
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenThreadToken(IntPtr thread, uint access, bool asSelf, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool ImpersonateLoggedOnUser(IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool RevertToSelf();
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CreatePipe(out IntPtr read, out IntPtr write, ref PipeAttributes attributes, uint size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool WriteFile(IntPtr handle, byte[] bytes, uint length, out uint written, IntPtr overlapped);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool ReadFile(IntPtr handle, byte[] bytes, uint length, out uint read, IntPtr overlapped);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr buffer, int size, out int returned);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool DuplicateTokenEx(IntPtr token, uint access, IntPtr attributes, int level, int type, out IntPtr primary);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool CreateRestrictedToken(IntPtr token, uint flags, uint disabled, IntPtr sids, uint deleted, IntPtr privileges, uint restricted, IntPtr restricting, out IntPtr result);
@@ -185,7 +195,62 @@ public static class StandardDesktopLauncher {
     if (offset < IntPtr.Size || offset > length - 8) throw new InvalidDataException("Default ACL pointer outside token buffer.");
     int size = unchecked((ushort)Marshal.ReadInt16(acl, 2));
     if (size < 8 || size > length - offset) throw new InvalidDataException("Default ACL outside token buffer.");
-    byte[] bytes = new byte[size]; Marshal.Copy(acl, bytes, 0, size); return new RawAcl(bytes, 0);
+    byte[] bytes = new byte[size]; Marshal.Copy(acl, bytes, 0, size);
+    var parsed = new RawAcl(bytes, 0);
+    if (!AclBytes(parsed).SequenceEqual(bytes)) throw new InvalidDataException("Default ACL did not round-trip exactly.");
+    return parsed;
+  }
+  static byte[] AclBytes(RawAcl acl) { byte[] bytes = new byte[acl.BinaryLength]; acl.GetBinaryForm(bytes, 0); return bytes; }
+  static byte[] AceBytes(GenericAce ace) { byte[] bytes = new byte[ace.BinaryLength]; ace.GetBinaryForm(bytes, 0); return bytes; }
+  static RawAcl ReadTokenAcl(IntPtr token) {
+    int length; IntPtr buffer = Info(token, 6, out length);
+    try {
+      if (length < IntPtr.Size) throw new InvalidDataException("Incomplete default ACL information.");
+      IntPtr acl = Marshal.ReadIntPtr(buffer);
+      if (acl == IntPtr.Zero) throw new InvalidDataException("A non-null token default ACL is required.");
+      return ReadBoundedAcl(acl, buffer, length);
+    } finally { Marshal.FreeHGlobal(buffer); }
+  }
+  static RawAcl AddCurrentUserAllow(RawAcl original, SecurityIdentifier user) {
+    if (original == null || user == null || original.Revision != 2 || original.BinaryLength < 8 || original.BinaryLength > 65535) throw new InvalidDataException("Unsupported token default ACL.");
+    bool present = false;
+    foreach (GenericAce generic in original) {
+      CommonAce ace = generic as CommonAce;
+      if (ace == null || (ace.AceType != AceType.AccessAllowed && ace.AceType != AceType.AccessDenied) || ((int)ace.AceFlags & ~0x1F) != 0) throw new InvalidDataException("Unsupported token default ACE.");
+      if (!ace.SecurityIdentifier.Equals(user)) continue;
+      if (ace.AceType == AceType.AccessDenied) throw new InvalidDataException("Current-user deny in token default ACL.");
+      present |= (ace.AceFlags & AceFlags.InheritOnly) == 0 && (ace.AccessMask & 0x10000000) != 0;
+    }
+    var updated = new RawAcl(AclBytes(original), 0);
+    if (!present) {
+      var allow = new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x10000000, user, false, null);
+      if (updated.BinaryLength > 65535 - allow.BinaryLength) throw new InvalidDataException("Token default ACL is too large.");
+      updated.InsertAce(updated.Count, allow);
+    }
+    for (int i = 0; i < original.Count; i++)
+      if (!AceBytes(original[i]).SequenceEqual(AceBytes(updated[i]))) throw new InvalidDataException("Existing default ACE changed.");
+    return updated;
+  }
+  static void SetFreshTokenAcl(IntPtr fresh, RawAcl acl) {
+    byte[] bytes = AclBytes(acl); IntPtr buffer = Marshal.AllocHGlobal(checked(IntPtr.Size + bytes.Length));
+    try {
+      IntPtr copy = IntPtr.Add(buffer, IntPtr.Size); Marshal.Copy(bytes, 0, copy, bytes.Length); Marshal.WriteIntPtr(buffer, copy);
+      Check(SetTokenInformation(fresh, 6, buffer, IntPtr.Size), "Initialize fresh token default ACL");
+    } finally { Marshal.FreeHGlobal(buffer); }
+  }
+  static bool SameObservation(Observation first, Observation second) {
+    return first.Sid == second.Sid && first.Session == second.Session && first.ElevationType == second.ElevationType && first.Elevated == second.Elevated && first.IntegrityRid == second.IntegrityRid;
+  }
+  static void InitializeFreshDefaultDacl(IntPtr source, IntPtr fresh) {
+    if (source == fresh || fresh == IntPtr.Zero) throw new InvalidOperationException("A separate fresh token is required.");
+    Observation owner = Inspect(source), before = Inspect(fresh);
+    if (before.Sid != owner.Sid || before.Session != owner.Session) throw new InvalidOperationException("Fresh token identity differs from its source.");
+    byte[] sourceBefore = AclBytes(ReadTokenAcl(source));
+    RawAcl original = ReadTokenAcl(fresh), updated = AddCurrentUserAllow(original, new SecurityIdentifier(owner.Sid));
+    byte[] expected = AclBytes(updated);
+    if (!expected.SequenceEqual(AclBytes(original))) SetFreshTokenAcl(fresh, updated);
+    if (!expected.SequenceEqual(AclBytes(ReadTokenAcl(fresh))) || !SameObservation(before, Inspect(fresh)) ||
+        !sourceBefore.SequenceEqual(AclBytes(ReadTokenAcl(source))) || !SameObservation(owner, Inspect(source))) throw new InvalidOperationException("Fresh token initialization changed source or token metadata.");
   }
   static AclObservation ReadDefaultDacl(IntPtr token, string currentSid) {
     IntPtr buffer = IntPtr.Zero;
@@ -242,7 +307,7 @@ public static class StandardDesktopLauncher {
       int rid = Marshal.ReadInt32(integritySid, 8 + 4 * (count - 1));
       int elevated = Scalar(token, 20), type = Scalar(token, 18);
       if ((elevated != 0 && elevated != 1) || type < 1 || type > 3 || Scalar(token, 8) != 1) throw new InvalidOperationException("Malformed primary token.");
-      return new Observation { Sid = new SecurityIdentifier(sid).Value, Session = Scalar(token, 12), Elevated = elevated == 1, ElevationType = type, Integrity = ClassifyIntegrity(rid) };
+      return new Observation { Sid = new SecurityIdentifier(sid).Value, Session = Scalar(token, 12), Elevated = elevated == 1, ElevationType = type, Integrity = ClassifyIntegrity(rid), IntegrityRid = rid };
     } finally { Marshal.FreeHGlobal(user); if (label != IntPtr.Zero) Marshal.FreeHGlobal(label); }
   }
   static void RequireWorker(Observation candidate, Observation owner) {
@@ -255,6 +320,7 @@ public static class StandardDesktopLauncher {
     try {
       // Only the new token is restricted; policy enforcement stays enabled.
       Check(CreateRestrictedToken(source, 0x5, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero, out restricted), "Restrict current-user token");
+      InitializeFreshDefaultDacl(source, restricted);
       Check(ConvertStringSidToSidW("S-1-16-8192", out mediumSid), "Create medium integrity SID");
       int labelSize = Marshal.SizeOf<Label>(), sidSize = checked((int)GetLengthSid(mediumSid)), size = checked(labelSize + sidSize);
       buffer = Marshal.AllocHGlobal(size);
@@ -265,6 +331,79 @@ public static class StandardDesktopLauncher {
       return restricted;
     } catch { if (restricted != IntPtr.Zero) CloseHandle(restricted); throw; }
     finally { if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer); if (mediumSid != IntPtr.Zero) LocalFree(mediumSid); }
+  }
+  static RawAcl FixtureSystemAcl() {
+    var acl = new RawAcl(2, 2);
+    acl.InsertAce(0, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x10000000, new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), false, null));
+    acl.InsertAce(1, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 0x10000000, new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), false, null));
+    return acl;
+  }
+  static void SelfCheckDefaultAclGuards() {
+    var user = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+    RawAcl original = FixtureSystemAcl(); byte[] before = AclBytes(original);
+    RawAcl updated = AddCurrentUserAllow(original, user);
+    var added = updated.Count == 3 ? updated[2] as CommonAce : null;
+    if (updated.Count != 3 || added == null || !added.SecurityIdentifier.Equals(user) || added.AccessMask != 0x10000000 || added.AceFlags != AceFlags.None ||
+        !AclBytes(original).SequenceEqual(before) || !AceBytes(original[0]).SequenceEqual(AceBytes(updated[0])) || !AceBytes(original[1]).SequenceEqual(AceBytes(updated[1])) ||
+        !AclBytes(AddCurrentUserAllow(updated, user)).SequenceEqual(AclBytes(updated))) throw new InvalidOperationException("Fresh default ACL append/preservation selfcheck failed.");
+    var denied = FixtureSystemAcl(); denied.InsertAce(2, new CommonAce(AceFlags.None, AceQualifier.AccessDenied, 1, user, false, null));
+    var unsupported = FixtureSystemAcl(); unsupported.InsertAce(2, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 1, user, true, null));
+    foreach (RawAcl invalid in new RawAcl[] { null, denied, unsupported, new RawAcl(4, 0) }) {
+      bool refused = false;
+      try { AddCurrentUserAllow(invalid, user); } catch (InvalidDataException) { refused = true; }
+      if (!refused) throw new InvalidOperationException("Unsafe default ACL was accepted.");
+    }
+    IntPtr buffer = Marshal.AllocHGlobal(32);
+    try {
+      Marshal.Copy(new byte[32], 0, buffer, 32); IntPtr acl = IntPtr.Add(buffer, IntPtr.Size); Marshal.WriteInt16(acl, 2, 30);
+      bool refused = false;
+      try { ReadBoundedAcl(acl, buffer, 32); } catch (InvalidDataException) { refused = true; }
+      if (!refused) throw new InvalidOperationException("Malformed default ACL length was accepted.");
+    } finally { Marshal.FreeHGlobal(buffer); }
+  }
+  static bool NoSelfCheckThreadToken() {
+    IntPtr token; bool present = OpenThreadToken(GetCurrentThread(), 8, true, out token); int error = Marshal.GetLastWin32Error();
+    try { return !present && error == 1008; } finally { if (token != IntPtr.Zero) CloseHandle(token); }
+  }
+  static int SelfCheckFixturePipe(IntPtr fixture) {
+    if (!NoSelfCheckThreadToken()) throw new InvalidOperationException("Fresh-token fixture requires an unimpersonated thread.");
+    IntPtr read = IntPtr.Zero, write = IntPtr.Zero;
+    try {
+      Check(ImpersonateLoggedOnUser(fixture), "Impersonate fresh selfcheck token");
+      var attributes = new PipeAttributes { Inherit = 1 };
+      bool created = CreatePipe(out read, out write, ref attributes, 0); int error = created ? 0 : Marshal.GetLastWin32Error();
+      if (!created) { read = write = IntPtr.Zero; return error; }
+      byte[] payload = new byte[] { 17, 0, 255, 42 }, received = new byte[4]; uint written, count;
+      Check(WriteFile(write, payload, 4, out written, IntPtr.Zero), "Write fresh-token fixture pipe");
+      if (written != 4) throw new InvalidOperationException("Incomplete fixture pipe write.");
+      Check(ReadFile(read, received, 4, out count, IntPtr.Zero), "Read fresh-token fixture pipe");
+      if (count != 4 || !payload.SequenceEqual(received)) throw new InvalidOperationException("Fixture pipe round-trip failed.");
+      return 0;
+    } finally {
+      if (!RevertToSelf()) Environment.FailFast("Fresh-token selfcheck could not revert impersonation.");
+      bool closed = true;
+      if (read != IntPtr.Zero) closed &= CloseHandle(read);
+      if (write != IntPtr.Zero) closed &= CloseHandle(write);
+      if (!NoSelfCheckThreadToken()) Environment.FailFast("Fresh-token selfcheck retained impersonation.");
+      if (!closed) throw new InvalidOperationException("Fresh-token selfcheck did not close its pipe handles.");
+    }
+  }
+  static void SelfCheckFreshDefaultDacl(IntPtr source) {
+    byte[] sourceBefore = AclBytes(ReadTokenAcl(source)); Observation sourceMetadata = Inspect(source);
+    IntPtr fixture = IntPtr.Zero, derived = IntPtr.Zero;
+    try {
+      Check(CreateRestrictedToken(source, 0x5, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero, out fixture), "Create fresh ACL selfcheck token");
+      SetFreshTokenAcl(fixture, FixtureSystemAcl()); byte[] fixtureBefore = AclBytes(ReadTokenAcl(fixture));
+      if (SelfCheckFixturePipe(fixture) != 5) throw new InvalidOperationException("Missing-user default ACL did not reject the fixture pipe.");
+      derived = Restrict(fixture); RequireWorker(Inspect(derived), sourceMetadata);
+      if (SelfCheckFixturePipe(derived) != 0 || !fixtureBefore.SequenceEqual(AclBytes(ReadTokenAcl(fixture))) ||
+          !sourceBefore.SequenceEqual(AclBytes(ReadTokenAcl(source))) || !SameObservation(sourceMetadata, Inspect(source))) throw new InvalidOperationException("Fresh default ACL pipe/source-preservation selfcheck failed.");
+    } finally {
+      bool closed = true;
+      if (derived != IntPtr.Zero) closed &= CloseHandle(derived);
+      if (fixture != IntPtr.Zero) closed &= CloseHandle(fixture);
+      if (!closed) throw new InvalidOperationException("Fresh default ACL selfcheck did not close its token handles.");
+    }
   }
   static string Quote(string path) {
     if (!Path.IsPathFullyQualified(path) || path.IndexOfAny(new char[] {'"', '\r', '\n', '\0'}) >= 0) throw new ArgumentException("Expected absolute path.");
@@ -349,6 +488,7 @@ public static class StandardDesktopLauncher {
   public static int RunWorker(string shell, string root, string directory, string nonce, string mode) { return Launch(shell, root, directory, nonce, mode, false); }
   public static bool SelfCheck(string shell, string root) {
     SelfCheckMetadata();
+    SelfCheckDefaultAclGuards();
     Startup startup = HiddenStartup();
     if (WorkerCreationFlags != 0x00000004 || startup.Flags != 1 || startup.Show != 0) throw new InvalidOperationException("Suspended hidden worker flags selfcheck failed.");
     if (FormatExit(null) != null || FormatExit(0) != "0x00000000" || FormatExit(255) != "0x000000FF" ||
@@ -379,6 +519,7 @@ public static class StandardDesktopLauncher {
       Observation observed = Inspect(current);
       if (observed.Elevated) return false;
       derived = Restrict(current); RequireWorker(Inspect(derived), observed);
+      SelfCheckFreshDefaultDacl(current);
     } finally { if (derived != IntPtr.Zero) CloseHandle(derived); CloseHandle(current); }
     string nonce = Guid.NewGuid().ToString("N"), directory = Path.Combine(root, "apps", "desktop", "src-tauri", "target", "bootstrap-standard-ci", nonce);
     bool rejected = false;
