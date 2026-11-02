@@ -598,8 +598,6 @@ mod windows {
     #[derive(Deserialize)]
     #[serde(tag = "method", deny_unknown_fields)]
     enum NativeOperation {
-        #[serde(rename = "credential.status")]
-        Status { id: String, params: StatusParams },
         #[serde(rename = "credential.redact")]
         Redact { id: String, params: RedactParams },
         #[serde(rename = "credential.scope.open")]
@@ -622,30 +620,6 @@ mod windows {
         text: String,
     }
 
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct StatusParams {
-        target: String,
-    }
-
-    fn redaction_frame_fits(frame: &Value) -> bool {
-        struct Count(usize);
-        impl Write for Count {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0 = self
-                    .0
-                    .checked_add(bytes.len())
-                    .filter(|length| *length <= MAX_FRAME_BYTES - 4)
-                    .ok_or_else(|| std::io::Error::other("Native input exceeds frame limit"))?;
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        serde_json::to_writer(&mut Count(0), frame).is_ok()
-    }
-
     fn opaque_id(value: &str) -> bool {
         !value.is_empty()
             && value.len() <= 128
@@ -664,42 +638,16 @@ mod windows {
             .as_object()
             .filter(|object| object.len() == 1)
             .ok_or_else(invalid)?;
-        let redaction_input_fits =
-            frame["native"]["method"] != "credential.redact" || redaction_frame_fits(&frame);
         let operation: NativeOperation =
             serde_json::from_value(object.get("native").ok_or_else(invalid)?.clone())
                 .map_err(|_| invalid())?;
-        if !matches!(&operation, NativeOperation::Status { .. }) {
-            scopes.retain(|_, (_, deadline, consumed)| *consumed || Instant::now() < *deadline);
-        }
+        scopes.retain(|_, (_, deadline, consumed)| *consumed || Instant::now() < *deadline);
         let (id, result) = match operation {
-            NativeOperation::Status { id, params } => {
-                if !opaque_id(&id) {
-                    return Err(invalid());
-                }
-                let reference = CredentialRef::parse(&params.target).map_err(|_| invalid())?;
-                let value = match read_owned(&reference) {
-                    Ok(secret) => {
-                        drop(secret);
-                        serde_json::json!({"native":{"id":id,"ok":true,"value":{"present":true}}})
-                    }
-                    Err(CredentialError::NotFound) => {
-                        serde_json::json!({"native":{"id":id,"ok":true,"value":{"present":false}}})
-                    }
-                    Err(_) => {
-                        serde_json::json!({"native":{"id":id,"ok":false,"error":{"code":"CREDENTIAL_UNAVAILABLE"}}})
-                    }
-                };
-                return encode_frame(&value);
-            }
             NativeOperation::Redact { id, params } => {
                 if !opaque_id(&id) {
                     return Err(invalid());
                 }
                 let unavailable = || serde_json::json!({"native":{"id":id,"ok":false,"error":{"code":"PERSIST_REDACTION_UNAVAILABLE"}}});
-                if !redaction_input_fits {
-                    return encode_frame(&unavailable());
-                }
                 let value = match crate::credentials::redact_owned(&params.text) {
                     Ok((text, count)) => {
                         serde_json::json!({"native":{"id":id,"ok":true,"value":{"text":text,"redactedCount":count}}})
@@ -1382,7 +1330,6 @@ mod windows {
 
         #[test]
         fn private_credentials_require_live_exact_single_use_scope() {
-            let _inventory = crate::credentials::fixture_guard();
             let reference =
                 crate::credentials::write_generated("private-transport-fixture").unwrap();
             struct Cleanup(crate::credentials::CredentialRef);
@@ -1437,99 +1384,6 @@ mod windows {
         }
 
         #[test]
-        fn private_credential_status_reports_presence_without_scope_authority() {
-            let _inventory = crate::credentials::fixture_guard();
-            let reference = crate::credentials::write_generated("private-status-fixture").unwrap();
-            struct Cleanup(crate::credentials::CredentialRef);
-            impl Drop for Cleanup {
-                fn drop(&mut self) {
-                    assert!(matches!(
-                        crate::credentials::delete_owned(&self.0),
-                        Ok(()) | Err(crate::credentials::CredentialError::NotFound)
-                    ));
-                }
-            }
-            let cleanup = Cleanup(reference);
-            let target = cleanup.0.as_str();
-            let mut scopes = std::collections::HashMap::new();
-            native_reply(call("credential.scope.open", scope(target)), &mut scopes).unwrap();
-            scopes.get_mut("scope1").unwrap().1 = Instant::now();
-            let assert_registry =
-                |scopes: &std::collections::HashMap<String, (CredentialScope, Instant, bool)>| {
-                    assert_eq!(scopes.len(), 1);
-                    let (binding, deadline, consumed) = &scopes["scope1"];
-                    assert_eq!(binding.target, target);
-                    assert!(*deadline <= Instant::now());
-                    assert!(!consumed);
-                };
-            assert_eq!(
-                reply(
-                    native_reply(
-                        call("credential.status", json!({"target":target})),
-                        &mut scopes
-                    )
-                    .unwrap()
-                ),
-                json!({"native":{"id":"native1","ok":true,"value":{"present":true}}})
-            );
-            assert_registry(&scopes);
-            for params in [
-                json!({}),
-                json!({"target":null}),
-                json!({"target":"Splyce/credentials/v1/invalid"}),
-                json!({"target":"other-credential:v1:invalid"}),
-                json!({"target":target.to_uppercase()}),
-                json!({"target":target,"scopeId":"scope1"}),
-            ] {
-                assert!(native_reply(call("credential.status", params), &mut scopes).is_err());
-                assert_registry(&scopes);
-            }
-            use windows_sys::Win32::Security::Credentials::{
-                CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredWriteW,
-            };
-            let mut native_target: Vec<u16> = format!(
-                "Splyce/credentials/v1/{}",
-                target.strip_prefix("splyce-credential:v1:").unwrap()
-            )
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-            let mut invalid_bytes = [0xff_u8];
-            let corrupt = CREDENTIALW {
-                Type: CRED_TYPE_GENERIC,
-                TargetName: native_target.as_mut_ptr(),
-                CredentialBlobSize: invalid_bytes.len() as u32,
-                CredentialBlob: invalid_bytes.as_mut_ptr(),
-                Persist: CRED_PERSIST_LOCAL_MACHINE,
-                ..Default::default()
-            };
-            assert_ne!(unsafe { CredWriteW(&corrupt, 0) }, 0);
-            assert_eq!(
-                reply(
-                    native_reply(
-                        call("credential.status", json!({"target":target})),
-                        &mut scopes
-                    )
-                    .unwrap()
-                ),
-                json!({"native":{"id":"native1","ok":false,"error":{"code":"CREDENTIAL_UNAVAILABLE"}}})
-            );
-            assert_registry(&scopes);
-            crate::credentials::delete_owned(&cleanup.0).unwrap();
-            assert_eq!(
-                reply(
-                    native_reply(
-                        call("credential.status", json!({"target":target})),
-                        &mut scopes
-                    )
-                    .unwrap()
-                ),
-                json!({"native":{"id":"native1","ok":true,"value":{"present":false}}})
-            );
-            assert_registry(&scopes);
-        }
-
-        #[test]
         fn secret_frame_reserves_complete_worst_case_encoding_before_copy() {
             let maximum = crate::credentials::MAX_SECRET_BYTES;
             for fragment in ["\"", "\\", "\u{e9}", "\"\\\u{e9}"] {
@@ -1564,7 +1418,6 @@ mod windows {
 
         #[test]
         fn persistence_redaction_has_an_exact_separate_private_shape() {
-            let _inventory = crate::credentials::fixture_guard();
             let reference = crate::credentials::write_generated("redaction-private-lane").unwrap();
             struct Cleanup(crate::credentials::CredentialRef);
             impl Drop for Cleanup {
@@ -1631,58 +1484,7 @@ mod windows {
         }
 
         #[test]
-        fn redaction_input_counts_encoded_frame_bytes_including_header() {
-            let overhead = serde_json::to_vec(&call("credential.redact", json!({"text":""})))
-                .unwrap()
-                .len();
-            let length = MAX_FRAME_BYTES - 4 - overhead;
-            let boundary = call("credential.redact", json!({"text":"n".repeat(length)}));
-            assert!(redaction_frame_fits(&boundary));
-            assert_eq!(encode_frame(&boundary).unwrap().len(), MAX_FRAME_BYTES);
-            let oversized = call("credential.redact", json!({"text":"n".repeat(length + 1)}));
-            assert!(!redaction_frame_fits(&oversized));
-            assert!(encode_frame(&oversized).is_err());
-            let escaped = call("credential.redact", json!({"text":"\0".repeat(length / 3)}));
-            assert!(!redaction_frame_fits(&escaped));
-            assert!(encode_frame(&escaped).is_err());
-        }
-
-        #[test]
-        fn redaction_rejects_oversized_input_even_when_owned_key_would_shrink_output() {
-            let _inventory = crate::credentials::fixture_guard();
-            let secret = "shrink-boundary-".to_owned()
-                + &"x".repeat(crate::credentials::MAX_SECRET_BYTES - "shrink-boundary-".len());
-            let reference = crate::credentials::write_generated(&secret).unwrap();
-            struct Cleanup(crate::credentials::CredentialRef);
-            impl Drop for Cleanup {
-                fn drop(&mut self) {
-                    crate::credentials::delete_owned(&self.0).unwrap();
-                }
-            }
-            let _cleanup = Cleanup(reference);
-            let text = secret.repeat(MAX_FRAME_BYTES / secret.len() + 1);
-            assert!(text.len() > MAX_FRAME_BYTES);
-            let (redacted, count) = crate::credentials::redact_owned(&text).unwrap();
-            assert!(
-                count > 0 && redacted.len() < MAX_FRAME_BYTES / 2,
-                "fixture must actually shrink below the output cap"
-            );
-            let value = reply(
-                native_reply(
-                    call("credential.redact", json!({"text":text})),
-                    &mut std::collections::HashMap::new(),
-                )
-                .unwrap(),
-            );
-            assert_eq!(
-                value["native"]["error"]["code"],
-                "PERSIST_REDACTION_UNAVAILABLE"
-            );
-        }
-
-        #[test]
         fn private_schema_and_absent_reference_fail_closed() {
-            let _inventory = crate::credentials::fixture_guard();
             let target = format!("splyce-credential:v1:{}", "0".repeat(64));
             let params = scope(&target);
             let mut scopes = std::collections::HashMap::new();

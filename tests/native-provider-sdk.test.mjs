@@ -14,7 +14,6 @@ import {
 } from "../packages/splyce-pi/dist/policy.js";
 import { NativeControl } from "../packages/splyce-pi/src/native-control.mjs";
 import { Store } from "../packages/splyce-pi/dist/store.js";
-import { createNativeModelProvider } from "../packages/splyce-pi/src/native-model-provider.mjs";
 const records = JSON.parse(
   await readFile(
     new URL("./fixtures/contracts/records.json", import.meta.url),
@@ -48,7 +47,6 @@ async function fixture(t, options = {}) {
       model: { maxTokens: 1024, compat: { maxTokensField: "max_tokens" } },
     },
   };
-  if (options.model) semantic.options.model = options.model;
   const controller = new AbortController();
   let connection = {
     ...records.providerConnection,
@@ -97,8 +95,6 @@ async function fixture(t, options = {}) {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const url = `http://127.0.0.1:${server.address().port}/chat/completions`;
-  if (options.model)
-    options.model.baseUrl = url.slice(0, -"/chat/completions".length);
   const observeIdentity = () => {
     const stat = statSync(dir, { bigint: true });
     assert.ok(stat.isDirectory());
@@ -182,12 +178,7 @@ async function fixture(t, options = {}) {
       native: {
         id: frame.native.id,
         ok: true,
-        value:
-          frame.native.method === "credential.read"
-            ? { secret }
-            : frame.native.method === "credential.status"
-              ? { present: options.present ?? false }
-              : {},
+        value: frame.native.method === "credential.read" ? { secret } : {},
       },
     });
   });
@@ -237,7 +228,6 @@ async function fixture(t, options = {}) {
   const scope = options.deferScope ? undefined : owner.createScope(binding);
   return {
     owner,
-    control,
     resolver,
     store,
     scope,
@@ -598,140 +588,3 @@ for (const [name, encoding] of Object.entries(encodings)) {
     assert.equal(outcomes(f)[0].record.effectState, "observed-success");
   });
 }
-
-test("native provider publishes terminal only after credential close and durable outcome", async (t) => {
-  const closing = deferred(),
-    release = deferred();
-  const model = {
-    api: "openai-completions",
-    id: "fixture-model",
-    name: "Fixture",
-    provider: "openai",
-    baseUrl: "http://127.0.0.1",
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 8192,
-    maxTokens: 1024,
-  };
-  const f = await fixture(t, {
-    model,
-    close: async () => {
-      closing.resolve();
-      await release.promise;
-    },
-  });
-  t.after(() => release.resolve());
-  const provider = createNativeModelProvider({
-    model,
-    credentialRef: target,
-    control: f.control,
-    requests: f.owner,
-    admit: async () => f.scope,
-    assertCurrent() {},
-  });
-  const stream = provider.stream(model, f.semantic.context, {
-    signal: f.controller.signal,
-  });
-  const events = [];
-  const reading = (async () => {
-    for await (const event of stream) events.push(event);
-  })();
-  await closing.promise;
-  assert.equal(
-    events.some((e) => e.type === "done"),
-    false,
-  );
-  assert.equal(outcomes(f).length, 0);
-  release.resolve();
-  await reading;
-  assert.equal(events.at(-1).type, "done");
-  assert.equal(outcomes(f)[0].record.effectState, "observed-success");
-  assert.equal(JSON.parse(f.bodies[0]).messages[0].content, "hello");
-});
-
-test("native provider rejects forged scope and failed credential close", async (t) => {
-  const model = {
-    api: "openai-completions",
-    id: "fixture-model",
-    name: "Fixture",
-    provider: "openai",
-    baseUrl: "http://127.0.0.1",
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 8192,
-    maxTokens: 1024,
-  };
-  const f = await fixture(t, { model, failClose: true });
-  const make = (admit) =>
-    createNativeModelProvider({
-      model,
-      credentialRef: target,
-      control: f.control,
-      requests: f.owner,
-      admit,
-      assertCurrent() {},
-    });
-  const forged = await make(async () => ({}))
-    .stream(model, f.semantic.context)
-    .result();
-  assert.equal(forged.stopReason, "error");
-  assert.equal(f.received, 0);
-  const result = await make(async () => f.scope)
-    .stream(model, f.semantic.context)
-    .result();
-  assert.equal(result.stopReason, "error");
-  assert.equal(result.errorMessage, "Native OpenAI request failed");
-  assert.equal(
-    outcomes(f).some((r) => r.record.effectState === "observed-success"),
-    false,
-  );
-});
-
-test("native provider status uses private control and cancellation prevents admission", async (t) => {
-  const model = {
-    api: "openai-completions",
-    id: "fixture-model",
-    name: "Fixture",
-    provider: "openai",
-    baseUrl: "http://127.0.0.1",
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 8192,
-    maxTokens: 1024,
-  };
-  const f = await fixture(t, { model, present: true });
-  let admitted = false;
-  const provider = createNativeModelProvider({
-    model,
-    credentialRef: target,
-    control: f.control,
-    requests: f.owner,
-    admit: async () => {
-      admitted = true;
-      return f.scope;
-    },
-    assertCurrent() {},
-  });
-  assert.deepEqual(
-    await provider.auth.apiKey.check({ signal: f.controller.signal }),
-    { type: "api_key", source: "Windows Credential Manager" },
-  );
-  f.controller.abort();
-  assert.equal(
-    (
-      await provider
-        .stream(model, f.semantic.context, { signal: f.controller.signal })
-        .result()
-    ).stopReason,
-    "error",
-  );
-  assert.equal(admitted, false);
-  assert.equal(f.received, 0);
-  await assert.rejects(
-    provider.auth.apiKey.check({ signal: f.controller.signal }),
-    { message: "Native OpenAI request failed" },
-  );
-});

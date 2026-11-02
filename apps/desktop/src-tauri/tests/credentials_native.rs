@@ -7,7 +7,6 @@ use credentials::{
     CredentialError, CredentialRef, MAX_SECRET_BYTES, delete_owned, read_owned, write_generated,
 };
 use std::ptr::null_mut;
-use std::sync::MutexGuard;
 use windows_sys::Win32::Security::Credentials::{
     CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
     CredWriteW,
@@ -17,32 +16,20 @@ use windows_sys::Win32::Security::Credentials::{
 static CREDENTIAL_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // Cleanup is restricted to references created by this test process, including on assertion unwind.
-
-struct Fixtures {
-    references: Vec<CredentialRef>,
-    _guard: MutexGuard<'static, ()>,
-}
-
-impl Default for Fixtures {
-    fn default() -> Self {
-        Self {
-            references: Vec::new(),
-            _guard: credentials::fixture_guard(),
-        }
-    }
-}
+#[derive(Default)]
+struct Fixtures(Vec<CredentialRef>);
 
 impl Fixtures {
     fn write(&mut self, value: &str) -> &CredentialRef {
-        self.references
+        self.0
             .push(write_generated(value).expect("Isolated fixture creation"));
-        self.references.last().unwrap()
+        self.0.last().unwrap()
     }
 }
 
 impl Drop for Fixtures {
     fn drop(&mut self) {
-        for reference in &self.references {
+        for reference in &self.0 {
             match delete_owned(reference) {
                 Ok(()) | Err(CredentialError::NotFound) => {}
                 Err(error) => eprintln!("Isolated credential cleanup failed: {error}"),
@@ -121,7 +108,6 @@ fn real_windows_exact_blob_byte_boundaries() {
 
 #[test]
 fn rejected_secret_input_never_returns_a_reference() {
-    let _fixtures = Fixtures::default();
     for value in [
         "",
         "synthetic\0value",

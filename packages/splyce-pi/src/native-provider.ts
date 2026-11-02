@@ -34,7 +34,6 @@ export interface NativeProviderSemanticRequest {
   readonly endpointRef: string;
   readonly model: string;
   readonly context: {
-    readonly systemPrompt?: string;
     readonly messages: readonly JsonValue[];
     readonly tools: readonly JsonValue[];
   };

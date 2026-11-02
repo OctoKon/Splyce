@@ -177,51 +177,6 @@ export async function runHost(
       reply = { id: request.id, ok: true, value: { state: "initialized" } };
     } else if (request.method === "native.bootstrap") {
       throw new FrameError();
-    } else if (
-      [
-        "native.provider.prepare",
-        "native.provider.commit",
-        "native.provider.read",
-      ].includes(request.method)
-    ) {
-      try {
-        const method = {
-          "native.provider.prepare": "prepareProviderSetup",
-          "native.provider.commit": "commitProviderSetup",
-          "native.provider.read": "readProviderSetup",
-        }[request.method];
-        reply = {
-          id: request.id,
-          ok: true,
-          value: host[method](request.params),
-        };
-      } catch (error) {
-        const codes = [
-          "SETUP_INVALID",
-          "SETUP_UNAVAILABLE",
-          "SETUP_WORKSPACE_UNAVAILABLE",
-          "SETUP_DESCRIPTOR_UNAVAILABLE",
-          "SETUP_REQUEST_CONFLICT",
-          "SETUP_STALE_REVISION",
-          "SETUP_CREDENTIAL_UNAVAILABLE",
-          "SETUP_OUTCOME_UNKNOWN",
-          "SETUP_MODEL_METADATA_REQUIRED",
-          "ENTITY_STALE_REVISION",
-        ];
-        const code = codes.includes(error?.code)
-          ? error.code
-          : "SETUP_OUTCOME_UNKNOWN";
-        reply = {
-          id: request.id,
-          ok: false,
-          error: {
-            code,
-            message: "Provider setup unavailable",
-            correlationId: request.id,
-            retryable: false,
-          },
-        };
-      }
     } else if (request.method === "native.workspace.admit") {
       try {
         const workspace = host.admitWorkspace(request.params);

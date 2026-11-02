@@ -3,7 +3,26 @@
 // never both). Single authority for operational receipts; everything else is a
 // rebuildable projection. Erasable-syntax-only (runs under Node type stripping).
 
-import { createHash, randomUUID } from "node:crypto";
+import {
+  CONTRACT_VERSION,
+  PROTOCOL_VERSION,
+  RECORD_SCHEMAS,
+  ContractError,
+  type ContractContext,
+  type RecordKind,
+  type RecordByKind,
+  type SplyceEvent,
+  type SplyceEventDraft,
+  validateEvent,
+  validateRecord,
+  snapshotPersistedJson,
+  type AdmittedWorkspaceRecord,
+  type ActionRecord,
+  type GrantRecord,
+  type ProviderEndpointRecord,
+} from "./contracts.js";
+import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import {
   copyFileSync,
   existsSync,
@@ -12,38 +31,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-import {
-  type ActionRecord,
-  type AdmittedWorkspaceRecord,
-  CONTRACT_VERSION,
-  type ContractContext,
-  ContractError,
-  type GrantRecord,
-  PROTOCOL_VERSION,
-  type ProviderEndpointRecord,
-  RECORD_SCHEMAS,
-  type RecordByKind,
-  type RecordKind,
-  type SplyceEvent,
-  type SplyceEventDraft,
-  snapshotPersistedJson,
-  validateEvent,
-  validateRecord,
-} from "./contracts.js";
-import {
-  type SetupInput,
-  SetupMetadataError,
-  type TrustedCatalog,
-  validateSetupMetadata,
-} from "./setup-metadata.js";
-
-export type {
-  SetupInput,
-  SetupMetadata,
-  TrustedCatalog,
-  TrustedCatalogEntry,
-} from "./setup-metadata.js";
 
 const LAYOUT_VERSION = 2 as const;
 
@@ -98,8 +85,6 @@ export interface CallerContext {
   profileRevision: string;
   policyRevision: string;
   resolveReference?: (id: string, scopeId: string) => boolean;
-  /** Native-supplied pinned model catalog; only it can vouch for a `catalog` model descriptor. */
-  trustedCatalog?: TrustedCatalog;
 }
 
 export interface AppendInput {
@@ -360,12 +345,6 @@ function mapSqliteError(error: unknown): StoreError {
     "STORE_UNKNOWN",
     error instanceof Error ? error.message : String(error),
   );
-}
-
-export interface SetupResult {
-  endpoint: RecordByKind["providerEndpoint"];
-  connection: RecordByKind["providerConnection"];
-  profile: RecordByKind["profileSnapshot"];
 }
 
 export class Store {
@@ -742,82 +721,6 @@ export class Store {
     }
   }
 
-  /**
-   * Native-only: everything setup needs from one scope, observed in ONE read
-   * transaction. `workspace` is the current admitted workspace (private
-   * canonicalPath and directory identity) or null if superseded/deleted/unknown.
-   */
-  readSetupState(workspaceId: string): {
-    records: StoredRecord[];
-    deletedRecordIds: string[];
-    workspace: AdmittedWorkspace | null;
-    deletionEpoch: number;
-  } {
-    this.assertOpen();
-    const kinds = [
-      "providerEndpoint",
-      "providerConnection",
-      "profileSnapshot",
-      "artifact",
-      "configurationTransition",
-      "admittedWorkspace",
-    ];
-    try {
-      this.db.exec("BEGIN;");
-      try {
-        const rows = this.db
-          .prepare(
-            "SELECT r.*, d.record_id AS deleted_record_id, d.generation, d.deleted_at, " +
-              "(SELECT value FROM store_meta WHERE key = 'deletion_epoch') AS deletion_epoch " +
-              "FROM records r LEFT JOIN deletions d ON d.record_id = r.record_id " +
-              `WHERE r.scope_id = ? AND r.kind IN (${kinds.map(() => "?").join(",")}) ORDER BY r.seq`,
-          )
-          .all(workspaceId, ...kinds) as Array<
-          Parameters<Store["validateStructuralRow"]>[0] & {
-            deleted_record_id: string | null;
-            generation: number | null;
-            deleted_at: string | null;
-            deletion_epoch: string | null;
-          }
-        >;
-        const records: StoredRecord[] = [];
-        const deletedRecordIds: string[] = [];
-        for (const row of rows) {
-          const record = this.validateStructuralRow(row);
-          if (row.deleted_record_id !== null) {
-            const epoch =
-              Store.parseEpoch(
-                row.deletion_epoch ?? undefined,
-                "deletion_epoch",
-              ) ?? 0;
-            if (
-              !Number.isSafeInteger(row.generation) ||
-              row.generation! < 1 ||
-              row.generation! > epoch ||
-              typeof row.deleted_at !== "string" ||
-              !Number.isFinite(Date.parse(row.deleted_at))
-            )
-              throw new StoreError(
-                "STORE_LAYOUT",
-                "invalid deletion tombstone",
-              );
-            deletedRecordIds.push(row.deleted_record_id);
-          }
-          records.push({ seq: row.seq, kind: row.kind, record });
-        }
-        const workspace = this.currentWorkspace(workspaceId) ?? null;
-        const deletionEpoch = this.deletionEpoch();
-        this.db.exec("COMMIT;");
-        return { records, deletedRecordIds, workspace, deletionEpoch };
-      } catch (error) {
-        if (this.db.isTransaction) this.db.exec("ROLLBACK;");
-        throw error;
-      }
-    } catch (error) {
-      throw mapSqliteError(error);
-    }
-  }
-
   private validateStructuralRow(row: {
     seq: number;
     kind: RecordKind;
@@ -1111,211 +1014,6 @@ export class Store {
   }
 
   /**
-   * TD-26 first-run setup: endpoint, connection and profile revisions commit in
-   * ONE transaction with per-entity CAS under the same lock. Record ids derive
-   * from requestId, so an identical retry returns the stored result and appends
-   * nothing; the same requestId with a different payload is SETUP_REQUEST_CONFLICT.
-   * Only a credentialRef is accepted: unknown fields (apiKey, ...) are rejected.
-   */
-  commitSetup(
-    input: unknown,
-    caller: CallerContext,
-    expectedDeletionEpoch?: number,
-  ): SetupResult {
-    let setup: SetupInput;
-    try {
-      setup = validateSetupMetadata(
-        input,
-        caller.trustedCatalog === undefined
-          ? {}
-          : { trustedCatalog: caller.trustedCatalog },
-      );
-    } catch (error) {
-      if (error instanceof SetupMetadataError)
-        throw new StoreError(error.code, error.message);
-      throw error;
-    }
-    const scopeId = setup.workspaceId;
-    // Hashed so a 128-character requestId still fits the recordId bound.
-    const key = createHash("sha256")
-      .update(setup.requestId)
-      .digest("hex")
-      .slice(0, 32);
-    const ids = {
-      endpoint: `setup:${key}:endpoint`,
-      connection: `setup:${key}:connection`,
-      profile: `setup:${key}:profile`,
-    };
-    // Identity of the whole accepted request; replays compare it under the write lock.
-    const digestRef = `setup-request:sha256:${createHash("sha256")
-      .update(JSON.stringify(setup))
-      .digest("hex")}`;
-    const base = (recordId: string) => ({
-      schemaVersion: CONTRACT_VERSION,
-      recordId,
-      createdAt: new Date().toISOString(),
-      scopeId,
-      sourceIds: [digestRef],
-    });
-    const endpoint = {
-      ...base(ids.endpoint),
-      endpointId: setup.endpoint.endpointId,
-      canonicalUrl: setup.endpoint.canonicalUrl,
-      apiFamily: setup.endpoint.apiFamily,
-      locality: setup.endpoint.locality,
-      revision: setup.endpoint.revision,
-    };
-    // displayName is rejected as an unknown field: the connection record has no such field.
-    const connection = {
-      ...base(ids.connection),
-      providerConnectionId: setup.connection.providerConnectionId,
-      revision: setup.connection.revision,
-      apiFamily: setup.connection.apiFamily,
-      apiVersion: setup.descriptors.apiVersion,
-      endpointRef: setup.connection.endpointRef,
-      credentialRef: setup.connection.credentialRef,
-      adapterRevision: setup.descriptors.adapterRevision,
-      accountScopeRef: setup.descriptors.accountScopeRef,
-      locality: setup.connection.locality,
-    };
-    // One immutable artifact per described binding; the profile links it through sourceIds.
-    const descriptorArtifacts = setup.profile.bindings.flatMap((binding) => {
-      if (binding.modelDescriptor === undefined) return [];
-      const recordId = `setup:${key}:modeldesc:${binding.role}`;
-      const json = JSON.stringify(binding.modelDescriptor);
-      return [
-        {
-          ...base(recordId),
-          artifactId: recordId,
-          digest: `sha256:${createHash("sha256").update(json).digest("hex")}`,
-          mediaType: "application/vnd.splyce.model-descriptor+json",
-          byteLength: new TextEncoder().encode(json).length,
-          retentionClass: "workspace",
-          role: binding.role,
-          modelId: binding.modelId,
-          descriptor: binding.modelDescriptor,
-        },
-      ];
-    });
-    const profile = {
-      ...base(ids.profile),
-      sourceIds: [digestRef, ...descriptorArtifacts.map((a) => a.recordId)],
-      profileId: setup.profile.profileId,
-      profileRevision: setup.profile.profileRevision,
-      configRevision: this.configRevision(scopeId),
-      roleBindingRefs: [] as string[],
-      installedModuleRefs: [] as string[],
-      bindings: setup.profile.bindings.map(
-        ({ modelDescriptor: _descriptor, ...pinned }) => pinned,
-      ),
-      egressPolicyRefs: [...setup.descriptors.egressPolicyRefs],
-      limitsArtifactId: setup.descriptors.limitsArtifactId,
-    };
-    const resolve = (ref: string): boolean => {
-      try {
-        return caller.resolveReference?.(ref, scopeId) === true;
-      } catch {
-        return false;
-      }
-    };
-    const unresolved: [string, string][] = [
-      ["connection.credentialRef", setup.connection.credentialRef],
-      ["descriptors.accountScopeRef", setup.descriptors.accountScopeRef],
-      ["descriptors.limitsArtifactId", setup.descriptors.limitsArtifactId],
-      ...setup.descriptors.egressPolicyRefs.map((ref, i): [string, string] => [
-        `descriptors.egressPolicyRefs[${i}]`,
-        ref,
-      ]),
-    ];
-    for (const [field, ref] of unresolved)
-      if (!resolve(ref))
-        throw new StoreError(
-          "SETUP_INVALID",
-          `setup reference does not resolve: ${field}`,
-        );
-    // The endpoint revision exists only inside this batch; everything else is the caller's.
-    const batchCaller: CallerContext = {
-      ...caller,
-      resolveReference: (ref, refScope) =>
-        (refScope === scopeId &&
-          (ref === connection.endpointRef ||
-            ref === digestRef ||
-            descriptorArtifacts.some((a) => a.recordId === ref))) ||
-        resolve(ref),
-    };
-    let replayed: SetupResult | undefined;
-    try {
-      this.commitBatch(
-        [
-          { kind: "providerEndpoint", record: endpoint },
-          { kind: "providerConnection", record: connection },
-          { kind: "profileSnapshot", record: profile },
-          ...descriptorArtifacts.map((record) => ({
-            kind: "artifact" as const,
-            record,
-          })),
-        ],
-        [],
-        batchCaller,
-        {
-          expectedSetup: {
-            workspaceId: scopeId,
-            expectedDeletionEpoch,
-            recordIds: [
-              ...Object.values(ids),
-              ...descriptorArtifacts.map((a) => a.recordId),
-            ],
-            digestRef,
-            onReplay: (records) => {
-              replayed = {
-                endpoint: records[0] as RecordByKind["providerEndpoint"],
-                connection: records[1] as RecordByKind["providerConnection"],
-                profile: records[2] as RecordByKind["profileSnapshot"],
-              };
-            },
-            unresolved: (): string | undefined =>
-              unresolved.find(([, ref]) => !resolve(ref))?.[0],
-          },
-          expectedEntityRevision: [
-            {
-              kind: "providerEndpoint",
-              scopeId,
-              entityId: endpoint.endpointId,
-              expectedRevision: setup.expected.endpointRevision,
-            },
-            {
-              kind: "providerConnection",
-              scopeId,
-              entityId: connection.providerConnectionId,
-              expectedRevision: setup.expected.connectionRevision,
-            },
-            {
-              kind: "profileSnapshot",
-              scopeId,
-              entityId: profile.profileId,
-              expectedRevision: setup.expected.profileRevision,
-            },
-          ],
-        },
-      );
-    } catch (error) {
-      // The lock-time observation found all three records of this exact request.
-      if (
-        error instanceof StoreError &&
-        error.code === "SETUP_REPLAY" &&
-        replayed !== undefined
-      )
-        return replayed;
-      throw error;
-    }
-    return {
-      endpoint: endpoint as RecordByKind["providerEndpoint"],
-      connection: connection as RecordByKind["providerConnection"],
-      profile: profile as RecordByKind["profileSnapshot"],
-    };
-  }
-
-  /**
    * Ordered, atomic receipt commits: every input is validated first, then all
    * are committed in input order in one transaction. Any failure — including a
    * mid-batch constraint violation — rolls the whole batch back: the cursor
@@ -1400,24 +1098,12 @@ export class Store {
       expectedActionReservation,
       expectedDeletionEpoch,
       expectedEntityRevision,
-      expectedSetup,
       expectedOnceGrant,
       expectedGrantMint,
       expectedActiveGrants,
       workspaceAdmission,
     }: EventPreconditions & {
-      expectedEntityRevision?:
-        EntityRevisionExpectation | readonly EntityRevisionExpectation[];
-      expectedSetup?: {
-        workspaceId: string;
-        expectedDeletionEpoch: number | undefined;
-        recordIds: readonly string[];
-        digestRef: string;
-        /** Receives the stored records, read under the same lock, when the request is a replay. */
-        onReplay: (records: readonly unknown[]) => void;
-        /** Re-resolves the setup references; returns the first failing field. */
-        unresolved: () => string | undefined;
-      };
+      expectedEntityRevision?: EntityRevisionExpectation;
     } & NativeGrantPreconditions,
     importedWatermarks: readonly EventWatermark[] = [],
   ): AppendBatchResult & { events: SplyceEvent[] } {
@@ -1475,100 +1161,9 @@ export class Store {
     }
     try {
       this.db.exec("BEGIN IMMEDIATE;");
-      if (expectedSetup !== undefined) {
-        if (
-          expectedSetup.expectedDeletionEpoch !== undefined &&
-          (!Number.isSafeInteger(expectedSetup.expectedDeletionEpoch) ||
-            expectedSetup.expectedDeletionEpoch < 0 ||
-            this.deletionEpoch() !== expectedSetup.expectedDeletionEpoch)
-        )
-          throw new StoreError(
-            "SETUP_INVALID",
-            "deletion epoch changed before setup commit",
-          );
-        // The target must still be the current admitted, non-superseded, non-deleted workspace.
-        if (this.currentWorkspace(expectedSetup.workspaceId) === undefined)
-          throw new StoreError(
-            "SETUP_INVALID",
-            "setup reference does not resolve: workspace",
-          );
-        // One observation of all participating rows (tombstones included) under the lock.
-        const rows = expectedSetup.recordIds.map(
-          (id) =>
-            this.db
-              .prepare(
-                "SELECT seq, kind, schema_version, payload, json_extract(payload, '$.sourceIds[0]') AS digest, " +
-                  "EXISTS (SELECT 1 FROM deletions d WHERE d.record_id = records.record_id) AS deleted " +
-                  "FROM records WHERE record_id = ?",
-              )
-              .get(id) as
-              | {
-                  seq: number;
-                  kind: string;
-                  schema_version: number;
-                  payload: string;
-                  digest: unknown;
-                  deleted: number | bigint;
-                }
-              | undefined,
-        );
-        if (rows.some((row) => row !== undefined)) {
-          // A tombstoned record is never replayed or resurrected.
-          if (
-            rows.some((row) => row !== undefined && Number(row.deleted) !== 0)
-          )
-            throw new StoreError(
-              "SETUP_DELETED",
-              "a record of this setup request was deleted; nothing appended",
-            );
-          if (
-            rows.every(
-              (row) =>
-                row !== undefined && row.digest === expectedSetup.digestRef,
-            )
-          ) {
-            expectedSetup.onReplay(
-              rows.map((row) => this.readRow(row!).record),
-            );
-            throw new StoreError(
-              "SETUP_REPLAY",
-              "setup request already committed; nothing appended",
-            );
-          }
-          throw new StoreError(
-            "SETUP_REQUEST_CONFLICT",
-            "requestId was already used with a different setup request; nothing appended",
-          );
-        }
-        // A descriptor removed after the early check must not commit.
-        const field = expectedSetup.unresolved();
-        if (field !== undefined)
-          throw new StoreError(
-            "SETUP_INVALID",
-            `setup reference does not resolve: ${field}`,
-          );
-      }
-      const expectations: readonly EntityRevisionExpectation[] =
-        expectedEntityRevision === undefined
-          ? []
-          : Array.isArray(expectedEntityRevision)
-            ? expectedEntityRevision
-            : [expectedEntityRevision as EntityRevisionExpectation];
-      // Every prepared record is guarded exactly once: one expectation per kind.
-      if (
-        expectedEntityRevision !== undefined &&
-        prepared.length !==
-          expectations.length +
-            (expectedSetup === undefined
-              ? 0
-              : prepared.filter(([kind]) => kind === "artifact").length)
-      )
-        throw new StoreError(
-          "ENTITY_GUARD_MISMATCH",
-          "entity guard must match the inserted kind, scope, identity and revision",
-        );
-      for (const expectation of expectations) {
-        const { kind, scopeId, entityId, expectedRevision } = expectation;
+      if (expectedEntityRevision !== undefined) {
+        const { kind, scopeId, entityId, expectedRevision } =
+          expectedEntityRevision;
         const [entityField, revisionField] = (
           {
             providerConnection: ["providerConnectionId", "revision"],
@@ -1576,7 +1171,7 @@ export class Store {
             providerEndpoint: ["endpointId", "revision"],
           } as const
         )[kind] ?? ["", ""];
-        const input = prepared.find(([k]) => k === kind);
+        const input = prepared[0];
         const opaque = (value: unknown) =>
           typeof value === "string" &&
           value.length > 0 &&
@@ -1587,8 +1182,8 @@ export class Store {
             "profileSnapshot",
             "providerEndpoint",
           ].includes(kind) ||
-          prepared.filter(([k]) => k === kind).length !== 1 ||
-          input === undefined ||
+          prepared.length !== 1 ||
+          input?.[0] !== kind ||
           !opaque(scopeId) ||
           !opaque(entityId) ||
           (expectedRevision !== null && !opaque(expectedRevision)) ||
@@ -1623,7 +1218,7 @@ export class Store {
             "ENTITY_STALE_REVISION",
             "entity revision changed; nothing appended",
           );
-        const nextRevision = input[1][revisionField];
+        const nextRevision = prepared[0]![1][revisionField];
         const reused = this.db
           .prepare(
             `SELECT 1 FROM records WHERE kind = ? AND scope_id = ? AND json_extract(payload, '$.${entityField}') = ? AND json_extract(payload, '$.${revisionField}') = ? LIMIT 1`,
@@ -3096,22 +2691,6 @@ export class Store {
     return row === undefined
       ? undefined
       : (this.readRow(row).record as AdmittedWorkspaceRecord);
-  }
-
-  /** The admitted workspace if it is still current: path mapped to it, not superseded, not deleted. */
-  private currentWorkspace(workspaceId: string): AdmittedWorkspace | undefined {
-    const record = this.workspaceRecord(workspaceId);
-    const path = this.workspacePath(workspaceId);
-    if (
-      record === undefined ||
-      path === undefined ||
-      this.currentWorkspaceIdForPath(path) !== workspaceId ||
-      this.db
-        .prepare("SELECT 1 FROM deletions WHERE record_id = ?")
-        .get(record.recordId) !== undefined
-    )
-      return undefined;
-    return { ...record, canonicalPath: path };
   }
 
   /** Fails unless the workspace was admitted natively and is not superseded. */
