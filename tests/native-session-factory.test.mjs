@@ -1504,19 +1504,31 @@ test("removing argument redaction rejection makes the real metadata regression f
   assert.match(result.stdout + result.stderr, /Missing expected rejection/u);
 });
 
-function composedHostSession(captureFails, permissionMode) {
+function composedHostSession(
+  captureFails,
+  permissionMode,
+  persistenceProof = false,
+) {
   return async (t) => {
     let body;
     let requestCount = 0;
+    let toolCallCount = 0;
+    let protectedTurn = false;
+    const protectedCanary = "SYNTHETIC_PROTECTED_COMMAND_CANARY";
+    let protectedRedactions = 0;
     const server = createServer(async (req, res) => {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       const event = (delta, finish_reason = null) =>
         `data: ${JSON.stringify({ id: "host-composition", object: "chat.completion.chunk", created: 0, model: "fixture-model", choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
-      const name = (
-        permissionMode ? ["write", "edit"] : ["code_search", "memory_search"]
-      )[requestCount++];
+      const name = persistenceProof
+        ? requestCount++ % 2 === 0
+          ? "powershell"
+          : undefined
+        : (permissionMode
+            ? ["write", "edit"]
+            : ["code_search", "memory_search"])[requestCount++];
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(
         (name
@@ -1525,19 +1537,25 @@ function composedHostSession(captureFails, permissionMode) {
                 tool_calls: [
                   {
                     index: 0,
-                    id: `context-${requestCount}`,
+                    id: `context-${++toolCallCount}`,
                     type: "function",
                     function: {
                       name,
                       arguments: JSON.stringify(
-                        name === "write"
-                          ? { path: "automatic.txt", content: "one" }
-                          : name === "edit"
-                            ? {
-                                path: "automatic.txt",
-                                edits: [{ oldText: "one", newText: "two" }],
-                              }
-                            : { query: "nativeDemoMarker" },
+                        name === "powershell"
+                          ? {
+                              command: protectedTurn
+                                ? `Write-Output '${protectedCanary}'`
+                                : "Write-Output 'harmless'",
+                            }
+                          : name === "write"
+                            ? { path: "automatic.txt", content: "one" }
+                            : name === "edit"
+                              ? {
+                                  path: "automatic.txt",
+                                  edits: [{ oldText: "one", newText: "two" }],
+                                }
+                              : { query: "nativeDemoMarker" },
                       ),
                     },
                   },
@@ -1581,9 +1599,16 @@ function composedHostSession(captureFails, permissionMode) {
         value = {
           manifest: { tracked: [], untracked: [], links: [], excluded: [] },
         };
-      else if (native.method === "credential.redact")
-        value = { text: native.params.text, redactedCount: 0 };
-      else if (native.method === "credential.read")
+      else if (native.method === "credential.redact") {
+        if (persistenceProof && native.params.text.includes(protectedCanary))
+          protectedRedactions++;
+        // Simulate a credential becoming protected between preview and persistence.
+        const text =
+          persistenceProof && protectedRedactions >= 2
+            ? native.params.text.replaceAll(protectedCanary, "[redacted]")
+            : native.params.text;
+        value = { text, redactedCount: text === native.params.text ? 0 : 1 };
+      } else if (native.method === "credential.read")
         value = { secret: "synthetic-loopback-credential" };
       else if (
         ["credential.scope.open", "credential.scope.close"].includes(
@@ -1595,8 +1620,9 @@ function composedHostSession(captureFails, permissionMode) {
       control.accept({ native: { id: native.id, ok: true, value } });
     });
     const host = createNativeHost(f.appDataDir, control);
+    let hostClosed = false;
     f.cleanup.push(async () => {
-      await host.shutdown();
+      if (!hostClosed) await host.shutdown();
       control.shutdown();
     });
     assert.deepEqual(host.handshakeReadiness.ports, {
@@ -1717,6 +1743,94 @@ function composedHostSession(captureFails, permissionMode) {
     };
     const detach = host.onSessionEvents(collect);
     f.cleanup.push(detach);
+    if (persistenceProof) {
+      const prompt = async (id) => {
+        const start = events.length;
+        const ack = await host.preparePrompt({
+          protocolVersion: 2,
+          correlationId: id,
+          sessionId: started.sessionId,
+          scopeId: f.input.workspaceId,
+          expectedConfigRevision: selected.configRevision,
+          expectedProfileRevision: selected.profileRevision,
+          expectedPolicyRevision: started.policyRevision,
+          op: "session.prompt",
+          payload: { text: "Run the diagnostic command" },
+        });
+        assert.equal(ack.accepted, true);
+        const deadline = Date.now() + 15000;
+        while (
+          !events
+            .slice(start)
+            .some((event) =>
+              ["turn.completed", "turn.failed", "turn.canceled"].includes(
+                event.kind,
+              ),
+            ) &&
+          Date.now() < deadline
+        ) {
+          collect();
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.ok(
+          events
+            .slice(start)
+            .some((event) =>
+              ["turn.completed", "turn.failed", "turn.canceled"].includes(
+                event.kind,
+              ),
+            ),
+        );
+      };
+      await prompt("safe-command");
+      const argumentsDir = join(f.dir, "arguments");
+      const files = () =>
+        existsSync(argumentsDir)
+          ? readdirSync(argumentsDir).map((name) =>
+              readFileSync(join(argumentsDir, name), "utf8"),
+            )
+          : [];
+      assert.ok(
+        files().some((text) => text.includes("Write-Output 'harmless'")),
+        "harmless command reached argument persistence",
+      );
+      const priorToolFiles = readdirSync(argumentsDir)
+        .filter((name) => name.startsWith("native-tool-arguments-"))
+        .sort();
+      protectedTurn = true;
+      requestCount = 0;
+      await prompt("protected-command");
+      assert.ok(
+        protectedRedactions >= 2,
+        "protected command reached persistence redaction",
+      );
+      await host.shutdown();
+      hostClosed = true;
+      f.store.close();
+      const observed = Store.open(join(f.dir, "store.db"));
+      try {
+        assert.ok(
+          !JSON.stringify(observed.list(f.input.workspaceId)).includes(
+            protectedCanary,
+          ),
+          "protected command absent from reopened Store",
+        );
+        assert.ok(
+          files().every((text) => !text.includes(protectedCanary)),
+          "protected command absent from persisted argument files",
+        );
+        assert.deepEqual(
+          readdirSync(argumentsDir)
+            .filter((name) => name.startsWith("native-tool-arguments-"))
+            .sort(),
+          priorToolFiles,
+          "protected command refused before artifact creation",
+        );
+      } finally {
+        observed.close();
+      }
+      return;
+    }
     const ack = await host.preparePrompt({
       protocolVersion: 2,
       correlationId: "default-host-prompt",
@@ -1794,6 +1908,47 @@ function composedHostSession(captureFails, permissionMode) {
     );
   };
 }
+
+test(
+  "selected tool argument persistence rejects protected command",
+  { timeout: 30000 },
+  composedHostSession(false, "bypass", true),
+);
+
+test(
+  "removing selected tool argument redaction rejection fails persistence proof",
+  { timeout: 30000 },
+  (t) => {
+    const directory = mkdtempSync(join(tmpdir(), "splyce-tool-mutant-"));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const loader = join(directory, "loader.mjs");
+    const needle =
+      "redacted.text !== serialized ||\n          redacted.redactedCount !== 0";
+    writeFileSync(
+      loader,
+      `export async function load(url, context, next) { const result = await next(url, context); if (!url.endsWith('/packages/splyce-pi/src/native-session-factory.mjs')) return result; const source = result.source.toString(); if (source.includes('SPLYCE_TOOL_GUARD_REMOVED')) return result; const needle = ${JSON.stringify(needle)}; if (source.split(needle).length !== 2) throw new Error('mutation target unavailable'); return { ...result, source: source.replace(needle, 'false /* SPLYCE_TOOL_GUARD_REMOVED */') }; }`,
+    );
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--experimental-loader",
+        pathToFileURL(loader).href,
+        "--test",
+        "--test-name-pattern=^selected tool argument persistence rejects protected command$",
+        fileURLToPath(import.meta.url),
+      ],
+      { encoding: "utf8", timeout: 25000, windowsHide: true, env: childEnv },
+    );
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+    assert.match(
+      result.stdout + result.stderr,
+      /protected command absent from persisted argument files/u,
+    );
+  },
+);
 
 test(
   "default native host composes automatic capabilities, current policy and real provider prompt",
