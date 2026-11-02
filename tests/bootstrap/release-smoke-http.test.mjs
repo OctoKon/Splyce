@@ -165,6 +165,13 @@ test(
         else
           assert.equal(await response.text(), '{"value":{"fixture":"exact"}}');
         if (mode === "delay") assert(performance.now() - start >= 100);
+        const logDeadline = performance.now() + 1000;
+        while (
+          (!/SPLYCE_TIMING native_forward_start 0/.test(logs) ||
+            !/SPLYCE_TIMING native_response_headers \d+/.test(logs)) &&
+          performance.now() < logDeadline
+        )
+          await new Promise((done) => setTimeout(done, 10));
         assert.match(logs, /SPLYCE_TIMING native_forward_start 0/);
         assert.match(logs, /SPLYCE_TIMING native_response_headers \d+/);
       }
