@@ -221,7 +221,8 @@ export interface ProviderRequestOptions<TModel = Model<Api>> {
 export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	/**
 	 * Splyce: leased credential from the native admission layer. Mutually exclusive with `apiKey`; when set, no
-	 * environment or fallback credential is used. Supported by the Anthropic, Google and Vertex adapters first.
+	 * environment or fallback credential is used. Supported by the Anthropic, Google, Vertex, Bedrock and Azure
+	 * adapters (see `CREDENTIAL_APIS`).
 	 */
 	credentials?: SplyceCredentials;
 	/**

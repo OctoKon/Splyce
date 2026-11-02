@@ -27,6 +27,7 @@ import type { BuildMiddleware, DeserializeMiddleware, DocumentType, HttpResponse
 import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { calculateCost } from "../models.ts";
+import { assertCredentialOptions, redactorOf, withLeasedSecret } from "../splyce-credentials.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -158,17 +159,35 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 		};
 
 		const openBlocks: OpenBlocks = new Map();
+		// Splyce: any active leased secret is replaced before an error message reaches the output or an observer.
+		const redact = redactorOf(options);
 
 		// A profile explicitly configured through pi's auth flow (the `profile`
 		// option or scoped `AWS_PROFILE` on the stored credential's env) must win
 		// over ambient AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY. The SDK default
 		// chain already prefers a configured profile over env keys, but only when
 		// `credentials` is not set on the client config. See #6957.
-		const optionsProfile = options.profile || options.env?.AWS_PROFILE;
+		// Splyce TD-22: a lease is the only identity ΓÇö profile, env keys, bearer tokens and skip-auth
+		// dummies are ambient sources and are not configured alongside it.
+		const leasedCredentials = options.credentials;
+		const optionsProfile = leasedCredentials ? undefined : options.profile || options.env?.AWS_PROFILE;
 		const config: BedrockRuntimeClientConfig = {
-			profile: optionsProfile || getProviderEnvValue("AWS_PROFILE", options.env),
+			profile: leasedCredentials
+				? undefined
+				: optionsProfile || getProviderEnvValue("AWS_PROFILE", options.env),
 			customUserAgent: bedrockUserAgent(options.identity),
 		};
+		if (leasedCredentials) {
+			// The secret never sits in client options: the provider leases it on invocation. @aws-sdk/core wraps
+			// this provider in @smithy/core memoizeIdentityProvider, so a resolved identity that carries no
+			// expiration is reused for the life of the client: retries inside one send share the first lease and a
+			// mid-send revocation is not re-checked. A lease authorises exactly one physical send, so the SDK's own
+			// retry policy is off for this client; a new BedrockRuntimeClient is built for every stream() call, so
+			// the next send leases again and a revoked or denied lease fails there. The secret is the platform's
+			// access-key identity as JSON (see parseLeasedBedrockCredentials).
+			config.maxAttempts = 1;
+			config.credentials = async () => withLeasedSecret(leasedCredentials, parseLeasedBedrockCredentials);
+		}
 		const configuredRegion = getConfiguredBedrockRegion(options);
 		const hasAmbientConfiguredProfile = Boolean(getProviderEnvValue("AWS_PROFILE"));
 		const endpointRegion = getStandardBedrockEndpointRegion(model.baseUrl);
@@ -185,13 +204,15 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 			config.endpoint = model.baseUrl;
 		}
 
-		// Resolve bearer token for Bedrock API key auth.
-		const skipAuth = getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";
-		const bearerToken =
-			options.bearerToken ||
-			options.apiKey ||
-			getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) ||
-			undefined;
+		// Resolve bearer token for Bedrock API key auth. A lease disables every ambient auth source here.
+		const skipAuth =
+			!leasedCredentials && getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";
+		const bearerToken = leasedCredentials
+			? undefined
+			: options.bearerToken ||
+				options.apiKey ||
+				getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) ||
+				undefined;
 		const useBearerToken = bearerToken !== undefined && !skipAuth;
 
 		// in Node.js/Bun environment only
@@ -219,7 +240,7 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 			}
 
 			const credentials = getConfiguredBedrockCredentials(options.env);
-			if (!skipAuth && credentials && !optionsProfile) {
+			if (!leasedCredentials && !skipAuth && credentials && !optionsProfile) {
 				config.credentials = credentials;
 			}
 
@@ -253,6 +274,12 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 		let responseRequestId: string | undefined;
 
 		try {
+			// Refuse a second identity source before any client is built or any request is signed; the catch
+			// below redacts the message, so a lease can never leak through the failure.
+			assertCredentialOptions(options);
+			if (options.credentials && options.bearerToken !== undefined) {
+				throw new Error("credentials and bearerToken are mutually exclusive");
+			}
 			const supportsStrictMode = model.compat?.supportsStrictMode ?? false;
 			const client = new BedrockRuntimeClient(config);
 			let observedRawResponse = false;
@@ -354,7 +381,7 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 		} catch (error) {
 			flushOpenBlocks(openBlocks, output);
 			output.stopReason = options.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatBedrockError(error);
+			output.errorMessage = redact(formatBedrockError(error));
 			if (output.stopReason === "error") {
 				appendBedrockFailureDiagnostic(output, error, responseRequestId);
 			}
@@ -1213,6 +1240,45 @@ function getConfiguredBedrockRegion(options: BedrockOptions): string | undefined
 		undefined
 	);
 }
+
+/**
+ * Splyce TD-22: the leased secret for Bedrock is the platform's access-key identity as JSON ΓÇö
+ * `{"accessKeyId","secretAccessKey","sessionToken"?}`. Anything else fails closed before signing, and
+ * the messages below never echo the secret itself.
+ */
+function parseLeasedBedrockCredentials(secret: string): LeasedBedrockAccessKeys {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(secret);
+	} catch {
+		throw new Error("Bedrock credential lease is not valid JSON");
+	}
+	const record = parsed as {
+		accessKeyId?: unknown;
+		secretAccessKey?: unknown;
+		sessionToken?: unknown;
+	};
+	if (typeof record?.accessKeyId !== "string" || record.accessKeyId.length === 0) {
+		throw new Error("Bedrock credential lease has no accessKeyId");
+	}
+	if (typeof record.secretAccessKey !== "string" || record.secretAccessKey.length === 0) {
+		throw new Error("Bedrock credential lease has no secretAccessKey");
+	}
+	if (record.sessionToken !== undefined && typeof record.sessionToken !== "string") {
+		throw new Error("Bedrock credential lease sessionToken is not a string");
+	}
+	return {
+		accessKeyId: record.accessKeyId,
+		secretAccessKey: record.secretAccessKey,
+		...(record.sessionToken ? { sessionToken: record.sessionToken } : {}),
+	};
+}
+
+type LeasedBedrockAccessKeys = {
+	accessKeyId: string;
+	secretAccessKey: string;
+	sessionToken?: string;
+};
 
 function getConfiguredBedrockCredentials(env?: ProviderEnv): BedrockRuntimeClientConfig["credentials"] | undefined {
 	const accessKeyId = getProviderEnvValue("AWS_ACCESS_KEY_ID", env);
