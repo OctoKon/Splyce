@@ -26,7 +26,12 @@ fn root_exit_waits_for_a_healthy_associated_member_and_its_output() {
         system_root: system_root().unwrap(),
     };
     let engine = create_job().unwrap();
-    let root = launch(&engine, &request("Write-Output root")).unwrap();
+    let started = Instant::now();
+    let root = launch(
+        &engine,
+        &request("[IO.File]::WriteAllText('root-entered','entered'); Write-Output root"),
+    )
+    .unwrap();
     let root_process = root.process.try_clone().unwrap();
     // A second, explicitly associated fixture process waits for the test's release file.
     let member = launch(
@@ -41,38 +46,57 @@ fn root_exit_waits_for_a_healthy_associated_member_and_its_output() {
             &AtomicBool::new(false),
         )
     });
-    let root_worker = std::thread::spawn(move || {
-        root.monitor(
-            Instant::now() + Duration::from_secs(10),
-            &AtomicBool::new(false),
-        )
-    });
+    let root_worker = std::thread::Builder::new()
+        .name("shell-root-diagnostic".into())
+        .spawn(move || {
+            eprintln!("root monitor starts after {:?}", started.elapsed());
+            root.monitor(
+                Instant::now() + Duration::from_secs(10),
+                &AtomicBool::new(false),
+            )
+        })
+        .unwrap();
     // SAFETY: both wait handles remain live until their monitors join.
-    assert_eq!(
-        unsafe { WaitForSingleObject(root_process.as_raw_handle(), 5000) },
-        WAIT_OBJECT_0
-    );
-    assert_eq!(
-        unsafe { WaitForSingleObject(member_process.as_raw_handle(), 0) },
-        WAIT_TIMEOUT
-    );
-    assert!(!root_worker.is_finished());
-    fs::write(dir.join("go"), []).unwrap();
-    let result = root_worker.join().unwrap().unwrap();
+    let root_wait = unsafe { WaitForSingleObject(root_process.as_raw_handle(), 5000) };
+    let member_wait = unsafe { WaitForSingleObject(member_process.as_raw_handle(), 0) };
+    let root_finished = root_worker.is_finished();
+    let marker = dir.join("root-entered").exists();
+    eprintln!("after {:?}: root_wait={root_wait}, member_wait={member_wait}, root_finished={root_finished}, command_entered={marker}", started.elapsed());
+    let release = fs::write(dir.join("go"), []);
+    let root_result = root_worker.join();
+    let member_after_root = unsafe { WaitForSingleObject(member_process.as_raw_handle(), 0) };
+    let member_result = member_worker.join();
+    eprintln!("member_after_root={member_after_root}");
+    for (name, result) in [("root", &root_result), ("member", &member_result)] {
+        match result {
+            Ok(Ok(output)) => eprintln!(
+                "{name}: status={} code={} stdout={:?} stderr={:?}",
+                output.status,
+                output.code,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Ok(Err(error)) => eprintln!("{name}: monitor error {error:?}"),
+            Err(_) => eprintln!("{name}: monitor panicked"),
+        }
+    }
+    release.unwrap();
+    assert_eq!(root_wait, WAIT_OBJECT_0);
+    assert_eq!(member_wait, WAIT_TIMEOUT);
+    assert!(!root_finished);
+    let result = root_result.unwrap().unwrap();
     assert_eq!(result.status, "exit");
     assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "root");
+    assert_eq!(member_after_root, WAIT_OBJECT_0);
     assert_eq!(
-        unsafe { WaitForSingleObject(member_process.as_raw_handle(), 0) },
-        WAIT_OBJECT_0
-    );
-    assert_eq!(
-        String::from_utf8(member_worker.join().unwrap().unwrap().stdout)
+        String::from_utf8(member_result.unwrap().unwrap().stdout)
             .unwrap()
             .trim(),
         "member"
     );
     assert_eq!(active_count(&engine).unwrap(), 0);
     fs::remove_file(dir.join("go")).unwrap();
+    fs::remove_file(dir.join("root-entered")).unwrap();
     fs::remove_dir(temp).unwrap();
     fs::remove_dir(dir).unwrap();
 }
