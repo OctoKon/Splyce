@@ -320,6 +320,18 @@ fn quote(arg: &str) -> String {
     out
 }
 
+fn powershell_module_path(ps: &Path) -> std::ffi::OsString {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    // WinPS treats forward-slash spelling as custom, avoiding prepended ambient module paths.
+    std::ffi::OsString::from_wide(
+        &ps.join("Modules")
+            .as_os_str()
+            .encode_wide()
+            .map(|unit| if unit == b'\\' as u16 { b'/' as u16 } else { unit })
+            .collect::<Vec<_>>(),
+    )
+}
+
 struct Child {
     job: OwnedHandle,
     process: OwnedHandle,
@@ -365,15 +377,20 @@ fn launch(outer: &OwnedHandle, p: &Start) -> Result<Child, EngineError> {
     let cwd = launch_path(&p.cwd)?;
     let path = std::env::join_paths([system.as_path(), root.as_path(), ps.as_path()])
         .map_err(|_| invalid())?;
-    let mut env = Vec::new();
-    for (key, value) in [
+    let mut values = vec![
         ("ComSpec", system.join("cmd.exe").into_os_string()),
         ("PATH", path),
         ("PATHEXT", ".COM;.EXE;.BAT;.CMD".into()),
         ("SystemRoot", root.into_os_string()),
         ("TEMP", p.temp.clone().into_os_string()),
         ("TMP", p.temp.clone().into_os_string()),
-    ] {
+    ];
+    if p.kind == "powershell" {
+        values.push(("PSModulePath", powershell_module_path(&ps)));
+        values.sort_unstable_by_key(|(key, _)| key.to_ascii_uppercase());
+    }
+    let mut env = Vec::new();
+    for (key, value) in values {
         env.extend(key.encode_utf16());
         env.push(b'=' as u16);
         env.extend(wide(&value)?);
