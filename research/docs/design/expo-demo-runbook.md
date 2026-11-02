@@ -1,6 +1,6 @@
 # Expo demo smoke runbook (V1)
 
-**Status: presenter checklist, updated 2026-10-28 for the expo demo build. Base runbook from `origin/staging` at `44bca6b` (PR #167, written against `d0cecc6`); full-feature-path steps re-verified against demo-build source; packaged-app runtime evidence for this build n=0.** It is a presenter checklist, not a contract: it freezes no schema, command name or copy and authorizes no operation. Copy quoted below was read from `apps/desktop/src` at the commit named beside each claim: demo sources are `Itachi-1824/demo-tools@be41a02` (tool dispatch, workspace tools, approvals, provider form), `Itachi-1824/demo-memory@ef3e45b` (code index, cited memory), `Itachi-1824/agent-context-tools@bfd305b` (`code_search`, `memory_search`) and `Itachi-1824/provider-save-fix@57f5cd6` (provider-save failure copy). The pre-setup strings (header `Splyce`, nav labels, `Workspace tools unavailable`) were observed on the installed 3058 build by the backend lead, not by me; the project-line copy below was re-read from the demo source (`Itachi-1824/demo-v3@9f21210`), because that build predates it. Steps absent from `staging` are marked `(demo build only)`; if the packaged build does not show a step, fall back to the honest unavailable state and say so. Never simulate a port, a response or an approval.
+**Status: presenter checklist, updated 2026-11-02 for the expo demo build. Base runbook from `origin/staging` at `44bca6b` (PR #167, written against `d0cecc6`); every quoted string below was re-grepped against `Itachi-1824/demo-final3@59a5427` and the expo gate head `lapsecoder/demo-final3-gates@a91948c`; packaged-app runtime evidence for this build n=0.** It is a presenter checklist, not a contract: it freezes no schema, command name or copy and authorizes no operation. Copy quoted below was read from `apps/desktop/src` and `packages/splyce-pi/src` on those two commits; neither head is on `staging` yet, so every demo-build statement here is a source observation, not staging behaviour. Steps absent from `staging` are marked `(demo build only)`; if the packaged build does not show a step, fall back to the honest unavailable state and say so. Never simulate a port, a response or an approval.
 
 ## What staging actually has
 
@@ -13,7 +13,7 @@ The renderer, typed bridge and fixtures exist (`apps/desktop/src`, `packages/spl
 
 On a staging-only build, only step 1 and the unavailable states of steps 2, 3 and 6 can be shown honestly. The expo build is expected to cut from the demo branches below; re-grep every quoted string against the packaged exe before the expo — a source string is not runtime evidence.
 
-## What the demo build adds (expo 2026-10-28)
+## What the demo build adds
 
 The packaged demo build installs in place over 3058 and is expected to add the full feature path exercised by the demo script below. Source-verified at the commits in the status line; runtime evidence n=0 until each step is re-run on the exe:
 
@@ -21,6 +21,7 @@ The packaged demo build installs in place over 3058 and is expected to add the f
 - **Code search** — `code_search`, `code_outline`, `code_related`, `code_dependencies`, `code_dependents`, `code_symbol` over the workspace index.
 - **Cited memory** — `memory_search` returns observations captured from earlier turns of this workspace, each listing the source event ids it cites; read-only.
 - **Provider save** - the form is headed `Connect a provider` (accessible name `Provider setup`) with Endpoint URL, API family, Model ID, Context window (tokens), Max output tokens, optional `Reasoning model` / `Accepts image input`, and API key (password), submitted with `Save provider` (`Saving…` while pending).
+- **Session actions** — the shell mounts a `Session actions and evidence` region (`apps/desktop/src/components/SessionActions.svelte`) headed `Session actions`, with `Fork point: <sessionId> / <branchAnchorId>` (or `No branch selected`) and the buttons `Resume`, `Fork from here` and `Rewind…` (the ellipsis means it opens the confirmation dialog, where the confirm button reads `Rewind`). Rewind is destructive and states the TD-25 limits before anything is sent (code / conversation / both; shell and external changes are not restored; the source conversation is kept as ancestry). Each disabled action prints its own line `Resume unavailable: <reason>`, `Fork unavailable: <reason>` or `Rewind unavailable: <reason>` — the common reasons are `Select a session branch first.`, `The engine is unavailable.` and `Rewind is unavailable.`. Demo this only when the buttons are enabled and the reason matches the engine state; never click a disabled action and narrate it as working.
 - **Still off in 3058** — the installed build showed `Workspace tools unavailable` above the composer with tools OFF. That banner reports the current tool-port readiness; it does not establish whether the tools were included in the build. If the freshly packaged build shows it, record those steps (5 to 8 and 11) as unavailable and diagnose readiness, workspace admission and the tool bind separately — never conclude from the banner alone that the build lacks the tool code.
 
 Everything in "What staging actually has" still applies to any build cut from `staging`.
@@ -32,7 +33,7 @@ The cut needs a machine with a Windows native toolchain. The demo host has **no*
 Prerequisites on the build machine:
 
 - Windows 10/11 x64 with the WebView2 runtime present. `runtime-pins.json` names the minimum (`155.0.4283.45`, `qualified: false` — read it, do not assume an older runtime is fine).
-- Node `24.22.1`: `runtime-pins.json` pins the exact build and its SHA-256, `package.json` pins `engines.node` to `>=24.22.1 <25` and `packageManager` to `npm@11.19.1`. The first stage of `build:desktop` (`prepare:runtime`) downloads that exact runtime and verifies the digest, so any Node new enough to run `npm` will do — but do not pass an unverified `node.exe` to a bundle.
+- Node `24.22.1`: `runtime-pins.json` pins the exact build and its SHA-256, `package.json` pins `engines.node` to `>=24.22.1 <25` and `packageManager` to `npm@11.19.1`. The first stage of `build:desktop` (`prepare:runtime`) downloads that exact runtime and verifies the digest, and the build stages run on that pinned runtime - so run `npm ci` and `npm run build:desktop` with `node --version` reporting `v24.22.1` (the prepared `node.exe` on `PATH`, or a system install only when it is exactly that build). A newer or older Node may still run `npm`, but it is not the qualified toolchain and must not be the one that produces the bundle.
 - Rust `1.99.1` for `x86_64-pc-windows-msvc`. It is pinned in `runtime-pins.json` and in the repo-root `rust-toolchain.toml` (`channel`, `components`, `targets`), so `rustup toolchain install 1.99.1 --profile minimal --target x86_64-pc-windows-msvc` plus a plain `cargo` is enough — `rustup` selects the pinned channel on its own. Do not substitute a distro Rust or a different stable; `.github/workflows/staging-gate.yml` installs the same toolchain and sets `RUSTUP_TOOLCHAIN=1.99.1`.
 - Visual Studio Build Tools with the "Desktop development with C++" workload, so `link.exe` exists. Check before starting with `vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`; without it the build fails at link time, not at startup.
 - NSIS: Tauri fetches its NSIS tooling on the first bundle; on a machine that cannot reach it, install NSIS and put `makensis` on `PATH`.
@@ -47,7 +48,7 @@ Step 3 runs three things in order: `build:engine` (contracts, memory and index p
 
 `apps/desktop/src-tauri/tauri.conf.json` fixes the shipped identity: product `Splyce`, version `0.1.0`, bundle target `nsis`, `resources/engine/` mapped to `engine/`. The installer lands in `apps/desktop/src-tauri/target/release/bundle/nsis/` as `Splyce_0.1.0_x64-setup.exe`. Hash it (`Get-FileHash -Algorithm SHA256`) and install that file on the demo machine — not `vite dev`, and never a build from a commit other than the one recorded in step 1. `npm run build:desktop:e2e` is the WebDriver harness (`--no-bundle`) and produces no installer.
 
-**CI is not a shortcut today.** On this lineage `.github/workflows/staging-gate.yml` does run `npm run build:desktop` and `cargo test` on `windows-latest` with the pinned Rust toolchain, so the app is genuinely built there — but it uploads no artifact, so the `.exe` it produced is not retrievable. On `staging` itself the same workflow has no app build at all. Until an artifact upload exists, a machine with the prerequisites above is the only way to obtain the installer.
+**CI is not a shortcut today.** On the demo lineage `.github/workflows/staging-gate.yml` does run `npm run build:desktop` and `cargo test` on `windows-latest` with the pinned Rust toolchain, so the app is genuinely built there — but the only artifacts it uploads are sanitized release-smoke diagnostics and a GLib regression lockfile, never the NSIS installer, so the `.exe` it produced is not retrievable. On `staging` itself the same workflow has no app build at all. Until an artifact upload exists, a machine with the prerequisites above is the only way to obtain the installer.
 
 ## How to read each step
 
@@ -57,22 +58,22 @@ Each step lists **Action**, **Expected UI**, **Pass / Fail** and **If a port is 
 
 Type these verbatim, in order. Each names its step and the state to watch. If a step's port is unavailable, say so out loud and move to the next prompt — never paste a canned reply or hand-build a card.
 
-| #   | Prompt (type verbatim)                           | Proves                   | Watch for                                                                                                                                                           |
-| --- | ------------------------------------------------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `Say hello in one sentence.`                     | Step 4, chat streams     | Text arrives incrementally, turn ends without error                                                                                                                 |
-| 2   | `Read README.txt and tell me what it says.`      | Step 5, read             | Card `Read`: Running → `OK`, answer `demo`; no approval for an in-workspace read                                                                                    |
-| 3   | `Create notes.txt containing hello.` (run twice) | Step 6, write + approval | First run: `Approval required` → `Deny` → card `Denied`, file absent. Second run → `Approve once` → card `OK`, `notes.txt` contains `hello`; a third run asks again |
-| 4   | `Run echo hi in the workspace.`                  | Step 7, shell approval   | `Approval required`, then card `Run shell` with `Exit code 0` and `Output preview`                                                                                  |
-| 5   | `read ../secret.txt`                             | Step 8, escape denied    | Card `Denied`, `Blocked: the target is outside the admitted workspace.` (`WORKSPACE_ESCAPE`); the marker text never appears                                         |
-| 6   | `Find where hello appears in the project.`       | Step 11, code search     | Read-only card, no approval, results from the workspace index                                                                                                       |
-| 7   | `Search memory for demo.`                        | Step 11, memory          | Read-only card; results cite source event ids. If it returns nothing, say memory has not captured anything yet — do not improvise a result                          |
+| #   | Prompt (type verbatim)                           | Proves                    | Watch for                                                                                                                                                           |
+| --- | ------------------------------------------------ | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `Say hello in one sentence.`                     | Step 4, chat streams      | Text arrives incrementally, turn ends without error                                                                                                                 |
+| 2   | `Read README.txt and tell me what it says.`      | Step 5, read              | Card `Read`: Running → `OK`, answer `demo`; no approval for an in-workspace read                                                                                    |
+| 3   | `Create notes.txt containing hello.` (run twice) | Step 6, write + approval  | First run: `Approval required` → `Deny` → card `Denied`, file absent. Second run → `Approve once` → card `OK`, `notes.txt` contains `hello`; a third run asks again |
+| 4   | `Run echo hi in the workspace.`                  | Step 7, shell approval    | `Approval required`, then card `Run shell` with `Exit code 0` and `Output preview`                                                                                  |
+| 5   | Qualification receipt only                       | Step 8, boundary evidence | A separately qualified denial receipt for this exact build; otherwise record unavailable/not exercised                                                              |
+| 6   | `Find where hello appears in the project.`       | Step 11, code search      | Read-only card, no approval, results from the workspace index                                                                                                       |
+| 7   | `Search memory for demo.`                        | Step 11, memory           | Read-only card; results cite source event ids. If it returns nothing, say memory has not captured anything yet — do not improvise a result                          |
 
 If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than typing something new on stage. If Send disables mid-demo, read the composer's own status line aloud — it states the exact reason — instead of retrying blindly.
 
 ## 0. Preflight
 
-- **Action:** install the packaged Windows build (not `vite dev`). Confirm Windows Credential Manager is reachable (open it from Start). Have a test API key for an OpenAI-compatible endpoint (revocable, low limit, never a production key), plus its endpoint URL, API family (for the expo: `openai-completions`), chat model id, context window and max output tokens from the vendor's page — all are explicit form fields, and a custom model needs both token limits (the form never guesses them; cost reads unknown for custom models). Create an empty demo folder outside any repository, seeded with nothing but a `README.txt` (content: `demo`) and a `..\secret.txt` one level above it containing a harmless marker. Confirm network to the endpoint, or run a loopback OpenAI-compatible server on `http://127.0.0.1:<port>`.
-- **Do not demo:** modules/catalog install, usage view ("unavailable"), fork/export, any plugin/MCP, any cloud sync, anything this runbook marks planned that the build still shows as unavailable.
+- **Action:** install the packaged Windows build (not `vite dev`). Confirm Windows Credential Manager is reachable (open it from Start). Have a test API key for an OpenAI-compatible endpoint (revocable, low limit, never a production key), plus its endpoint URL, API family (for the expo: `openai-completions`), chat model id, context window and max output tokens from the vendor's page — all are explicit form fields, and a custom model needs both token limits (the form never guesses them; cost reads unknown for custom models). Create an empty demo folder outside any repository, seeded with nothing but a `README.txt` (content: `demo`). Have a separately qualified boundary-denial receipt for the exact packaged build if step 8 will be presented; otherwise mark that step unavailable. Confirm network to the endpoint, or run a loopback OpenAI-compatible server on `http://127.0.0.1:<port>`.
+- **Do not demo:** modules/catalog install, usage view ("unavailable"), fork or export unless the Session actions buttons are actually enabled, any plugin/MCP, any cloud sync, anything this runbook marks planned that the build still shows as unavailable.
 - **Expected UI:** none yet.
 - **Pass / Fail:** pass when every item above exists and the key is in a password manager, not on screen or in a file in the demo folder. Fail if any item is missing; fix before going on stage.
 - **If a port is unavailable:** no network means present only step 1 and say the hosted-model steps need connectivity.
@@ -83,7 +84,7 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 - **Expected UI:** with `ports.provider`, `ports.workspace` and `ports.generation` all `false` (or unreported) the composer's Send button is disabled and the status line shows the reason: "Engine is not connected." / "Engine is unavailable." / "No session is selected." / "Generation unconfigured. Connect a provider and select a model." (engine proves generation false) / "Generation readiness has not been reported yet. Sending stays blocked." (readiness not reported; a distinct state, not "unconfigured"). Setup offers "Continue with base only", "Choose optional modules" and "Skip setup"; Setup and Modules show the label "Generation unconfigured" with its reason. App's engine notice carries the demo build's copy: "Engine Unavailable" with "The native engine is unavailable. Open the desktop app to connect your project and provider."; "Generation unconfigured" with "Generation requires a configured provider and workspace." once the engine is ready; and "Engine stopped" with "The native engine exited. Reconnect to resume or restart the app; the last transcript may be incomplete." plus a "Retry" button after a crash. On staging the same card instead reads "Engine unavailable" with "Required engine services are unavailable. Task execution is disabled."
 - **Pass / Fail:** pass when Send is disabled and a reason is visible; navigation and history stay usable. Fail if Send is enabled with generation false or unreported, or if the reason is missing or wrong.
 - **If a port is unavailable:** this step is the honest-unavailable demonstration. Say: "No engine is attached to this build, so it will not let me send." Do not enable anything by editing state.
-- `(planned, not on staging yet)`: the engine's `readiness.ports.*` parser (noted in `App.svelte`), so the `false` versus unreported distinction cannot be shown from a real engine yet.
+- **Real-engine note:** the demo build does parse `readiness.ports.*` (`validatePortAvailability` in `apps/desktop/src/engine.ts`) and gates Send on it, so the distinction is real — but you only see the `false` branch when a port is genuinely down (for example no provider configured). Do not manufacture an unreported state on stage; on a staging-only build the parser is absent, so the unreported copy is all you can show.
 
 ## 2. Provider save (`demo build only`; the staging form differs)
 
@@ -106,7 +107,7 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 - **Action:** with provider, workspace and generation all ready, send "Say hello in one sentence."
 - **Expected UI:** Send enables only once the three ports are true. Assistant text streams into the transcript and the turn then completes; `Esc` cancels a busy turn ("A turn is running. Press Esc to cancel it.").
 - **Pass / Fail:** pass when text arrives incrementally and the turn ends without error. Fail on a non-streamed single dump presented as streaming, a hung turn, or a provider error with no honest copy.
-- **If a port is unavailable:** Send stays disabled with the step 1 reason. On stage today the composer would say "Sending is not available yet". Say that; do not paste a canned reply.
+- **If a port is unavailable:** Send stays disabled with the step 1 reason. A staging-only build instead says "Sending is not available yet"; the demo build never shows that string, so read its own status line instead of quoting the staging copy. Do not paste a canned reply.
 
 ## 5. fs.read inside the workspace (`demo build only`)
 
@@ -141,24 +142,24 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 - **Pass / Fail:** pass when the exit code matches reality, truncation is flagged, and the timed-out process is gone (check Task Manager). Fail on a missing exit code, an unflagged cut, or a surviving child process.
 - **If a port is unavailable:** if `Workspace tools unavailable` shows above the composer, record this step unavailable and diagnose readiness and the tool bind; the banner is not evidence about the build's contents. The denial copy is wired in `apps/desktop/src/tool-view.ts` on the demo build but needs live engine events — do not fabricate the card. Remember the shell is not OS-confined (see Known limits); never run anything destructive on stage.
 
-## 8. Path escape is denied
+## 8. Boundary-denial qualification evidence
 
-- **Action:** send "read ../secret.txt".
-- **Expected UI:** the card reads "Denied" with "Blocked: the target is outside the admitted workspace." and code `WORKSPACE_ESCAPE`. No content of `secret.txt` appears.
-- **Pass / Fail:** pass when the card is "Denied" and the marker text never appears in the transcript, preview or logs. Fail if any part of the file is returned or an approval is offered that would allow it.
-- **If a port is unavailable:** on the demo build the denial copy is wired (`WORKSPACE_ESCAPE` in `tool-view.ts`) but renders only from engine events; with tools OFF there is no card. Say so. Do not fabricate the card.
+- **Action:** present a separately qualified boundary-denial receipt bound to the exact packaged build, using only its case identifier and outcome. This runbook supplies no live probe. Without that receipt, record the step unavailable/not exercised.
+- **Expected evidence:** the exact build identity, qualification case identifier and observed denial outcome. Keep target details private.
+- **Pass / Fail:** pass only when the supplied qualification record establishes a denial for this build. An inferred denial, an unobserved card or a receipt for a different build is not a pass.
+- **If evidence is unavailable:** say that this case was not exercised. Do not fabricate an engine event or denial card.
 
 ## 9. Secret hygiene
 
 - **Action:** send one prompt containing an inert marker shaped like a secret: "remember this: sk-demo-inert-0000000000". The marker is not a credential and authorizes nothing; never paste a working provider key into a prompt. End the session, then search the persisted session JSONL and the app log folder for the marker and its first 12 characters (for example `Select-String -Path <session dir>\*.jsonl -Pattern sk-demo-inert -SimpleMatch`).
 - **Expected UI:** the renderer redacts secret-shaped text (`sk-...`, bearer tokens, `api_key=...`) in tool text as `[redacted]`. Persisted transcripts must contain neither the marker nor its prefix.
-- **Pass / Fail:** pass when the search finds nothing in the transcript, logs, crash dumps and `%APPDATA%` app data. Fail on any hit: stop the demo and file a security issue, because the same path would have persisted a real key; there is nothing to rotate, since the marker is inert, so a hit is a defect to record, not a leak to clean up. Note: renderer-side redaction is defence in depth only; persistence redaction is `(planned, not on staging yet)`, so a hit on the unredacted prompt text is a known gap to record, not hide.
+- **Pass / Fail:** pass when the search finds nothing in the transcript, logs, crash dumps and `%APPDATA%` app data. Fail on any hit: stop the demo and file a security issue, because the same path would have persisted a real key; there is nothing to rotate, since the marker is inert, so a hit is a defect to record, not a leak to clean up. Note: renderer-side redaction is defence in depth only. The demo build also routes tool arguments and action metadata through the engine's `credential.redact` before they are stored, and refuses to persist an argument payload that redaction changed or failed to verify (`NATIVE_ARGUMENTS_UNAVAILABLE`); user prompt text is a separate path, so a hit there is a gap to record, not something to hide.
 - **If a port is unavailable:** skip, say so, and do not claim hygiene is proven.
 
-## 10. Crash and restart recovery (`planned, not on staging yet`)
+## 10. Crash and restart recovery (`demo build only`; a full restart still means relaunching the app)
 
 - **Action:** start a long turn, then end the engine process in Task Manager mid-turn.
-- **Expected UI:** the run reads "The engine stopped unexpectedly." (`ENGINE_CRASH`), in-flight actions show "Uncertain" or "Canceled" (an unconfirmed effect reads "The effect could not be confirmed. Check the target before doing anything else."), the transcript marks "Stale", and a restart offer appears (`engine.restart` exists in the contract; no restart UI is on staging). After restart the stream resyncs from the durable cursor.
+- **Expected UI:** the run reads "The engine stopped unexpectedly." (`ENGINE_CRASH`), in-flight actions show "Uncertain" or "Canceled" (an unconfirmed effect reads "The effect could not be confirmed. Check the target before doing anything else."), the transcript marks "Stale", and the engine notice reads "Engine stopped" with "The native engine exited. Reconnect to resume or restart the app; the last transcript may be incomplete." plus a `Retry` button that reconnects the binding (`connect()` in `App.svelte`). A full engine restart means relaunching the app: `engine.restart` exists in the contract but has no UI op. After reconnecting, the stream resyncs from the durable cursor. On a staging-only build the notice instead reads "Engine unavailable" with "Required engine services are unavailable. Task execution is disabled.", and its only `Retry` re-subscribes a failed session stream.
 - **Pass / Fail:** pass when no duplicate file or command effect exists after restart (compare `notes.txt` and process list) and no action is shown "OK" without an outcome. Fail on a duplicate effect, a silently resumed write, or a UI frozen on "Running".
 - **If a port is unavailable:** do not kill anything. Say the recovery path is not exercised end to end in this build; point to the state labels, not a live run.
 
@@ -179,7 +180,7 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 ## Known limits
 
 - One workspace at a time; profile scope equals `workspaceId`. Switching workspaces is not demoed.
-- No fork and no export in V1 (the `session.fork` op exists in the contract but is not a demo path).
+- Fork, resume and rewind render in the shell (`Session actions`; on the demo build under the `Session actions and evidence` disclosure). Each button is disabled with its own visible reason until the engine admits the request, so demo them only when they are enabled. There is no export path in V1.
 - The shell is not OS-confined: protection is exact-command approval only. Treat any approved command as running with your user rights.
 - Providers: OpenAI-compatible endpoints only. No automatic provider or model fallback.
 - Credentials live in the native store; the renderer never holds them.
@@ -193,7 +194,8 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 | Tools bound in the packaged build                    | No `Workspace tools unavailable` bar; prompt 2 returns `demo` | Banner present while steps 5-8, 11 are claimed live |
 | Step 1 readiness (Send disabled with reason)         | Reason visible                                                | Send enabled while a port is false                  |
 | Steps 2, 3 (credential store, project dialog)        | Native, no key or path in UI                                  | Any echo of key, path or `credentialRef`            |
-| Steps 6, 8 (approvals, path escape)                  | Filesystem matches the card                                   | File written after Deny, or escape read             |
+| Step 6 approvals                                     | Filesystem matches the card                                   | File written after Deny                             |
+| Step 8 boundary qualification                        | Build-bound denial receipt; otherwise unavailable             | Unobserved denial or unrelated-build claim          |
 | Step 9 secret hygiene                                | Zero hits                                                     | Any hit                                             |
 | Step 10 recovery                                     | No duplicate effect                                           | Duplicate effect or frozen "Running"                |
 | Any step whose port is unavailable                   | Shown as honest unavailable, not live                         | Faked, mocked or narrated as working                |
