@@ -199,6 +199,109 @@ async function chooseProject(selection: unknown = admitted) {
   await settle();
 }
 
+async function approvalApp() {
+  ipc.invoke.mockImplementation(async (cmd: string, args?: { op?: string }) => {
+    if (cmd === "handshake") {
+      return readyHandshake;
+    }
+    if (cmd === "dialog_select_workspace") return admitted;
+    if (cmd === "send") {
+      if (args?.op === "setup.read")
+        return {
+          configRevision: "cfg_0",
+          selectedProfileId: null,
+          profiles: [],
+        };
+      if (args?.op === "sessions.list")
+        return { sessions: [], truncated: false };
+      if (args?.op === "provider.configure")
+        return {
+          profileId: "profile_1",
+          profileRevision: "pr_1",
+          configRevision: "cfg_1",
+        };
+      if (args?.op === "profile.select")
+        return {
+          selectedProfileId: "profile_1",
+          profileRevision: "pr_2",
+          configRevision: "cfg_2",
+        };
+      if (args?.op === "session.start")
+        return {
+          sessionId: "session_1",
+          sessionRevision: "sr_1",
+          policyRevision: "7",
+          readiness: { state: "ready" },
+        };
+    }
+  });
+  await boot();
+  await chooseProject();
+  button("Models").click();
+  flushSync();
+  for (const [id, value] of Object.entries({
+    "setup-endpoint": "https://example.test/v1",
+    "setup-model": "model",
+    "setup-key": "key",
+  })) {
+    const input = q(`#${id}`) as HTMLInputElement;
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  flushSync();
+  (q('[aria-label="Provider setup"]') as HTMLFormElement).requestSubmit();
+  await settle();
+  button("Use this profile").click();
+  await settle();
+  button("Work").click();
+  await settle();
+}
+
+async function approvalEvent(seq: number, kind: string, payload: object) {
+  dispatchEngineEvent({
+    schemaVersion: 1,
+    protocolVersion: 2,
+    recordId: `rec_${seq}`,
+    eventId: `evt_${seq}`,
+    createdAt: "2026-10-26T00:00:00.000Z",
+    sourceIds: [],
+    scopeId: "ws_1",
+    sessionId: "session_1",
+    seq,
+    durable: true,
+    kind,
+    payload,
+  } as SplyceEvent);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  flushSync();
+}
+async function approvalRun(seq: number, runId: string) {
+  await approvalEvent(seq, "turn.started", { runId, turnId: `turn_${runId}` });
+  await approvalEvent(seq + 1, "approval.requested", {
+    approvalRequestId: `apr_${runId}`,
+    runId,
+    actionId: "act_1",
+    capabilityId: "fs.write",
+    targetScope: "ws_1",
+    normalizedTarget: "target_app",
+    riskRationale: "Writes a file",
+  });
+}
+
+it("only enables the current rendered run when action IDs overlap", async () => {
+  await approvalApp();
+  await approvalRun(1, "old");
+  await approvalRun(3, "new");
+  const runs = document.querySelectorAll('[data-testid="turn-stream"]');
+  expect(runs).toHaveLength(2);
+  expect(
+    runs[0].querySelector('[data-testid="approval-allow-button"]'),
+  ).toBeNull();
+  expect(
+    runs[1].querySelector('[data-testid="approval-allow-button"]'),
+  ).not.toBeNull();
+});
+
 describe("App wiring", () => {
   it("shows generation unconfigured while the native core is ready and runnable ports are unavailable", async () => {
     ipc.invoke.mockImplementation(async (cmd: string) => {

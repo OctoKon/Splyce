@@ -930,6 +930,7 @@
       !!workspace &&
       !!profileSelection &&
       !!startedSession &&
+      readiness?.state === "ready" &&
       (status === "ready" || status === "busy") &&
       subscription.state === "live" &&
       !turns.stale &&
@@ -1162,7 +1163,8 @@
                   stale={turns.stale ||
                     turns.needsResync ||
                     (status !== "ready" && status !== "busy")}
-                  {canRespond}
+                  canRespond={(actionId) =>
+                    run.runId === currentRun?.runId && canRespond(actionId)}
                   {onApproval}
                 />
               {/each}
