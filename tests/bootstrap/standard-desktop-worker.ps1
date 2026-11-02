@@ -24,6 +24,72 @@ function Test-ProfileWritable([string]$Profile, [string]$RunNonce) {
   }
 }
 
+function Invoke-OwnedChild([string]$FilePath, [string[]]$ArgumentVector, [string]$WorkingDirectory,
+    [string]$StandardOutputPath, [string]$StandardErrorPath) {
+  $child = [Diagnostics.Process]::new()
+  $cancellation = [Threading.CancellationTokenSource]::new()
+  $standardOutput = $null
+  $standardError = $null
+  $started = $false
+  try {
+    # Open both owned files before launch; a collision must have no child effect.
+    $standardOutput = [IO.FileStream]::new($StandardOutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 65536, $true)
+    $standardError = [IO.FileStream]::new($StandardErrorPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 65536, $true)
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.WorkingDirectory = $WorkingDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $false
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $ArgumentVector) { $startInfo.ArgumentList.Add($argument) }
+    $child.StartInfo = $startInfo
+    # Start retains the creation handle; do not replace this object with a PID lookup.
+    if (-not $child.Start()) { throw 'Owned child did not start.' }
+    $started = $true
+    $pending = [Collections.Generic.List[Threading.Tasks.Task]]::new()
+    $pending.Add($child.StandardOutput.BaseStream.CopyToAsync($standardOutput, 65536, $cancellation.Token))
+    $pending.Add($child.StandardError.BaseStream.CopyToAsync($standardError, 65536, $cancellation.Token))
+    $pending.Add($child.WaitForExitAsync($cancellation.Token))
+    while ($pending.Count -gt 0) {
+      $finished = [Threading.Tasks.Task]::WhenAny($pending.ToArray()).GetAwaiter().GetResult()
+      [void]$pending.Remove($finished)
+      # Observe each pump immediately: WhenAll could wait forever after one pump fails.
+      [void]$finished.GetAwaiter().GetResult()
+    }
+    $observedExitCode = $child.get_ExitCode()
+    if ($null -eq $observedExitCode) { throw 'Owned child exit code is null.' }
+    if ($observedExitCode -isnot [int]) { throw 'Owned child exit code is not Int32.' }
+    if ($observedExitCode -lt 0 -or $observedExitCode -gt 255) {
+      $nativeExit = [uint32]([long]$observedExitCode -band 4294967295L)
+      throw ('Owned child exit is outside completion range: 0x' + $nativeExit.ToString('X8', [Globalization.CultureInfo]::InvariantCulture) + '.')
+    }
+    # This waits for the root and both streams; the controller owns descendant settlement and timeout.
+    return $observedExitCode
+  } catch {
+    $cancellation.Cancel()
+    if ($started) {
+      try { if (-not $child.HasExited) { $child.Kill() } } catch { } # The controller also settles its owned job.
+    }
+    throw
+  } finally {
+    $cancellation.Cancel()
+    try {
+      if ($started) {
+        try { $child.StandardOutput.Dispose() } finally { $child.StandardError.Dispose() }
+      }
+    } finally {
+      try { if ($null -ne $standardOutput) { $standardOutput.Dispose() } } finally {
+        try { if ($null -ne $standardError) { $standardError.Dispose() } } finally {
+          $child.Dispose()
+          $cancellation.Dispose()
+        }
+      }
+    }
+  }
+}
+
 if ($SelfCheck) {
   if ((Get-IntegrityLabel 0x2000) -ne 'Medium') { throw 'Exact medium integrity was rejected.' }
   foreach ($rid in @(0x2100, 0x2001, 0x1000, 0x3000, -1)) {
@@ -50,6 +116,55 @@ if ($SelfCheck) {
     [IO.Directory]::Delete($testDirectory, $false)
   }
   Write-Output 'Profile probe collision selfcheck passed.'
+  $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+  $node = Join-Path $root 'apps/desktop/src-tauri/resources/engine/node.exe'
+  if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'Pinned Node is required for the owned child selfcheck.' }
+  $nodeVersion = (Get-Content -LiteralPath (Join-Path $root '.node-version') -Raw).Trim()
+  $pins = Get-Content -LiteralPath (Join-Path $root 'runtime-pins.json') -Raw | ConvertFrom-Json
+  if ($nodeVersion -notmatch '^\d+\.\d+\.\d+$' -or $pins.node.version -ne $nodeVersion -or $pins.node.target -ne 'win-x64') {
+    throw 'Node selfcheck version does not match the repository pin.'
+  }
+  $childDirectory = Join-Path ([IO.Path]::GetTempPath()) ('splyce-process-probe-' + [guid]::NewGuid().ToString('N'))
+  [IO.Directory]::CreateDirectory($childDirectory) | Out-Null
+  try {
+    $stdout = Join-Path $childDirectory 'stdout with spaces.log'
+    $stderr = Join-Path $childDirectory 'stderr with spaces.log'
+    $script = 'if (process.argv[1] !== "argument with spaces") throw new Error("argument boundary"); process.stdout.write("out".repeat(32768)); process.stderr.write("err".repeat(32768)); process.exitCode = 7;'
+    $actualExit = Invoke-OwnedChild $node @('-e', $script, 'argument with spaces') $root $stdout $stderr
+    if ($actualExit -isnot [int] -or $actualExit -ne 7 -or [IO.File]::ReadAllText($stdout) -cne ('out' * 32768) -or
+        [IO.File]::ReadAllText($stderr) -cne ('err' * 32768)) {
+      throw 'Owned child did not preserve both streams, argument boundaries, and nonzero exit.'
+    }
+    foreach ($collision in @('stdout', 'stderr')) {
+      $collisionOut = Join-Path $childDirectory "$collision-out.log"
+      $collisionErr = Join-Path $childDirectory "$collision-err.log"
+      $marker = Join-Path $childDirectory "$collision-launched.txt"
+      $collisionPath = if ($collision -eq 'stdout') { $collisionOut } else { $collisionErr }
+      [IO.File]::WriteAllBytes($collisionPath, $bytes)
+      $refused = $false
+      try {
+        Invoke-OwnedChild $node @('-e', 'require("node:fs").writeFileSync(process.argv[1], "launched");', $marker) $root $collisionOut $collisionErr | Out-Null
+      } catch [IO.IOException] { $refused = $true }
+      if (-not $refused -or -not [Linq.Enumerable]::SequenceEqual([byte[]][IO.File]::ReadAllBytes($collisionPath), $bytes) -or
+          (Test-Path -LiteralPath $marker)) {
+        throw 'Owned child output collision did not refuse launch and preserve its sentinel.'
+      }
+    }
+    $versionOut = Join-Path $childDirectory 'version-out.log'
+    $versionErr = Join-Path $childDirectory 'version-err.log'
+    $versionExit = Invoke-OwnedChild $node @('--version') $root $versionOut $versionErr
+    if ($versionExit -ne 0 -or [IO.File]::ReadAllText($versionOut).Trim() -cne "v$nodeVersion" -or [IO.File]::ReadAllBytes($versionErr).Length -ne 0) {
+      throw 'Owned child did not report the pinned Node version.'
+    }
+  } finally {
+    foreach ($name in @('stdout with spaces.log', 'stderr with spaces.log', 'stdout-out.log', 'stdout-err.log', 'stdout-launched.txt',
+        'stderr-out.log', 'stderr-err.log', 'stderr-launched.txt', 'version-out.log', 'version-err.log')) {
+      $ownedPath = Join-Path $childDirectory $name
+      if (Test-Path -LiteralPath $ownedPath -PathType Leaf) { [IO.File]::Delete($ownedPath) }
+    }
+    [IO.Directory]::Delete($childDirectory, $false)
+  }
+  Write-Output 'Owned child streams, collision refusal, exit, and pinned version selfcheck passed.'
   return
 }
 
@@ -119,8 +234,12 @@ public static class StandardDesktopIntegrity {
 }
 '@
   $rid = [StandardDesktopIntegrity]::ReadRid()
-  $selfAccess = [StandardDesktopIntegrity]::ReadSelfAccess() | ConvertTo-Json -Compress
-  [IO.File]::WriteAllText((Join-Path $RunDirectory 'diagnostics/self-access.json'), $selfAccess, [Text.UTF8Encoding]::new($false))
+  $selfAccess = @{}
+  foreach ($entry in [StandardDesktopIntegrity]::ReadSelfAccess().GetEnumerator()) { $selfAccess[$entry.Key] = $entry.Value }
+  $selfAccess.powerShellVersion = $PSVersionTable.PSVersion.ToString()
+  $selfAccess.managementModuleVersion = (Get-Command Start-Process -CommandType Cmdlet).Module.Version.ToString()
+  $selfAccess.dotNetVersion = [Runtime.InteropServices.RuntimeInformation]::FrameworkDescription
+  [IO.File]::WriteAllText((Join-Path $RunDirectory 'diagnostics/self-access.json'), ($selfAccess | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
   $profileSame = [IO.Path]::GetFullPath($env:USERPROFILE) -eq [IO.Path]::GetFullPath([string]$runConfig.userProfile)
   $profileWritable = Test-ProfileWritable $env:USERPROFILE $Nonce
   $attestation = @{
@@ -154,9 +273,8 @@ public static class StandardDesktopIntegrity {
   $node = Join-Path $root 'apps/desktop/src-tauri/resources/engine/node.exe'
   $command = if ($Mode -eq 'Token') { $node } elseif ($Mode -eq 'Smoke') { Join-Path $root 'tests/bootstrap/release-smoke.mjs' } else { Join-Path $root 'apps/desktop/src-tauri/target/build-tools/node_modules/npm/bin/npm-cli.js' }
   if (-not (Test-Path -LiteralPath $node -PathType Leaf) -or -not (Test-Path -LiteralPath $command -PathType Leaf)) { throw 'Pinned command is missing.' }
-  $arguments = if ($Mode -eq 'Token') { @('--version') } elseif ($Mode -eq 'Smoke') { @('"' + $command + '"') } else { @('"' + $command + '"', 'run', 'test:release-gate') }
-  $child = Start-Process -FilePath $node -ArgumentList $arguments -WorkingDirectory $root -RedirectStandardOutput (Join-Path $RunDirectory 'stdout.log') -RedirectStandardError (Join-Path $RunDirectory 'stderr.log') -Wait -PassThru -WindowStyle Hidden
-  $exitCode = $child.ExitCode
+  $arguments = if ($Mode -eq 'Token') { @('--version') } elseif ($Mode -eq 'Smoke') { @($command) } else { @($command, 'run', 'test:release-gate') }
+  $exitCode = Invoke-OwnedChild $node $arguments $root (Join-Path $RunDirectory 'stdout.log') (Join-Path $RunDirectory 'stderr.log')
   $status = 'completed'
 } catch {
   if ($validRunDirectory) { [IO.File]::WriteAllText((Join-Path $RunDirectory 'worker-error.txt'), $_.ToString(), [Text.UTF8Encoding]::new($false)) }
