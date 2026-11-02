@@ -26,7 +26,7 @@ function event<K extends EventKind>(
 ): SplyceEventEnvelope {
   return {
     schemaVersion: 1,
-    protocolVersion: 2,
+    protocolVersion: 1,
     recordId: `rec_${seq}`,
     eventId: `evt_${seq}`,
     createdAt: "2026-10-26T00:00:00.000Z",

@@ -3,7 +3,15 @@
 // never both). Single authority for operational receipts; everything else is a
 // rebuildable projection. Erasable-syntax-only (runs under Node type stripping).
 
-import { createHash, randomUUID } from "node:crypto";
+import {
+  CONTRACT_VERSION,
+  ContractError,
+  type ContractContext,
+  type RecordKind,
+  type RecordByKind,
+  validateRecord,
+} from "./contracts.js";
+import { DatabaseSync } from "node:sqlite";
 import {
   copyFileSync,
   existsSync,
@@ -12,38 +20,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
-import {
-  type ActionRecord,
-  type AdmittedWorkspaceRecord,
-  CONTRACT_VERSION,
-  type ContractContext,
-  ContractError,
-  type GrantRecord,
-  PROTOCOL_VERSION,
-  type ProviderEndpointRecord,
-  RECORD_SCHEMAS,
-  type RecordByKind,
-  type RecordKind,
-  type SplyceEvent,
-  type SplyceEventDraft,
-  snapshotPersistedJson,
-  validateEvent,
-  validateRecord,
-} from "./contracts.js";
-import {
-  type SetupInput,
-  SetupMetadataError,
-  type TrustedCatalog,
-  validateSetupMetadata,
-} from "./setup-metadata.js";
-
-export type {
-  SetupInput,
-  SetupMetadata,
-  TrustedCatalog,
-  TrustedCatalogEntry,
-} from "./setup-metadata.js";
 
 const LAYOUT_VERSION = 2 as const;
 
@@ -98,8 +74,6 @@ export interface CallerContext {
   profileRevision: string;
   policyRevision: string;
   resolveReference?: (id: string, scopeId: string) => boolean;
-  /** Native-supplied pinned model catalog; only it can vouch for a `catalog` model descriptor. */
-  trustedCatalog?: TrustedCatalog;
 }
 
 export interface AppendInput {
@@ -110,13 +84,6 @@ export interface AppendInput {
 export interface Appended {
   seq: number;
   recordId: string;
-}
-
-export interface EntityRevisionExpectation {
-  kind: "providerConnection" | "profileSnapshot" | "providerEndpoint";
-  scopeId: string;
-  entityId: string;
-  expectedRevision: string | null;
 }
 
 export interface StoredRecord {
@@ -136,181 +103,11 @@ export interface AppendBatchResult {
   seqs: number[];
 }
 
-export interface EventPreconditions {
-  expectedDeletionEpoch?: number;
-  expectedAbsentActionKey?: {
-    scopeId: string;
-    idempotencyKey: string;
-    actionId: string;
-  };
-  expectedOwnershipEpoch?: { workspaceId: string; epoch: number };
-  expectedConfigRevision?: { scopeId: string; revision: string };
-  expectedActionReservation?: {
-    scopeId: string;
-    actionId: string;
-    idempotencyKey: string;
-    recordId: string;
-  };
-}
-interface EventWatermark {
-  scopeId: string;
-  sessionId: string;
-  seq: number;
-}
-const EVENT_SEQUENCE_PREFIX = "event_seq:";
-
-function eventSequenceKey(scopeId: string, sessionId: string): string {
-  if (
-    [scopeId, sessionId].some(
-      (id) => typeof id !== "string" || id.length === 0 || /\s|[\\/]/u.test(id),
-    )
-  )
-    throw new StoreError(
-      "EVENT_SCOPE",
-      "event scope and session must be opaque ids",
-    );
-  return EVENT_SEQUENCE_PREFIX + JSON.stringify([scopeId, sessionId]);
-}
-
 /** Durable canonical-workspace ownership: single writer per workspace. */
 export interface WorkspaceOwnership {
   workspaceId: string;
   ownerSessionId: string;
   epoch: number;
-}
-
-/** TD-13 native directory identity (volume serial + file id, native-supplied). */
-export interface DirectoryIdentity {
-  volumeSerial: string;
-  fileId: string;
-}
-
-export interface WorkspaceAdmissionInput extends DirectoryIdentity {
-  /** Final absolute drive path from the native resolver; never renderer-visible. */
-  canonicalPath: string;
-}
-
-/** Engine/native-only view: carries the canonical path. */
-export type AdmittedWorkspace = AdmittedWorkspaceRecord & {
-  canonicalPath: string;
-};
-
-/** Renderer-safe workspace projection: no path, no directory identity. */
-export interface WorkspaceView {
-  workspaceId: string;
-  displayName: string;
-  admittedAt: string;
-  revision: string;
-}
-
-export function workspaceView(
-  workspace: AdmittedWorkspaceRecord,
-): WorkspaceView {
-  return {
-    workspaceId: workspace.workspaceId,
-    displayName: workspace.displayName,
-    admittedAt: workspace.admittedAt,
-    revision: workspace.revision,
-  };
-}
-
-/** Native identity encoding: canonical unsigned decimal (no sign, space or leading zero) within `max`. */
-function canonicalUnsigned(value: unknown, max: bigint): boolean {
-  return (
-    typeof value === "string" &&
-    /^(0|[1-9][0-9]*)$/u.test(value) &&
-    BigInt(value) <= max
-  );
-}
-
-export interface GrantInput {
-  workspaceId: string;
-  sessionId: string;
-  capability: GrantRecord["capability"];
-  scope: GrantRecord["scope"];
-  actionId?: string;
-  argumentsDigest?: string;
-  origin?: string;
-}
-
-/** What a dispatch presents to use a grant; `observedIdentity` is read natively at dispatch. */
-export interface GrantUse {
-  grantId: string;
-  workspaceId: string;
-  sessionId: string;
-  capability: GrantRecord["capability"];
-  observedIdentity: DirectoryIdentity;
-  actionId?: string;
-  argumentsDigest?: string;
-  /** net.provider only: the qualified `scheme://host:port` the dispatch targets. */
-  origin?: string;
-}
-
-export interface OnceGrantConsumption extends GrantUse {
-  actionId: string;
-  argumentsDigest: string;
-}
-
-interface NativeGrantPreconditions {
-  expectedOnceGrant?: OnceGrantConsumption;
-  expectedGrantMint?: Pick<
-    GrantInput,
-    "workspaceId" | "sessionId" | "capability"
-  >;
-  expectedActiveGrants?: readonly string[];
-  workspaceAdmission?: {
-    canonicalPath: string;
-    workspaceId: string;
-    expectedCurrent: string | null;
-  };
-}
-
-const NATIVE_ONLY_KINDS: readonly string[] = [
-  "admittedWorkspace",
-  "grant",
-  "providerEndpoint",
-];
-function assertNoNativeOnlyKinds(inputs: readonly AppendInput[]): void {
-  if (inputs.some((input) => NATIVE_ONLY_KINDS.includes(input.kind)))
-    throw new StoreError(
-      "NATIVE_API_REQUIRED",
-      "workspace, grant and providerEndpoint records are written only through their Store APIs (providerEndpoint: compareAndAppend)",
-    );
-}
-
-const RESERVED_DEVICE =
-  /^(?:con|prn|aux|nul|com\d|lpt\d|conin\$|conout\$)(?:\..*)?$/iu;
-/** Validates a final local drive path and returns its folder basename. */
-function workspaceDisplayName(path: unknown): string {
-  if (
-    typeof path !== "string" ||
-    path.length > 32767 ||
-    !/^[A-Za-z]:\\(?:[^\\/:*?"<>|\x00-\x1f]+(?:\\[^\\/:*?"<>|\x00-\x1f]+)*)?$/u.test(
-      path,
-    )
-  )
-    throw new StoreError(
-      "WORKSPACE_PATH_INVALID",
-      "workspace path must be an absolute local drive path (no UNC, device or relative form)",
-    );
-  const segments = path
-    .slice(3)
-    .split("\\")
-    .filter((segment) => segment !== "");
-  if (
-    segments.some(
-      (segment) =>
-        segment === "." ||
-        segment === ".." ||
-        /[ .]$/u.test(segment) ||
-        RESERVED_DEVICE.test(segment),
-    )
-  )
-    throw new StoreError(
-      "WORKSPACE_PATH_INVALID",
-      "workspace path has a non-canonical or device segment",
-    );
-  return segments.at(-1) ?? path.slice(0, 2);
 }
 
 const isRecordObject = (value: unknown): value is Record<string, unknown> =>
@@ -360,12 +157,6 @@ function mapSqliteError(error: unknown): StoreError {
     "STORE_UNKNOWN",
     error instanceof Error ? error.message : String(error),
   );
-}
-
-export interface SetupResult {
-  endpoint: RecordByKind["providerEndpoint"];
-  connection: RecordByKind["providerConnection"];
-  profile: RecordByKind["profileSnapshot"];
 }
 
 export class Store {
@@ -423,7 +214,6 @@ export class Store {
           `store claims layout ${stampedVersion} but table ${table} lacks columns: ${missing.join(", ")}`,
         );
     }
-    Store.eventWatermarks(db);
   }
 
   /**
@@ -583,16 +373,6 @@ export class Store {
       } else {
         Store.validateStamped(db, row.value);
       }
-      // TD-13 additive native-only table (no layout bump): older layout-2
-      // readers ignore it; canonical paths never enter exportable records.
-      db.exec(
-        "CREATE TABLE IF NOT EXISTS workspace_paths (" +
-          "workspace_id TEXT PRIMARY KEY, canonical_path TEXT NOT NULL)",
-      );
-      db.exec(
-        "CREATE INDEX IF NOT EXISTS workspace_paths_path " +
-          "ON workspace_paths (canonical_path)",
-      );
       db.exec("COMMIT;");
       return new Store(path, db, busyTimeoutMs, maxInlineBytes, false);
     } catch (error) {
@@ -612,254 +392,6 @@ export class Store {
 
   private assertOpen(): void {
     if (this.closed) throw new StoreError("STORE_CLOSED", "store is closed");
-  }
-
-  /**
-   * Structural bootstrap audit, including historical and tombstoned rows.
-   * Reference syntax is checked, but reference authorization belongs to the
-   * live caller; historical references need not still be available today.
-   */
-  audit(): {
-    scopeIds: string[];
-    recordCount: number;
-    deletedRecordIds: string[];
-    records: StoredRecord[];
-  } {
-    this.assertOpen();
-    try {
-      const integrity = this.db.prepare("PRAGMA integrity_check").all();
-      if (
-        integrity.length !== 1 ||
-        (integrity[0] as { integrity_check?: unknown }).integrity_check !== "ok"
-      )
-        throw new StoreError("STORE_CORRUPT", "store integrity check failed");
-      const stamp = this.db
-        .prepare("SELECT value FROM store_meta WHERE key = 'layout_version'")
-        .get() as { value: string } | undefined;
-      Store.validateStamped(this.db, stamp?.value ?? "");
-      const rows = this.db
-        .prepare(
-          "SELECT seq, kind, record_id, schema_version, scope_id, session_id, created_at, payload FROM records ORDER BY seq",
-        )
-        .all() as Array<{
-        seq: number;
-        kind: RecordKind;
-        record_id: string;
-        schema_version: number;
-        scope_id: string;
-        session_id: string;
-        created_at: string;
-        payload: string;
-      }>;
-      const scopeIds = new Set<string>();
-      const records: StoredRecord[] = [];
-      for (const row of rows) {
-        const record = this.validateStructuralRow(row);
-        scopeIds.add(row.scope_id);
-        records.push({ seq: row.seq, kind: row.kind, record });
-      }
-      const deletions = this.db
-        .prepare("SELECT record_id, generation, deleted_at FROM deletions")
-        .all() as Array<{
-        record_id: string;
-        generation: number;
-        deleted_at: string;
-      }>;
-      const epoch = this.deletionEpoch();
-      for (const deletion of deletions) {
-        if (
-          typeof deletion.record_id !== "string" ||
-          deletion.record_id.length === 0 ||
-          /\s|[\\/]/u.test(deletion.record_id) ||
-          !Number.isSafeInteger(deletion.generation) ||
-          deletion.generation < 1 ||
-          deletion.generation > epoch ||
-          typeof deletion.deleted_at !== "string" ||
-          !Number.isFinite(Date.parse(deletion.deleted_at))
-        )
-          throw new StoreError("STORE_LAYOUT", "invalid deletion tombstone");
-      }
-      return {
-        scopeIds: [...scopeIds].sort(),
-        recordCount: rows.length,
-        deletedRecordIds: deletions.map((row) => row.record_id),
-        records,
-      };
-    } catch (error) {
-      throw mapSqliteError(error);
-    }
-  }
-
-  /** One SQLite observation of scoped authority and its tombstones, excluding event history. */
-  readAuthority(scopeId: string): {
-    records: StoredRecord[];
-    deletedRecordIds: string[];
-  } {
-    this.assertOpen();
-    try {
-      const knownKinds = Object.keys(RECORD_SCHEMAS);
-      const rows = this.db
-        .prepare(
-          "SELECT r.*, d.record_id AS deleted_record_id, d.generation, d.deleted_at, " +
-            "(SELECT value FROM store_meta WHERE key = 'deletion_epoch') AS deletion_epoch " +
-            "FROM records r LEFT JOIN deletions d ON d.record_id = r.record_id " +
-            "WHERE r.scope_id = ? AND (r.kind IN ('profileSnapshot', 'providerConnection', 'configurationTransition') " +
-            `OR r.kind NOT IN (${knownKinds.map(() => "?").join(",")}) OR r.schema_version != ?) ORDER BY r.seq`,
-        )
-        .all(scopeId, ...knownKinds, CONTRACT_VERSION) as Array<
-        Parameters<Store["validateStructuralRow"]>[0] & {
-          deleted_record_id: string | null;
-          generation: number | null;
-          deleted_at: string | null;
-          deletion_epoch: string | null;
-        }
-      >;
-      const records: StoredRecord[] = [];
-      const deletedRecordIds: string[] = [];
-      for (const row of rows) {
-        const record = this.validateStructuralRow(row);
-        if (row.deleted_record_id !== null) {
-          const epoch =
-            Store.parseEpoch(
-              row.deletion_epoch ?? undefined,
-              "deletion_epoch",
-            ) ?? 0;
-          if (
-            !Number.isSafeInteger(row.generation) ||
-            row.generation! < 1 ||
-            row.generation! > epoch ||
-            typeof row.deleted_at !== "string" ||
-            !Number.isFinite(Date.parse(row.deleted_at))
-          )
-            throw new StoreError("STORE_LAYOUT", "invalid deletion tombstone");
-          deletedRecordIds.push(row.deleted_record_id);
-        }
-        records.push({ seq: row.seq, kind: row.kind, record });
-      }
-      return { records, deletedRecordIds };
-    } catch (error) {
-      throw mapSqliteError(error);
-    }
-  }
-
-  /**
-   * Native-only: everything setup needs from one scope, observed in ONE read
-   * transaction. `workspace` is the current admitted workspace (private
-   * canonicalPath and directory identity) or null if superseded/deleted/unknown.
-   */
-  readSetupState(workspaceId: string): {
-    records: StoredRecord[];
-    deletedRecordIds: string[];
-    workspace: AdmittedWorkspace | null;
-    deletionEpoch: number;
-  } {
-    this.assertOpen();
-    const kinds = [
-      "providerEndpoint",
-      "providerConnection",
-      "profileSnapshot",
-      "artifact",
-      "configurationTransition",
-      "admittedWorkspace",
-    ];
-    try {
-      this.db.exec("BEGIN;");
-      try {
-        const rows = this.db
-          .prepare(
-            "SELECT r.*, d.record_id AS deleted_record_id, d.generation, d.deleted_at, " +
-              "(SELECT value FROM store_meta WHERE key = 'deletion_epoch') AS deletion_epoch " +
-              "FROM records r LEFT JOIN deletions d ON d.record_id = r.record_id " +
-              `WHERE r.scope_id = ? AND r.kind IN (${kinds.map(() => "?").join(",")}) ORDER BY r.seq`,
-          )
-          .all(workspaceId, ...kinds) as Array<
-          Parameters<Store["validateStructuralRow"]>[0] & {
-            deleted_record_id: string | null;
-            generation: number | null;
-            deleted_at: string | null;
-            deletion_epoch: string | null;
-          }
-        >;
-        const records: StoredRecord[] = [];
-        const deletedRecordIds: string[] = [];
-        for (const row of rows) {
-          const record = this.validateStructuralRow(row);
-          if (row.deleted_record_id !== null) {
-            const epoch =
-              Store.parseEpoch(
-                row.deletion_epoch ?? undefined,
-                "deletion_epoch",
-              ) ?? 0;
-            if (
-              !Number.isSafeInteger(row.generation) ||
-              row.generation! < 1 ||
-              row.generation! > epoch ||
-              typeof row.deleted_at !== "string" ||
-              !Number.isFinite(Date.parse(row.deleted_at))
-            )
-              throw new StoreError(
-                "STORE_LAYOUT",
-                "invalid deletion tombstone",
-              );
-            deletedRecordIds.push(row.deleted_record_id);
-          }
-          records.push({ seq: row.seq, kind: row.kind, record });
-        }
-        const workspace = this.currentWorkspace(workspaceId) ?? null;
-        const deletionEpoch = this.deletionEpoch();
-        this.db.exec("COMMIT;");
-        return { records, deletedRecordIds, workspace, deletionEpoch };
-      } catch (error) {
-        if (this.db.isTransaction) this.db.exec("ROLLBACK;");
-        throw error;
-      }
-    } catch (error) {
-      throw mapSqliteError(error);
-    }
-  }
-
-  private validateStructuralRow(row: {
-    seq: number;
-    kind: RecordKind;
-    record_id: string;
-    schema_version: number;
-    scope_id: string;
-    session_id: string;
-    created_at: string;
-    payload: string;
-  }): RecordByKind[RecordKind] {
-    if (row.schema_version !== CONTRACT_VERSION)
-      throw new StoreError(
-        "UNKNOWN_SCHEMA",
-        "audit cannot read an unknown record schema",
-      );
-    const parsed = this.decodeStoredPayload(row.kind, row.payload);
-    const record = validateRecord(row.kind, parsed, {
-      scopeId: row.scope_id,
-      // Empty attribution is retained for historical migrated rows.
-      sessionId: row.session_id || "historical",
-      configRevision: INITIAL_CONFIG_REVISION,
-      profileRevision: "audit",
-      policyRevision: "audit",
-      lastDurableSeq: Number.MAX_SAFE_INTEGER,
-      maxInlineBytes: this.maxInlineBytes,
-      resolveReference: () => true,
-    });
-    if (
-      !Number.isSafeInteger(row.seq) ||
-      row.seq < 1 ||
-      record.recordId !== row.record_id ||
-      record.scopeId !== row.scope_id ||
-      record.createdAt !== row.created_at ||
-      record.schemaVersion !== row.schema_version ||
-      typeof row.session_id !== "string" ||
-      (row.session_id !== "" && /\s|[\\/]/u.test(row.session_id))
-    )
-      throw new StoreError(
-        "STORE_ATTRIBUTION",
-        "stored row attribution differs from its payload",
-      );
-    return record;
   }
 
   /** Write paths reject a read-only store explicitly before any write attempt. */
@@ -900,75 +432,6 @@ export class Store {
       resolveReference:
         caller.resolveReference ?? ((_id: string, _scopeId: string) => false),
     };
-  }
-
-  private eventContext(
-    scopeId: string,
-    caller: CallerContext,
-    staged: readonly AppendInput[] = [],
-  ): ContractContext {
-    const context = this.context(scopeId, caller);
-    context.resolveReference = (id, referencedScopeId) => {
-      if (
-        this.db
-          .prepare("SELECT 1 FROM deletions WHERE record_id = ?")
-          .get(id) !== undefined
-      )
-        return false;
-      if (caller.resolveReference !== undefined)
-        return caller.resolveReference(id, referencedScopeId) === true;
-      return (
-        this.db
-          .prepare("SELECT 1 FROM records WHERE record_id = ? AND scope_id = ?")
-          .get(id, referencedScopeId) !== undefined ||
-        staged.some(
-          (input) =>
-            isRecordObject(input.record) &&
-            input.record.recordId === id &&
-            input.record.scopeId === referencedScopeId,
-        )
-      );
-    };
-    return context;
-  }
-
-  private assertEventSource(
-    event: SplyceEvent,
-    context: ContractContext,
-  ): void {
-    if (
-      this.db
-        .prepare("SELECT 1 FROM deletions WHERE record_id IN (?, ?)")
-        .get(event.recordId, `event:${event.eventId}`) !== undefined
-    )
-      throw new StoreError("EVENT_DELETED", "event or source has been deleted");
-    if (
-      !context.resolveReference(event.recordId, event.scopeId) ||
-      this.db
-        .prepare("SELECT 1 FROM records WHERE record_id = ? AND scope_id = ?")
-        .get(event.recordId, event.scopeId) === undefined
-    )
-      throw new StoreError(
-        "EVENT_SOURCE",
-        "event source record is unresolved or denied",
-      );
-  }
-
-  private eventReadContext(
-    scopeId: string,
-    sessionId: string,
-  ): ContractContext {
-    const context = this.context(scopeId, {
-      sessionId,
-      configRevision: INITIAL_CONFIG_REVISION,
-      profileRevision: "replay",
-      policyRevision: "replay",
-    });
-    context.lastDurableSeq = Store.eventHighwater(this.db, scopeId, sessionId);
-    context.resolveReference = (id) =>
-      this.db.prepare("SELECT 1 FROM deletions WHERE record_id = ?").get(id) ===
-      undefined;
-    return context;
   }
 
   /**
@@ -1054,12 +517,6 @@ export class Store {
    */
   append(input: AppendInput, caller: CallerContext): Appended {
     this.assertWritable();
-    if (input.kind === "event")
-      throw new StoreError(
-        "EVENT_COMMIT_REQUIRED",
-        "event records require commitEvents",
-      );
-    assertNoNativeOnlyKinds([input]);
     const recordObject = input.record as Record<string, unknown> | undefined;
     const scopeId =
       isRecordObject(recordObject) && typeof recordObject.scopeId === "string"
@@ -1081,238 +538,6 @@ export class Store {
     } catch (error) {
       throw mapSqliteError(error);
     }
-  }
-
-  /** Atomic CAS for profile writers; ordinary append APIs retain their existing semantics. */
-  compareAndAppend(
-    input: AppendInput,
-    caller: CallerContext,
-    expected: EntityRevisionExpectation,
-  ): Appended {
-    let record: unknown;
-    try {
-      // Reference callbacks can mutate their original input, never this copy.
-      record = snapshotPersistedJson(input.record);
-    } catch (error) {
-      throw mapSqliteError(error);
-    }
-    const { seqs } = this.commitBatch(
-      [{ kind: input.kind, record }],
-      [],
-      caller,
-      {
-        expectedEntityRevision: { ...expected },
-      },
-    );
-    return {
-      seq: seqs[0]!,
-      recordId: (record as Record<string, unknown>).recordId as string,
-    };
-  }
-
-  /**
-   * TD-26 first-run setup: endpoint, connection and profile revisions commit in
-   * ONE transaction with per-entity CAS under the same lock. Record ids derive
-   * from requestId, so an identical retry returns the stored result and appends
-   * nothing; the same requestId with a different payload is SETUP_REQUEST_CONFLICT.
-   * Only a credentialRef is accepted: unknown fields (apiKey, ...) are rejected.
-   */
-  commitSetup(
-    input: unknown,
-    caller: CallerContext,
-    expectedDeletionEpoch?: number,
-  ): SetupResult {
-    let setup: SetupInput;
-    try {
-      setup = validateSetupMetadata(
-        input,
-        caller.trustedCatalog === undefined
-          ? {}
-          : { trustedCatalog: caller.trustedCatalog },
-      );
-    } catch (error) {
-      if (error instanceof SetupMetadataError)
-        throw new StoreError(error.code, error.message);
-      throw error;
-    }
-    const scopeId = setup.workspaceId;
-    // Hashed so a 128-character requestId still fits the recordId bound.
-    const key = createHash("sha256")
-      .update(setup.requestId)
-      .digest("hex")
-      .slice(0, 32);
-    const ids = {
-      endpoint: `setup:${key}:endpoint`,
-      connection: `setup:${key}:connection`,
-      profile: `setup:${key}:profile`,
-    };
-    // Identity of the whole accepted request; replays compare it under the write lock.
-    const digestRef = `setup-request:sha256:${createHash("sha256")
-      .update(JSON.stringify(setup))
-      .digest("hex")}`;
-    const base = (recordId: string) => ({
-      schemaVersion: CONTRACT_VERSION,
-      recordId,
-      createdAt: new Date().toISOString(),
-      scopeId,
-      sourceIds: [digestRef],
-    });
-    const endpoint = {
-      ...base(ids.endpoint),
-      endpointId: setup.endpoint.endpointId,
-      canonicalUrl: setup.endpoint.canonicalUrl,
-      apiFamily: setup.endpoint.apiFamily,
-      locality: setup.endpoint.locality,
-      revision: setup.endpoint.revision,
-    };
-    // displayName is rejected as an unknown field: the connection record has no such field.
-    const connection = {
-      ...base(ids.connection),
-      providerConnectionId: setup.connection.providerConnectionId,
-      revision: setup.connection.revision,
-      apiFamily: setup.connection.apiFamily,
-      apiVersion: setup.descriptors.apiVersion,
-      endpointRef: setup.connection.endpointRef,
-      credentialRef: setup.connection.credentialRef,
-      adapterRevision: setup.descriptors.adapterRevision,
-      accountScopeRef: setup.descriptors.accountScopeRef,
-      locality: setup.connection.locality,
-    };
-    // One immutable artifact per described binding; the profile links it through sourceIds.
-    const descriptorArtifacts = setup.profile.bindings.flatMap((binding) => {
-      if (binding.modelDescriptor === undefined) return [];
-      const recordId = `setup:${key}:modeldesc:${binding.role}`;
-      const json = JSON.stringify(binding.modelDescriptor);
-      return [
-        {
-          ...base(recordId),
-          artifactId: recordId,
-          digest: `sha256:${createHash("sha256").update(json).digest("hex")}`,
-          mediaType: "application/vnd.splyce.model-descriptor+json",
-          byteLength: new TextEncoder().encode(json).length,
-          retentionClass: "workspace",
-          role: binding.role,
-          modelId: binding.modelId,
-          descriptor: binding.modelDescriptor,
-        },
-      ];
-    });
-    const profile = {
-      ...base(ids.profile),
-      sourceIds: [digestRef, ...descriptorArtifacts.map((a) => a.recordId)],
-      profileId: setup.profile.profileId,
-      profileRevision: setup.profile.profileRevision,
-      configRevision: this.configRevision(scopeId),
-      roleBindingRefs: [] as string[],
-      installedModuleRefs: [] as string[],
-      bindings: setup.profile.bindings.map(
-        ({ modelDescriptor: _descriptor, ...pinned }) => pinned,
-      ),
-      egressPolicyRefs: [...setup.descriptors.egressPolicyRefs],
-      limitsArtifactId: setup.descriptors.limitsArtifactId,
-    };
-    const resolve = (ref: string): boolean => {
-      try {
-        return caller.resolveReference?.(ref, scopeId) === true;
-      } catch {
-        return false;
-      }
-    };
-    const unresolved: [string, string][] = [
-      ["connection.credentialRef", setup.connection.credentialRef],
-      ["descriptors.accountScopeRef", setup.descriptors.accountScopeRef],
-      ["descriptors.limitsArtifactId", setup.descriptors.limitsArtifactId],
-      ...setup.descriptors.egressPolicyRefs.map((ref, i): [string, string] => [
-        `descriptors.egressPolicyRefs[${i}]`,
-        ref,
-      ]),
-    ];
-    for (const [field, ref] of unresolved)
-      if (!resolve(ref))
-        throw new StoreError(
-          "SETUP_INVALID",
-          `setup reference does not resolve: ${field}`,
-        );
-    // The endpoint revision exists only inside this batch; everything else is the caller's.
-    const batchCaller: CallerContext = {
-      ...caller,
-      resolveReference: (ref, refScope) =>
-        (refScope === scopeId &&
-          (ref === connection.endpointRef ||
-            ref === digestRef ||
-            descriptorArtifacts.some((a) => a.recordId === ref))) ||
-        resolve(ref),
-    };
-    let replayed: SetupResult | undefined;
-    try {
-      this.commitBatch(
-        [
-          { kind: "providerEndpoint", record: endpoint },
-          { kind: "providerConnection", record: connection },
-          { kind: "profileSnapshot", record: profile },
-          ...descriptorArtifacts.map((record) => ({
-            kind: "artifact" as const,
-            record,
-          })),
-        ],
-        [],
-        batchCaller,
-        {
-          expectedSetup: {
-            workspaceId: scopeId,
-            expectedDeletionEpoch,
-            recordIds: [
-              ...Object.values(ids),
-              ...descriptorArtifacts.map((a) => a.recordId),
-            ],
-            digestRef,
-            onReplay: (records) => {
-              replayed = {
-                endpoint: records[0] as RecordByKind["providerEndpoint"],
-                connection: records[1] as RecordByKind["providerConnection"],
-                profile: records[2] as RecordByKind["profileSnapshot"],
-              };
-            },
-            unresolved: (): string | undefined =>
-              unresolved.find(([, ref]) => !resolve(ref))?.[0],
-          },
-          expectedEntityRevision: [
-            {
-              kind: "providerEndpoint",
-              scopeId,
-              entityId: endpoint.endpointId,
-              expectedRevision: setup.expected.endpointRevision,
-            },
-            {
-              kind: "providerConnection",
-              scopeId,
-              entityId: connection.providerConnectionId,
-              expectedRevision: setup.expected.connectionRevision,
-            },
-            {
-              kind: "profileSnapshot",
-              scopeId,
-              entityId: profile.profileId,
-              expectedRevision: setup.expected.profileRevision,
-            },
-          ],
-        },
-      );
-    } catch (error) {
-      // The lock-time observation found all three records of this exact request.
-      if (
-        error instanceof StoreError &&
-        error.code === "SETUP_REPLAY" &&
-        replayed !== undefined
-      )
-        return replayed;
-      throw error;
-    }
-    return {
-      endpoint: endpoint as RecordByKind["providerEndpoint"],
-      connection: connection as RecordByKind["providerConnection"],
-      profile: profile as RecordByKind["profileSnapshot"],
-    };
   }
 
   /**
@@ -1344,96 +569,10 @@ export class Store {
     },
     expectedOwnershipEpoch?: { workspaceId: string; epoch: number },
     expectedConfigRevision?: { scopeId: string; revision: string },
-    expectedActionReservation?: {
-      scopeId: string;
-      actionId: string;
-      idempotencyKey: string;
-      recordId: string;
-    },
   ): AppendBatchResult {
-    if (inputs.some((input) => input.kind === "event"))
-      throw new StoreError(
-        "EVENT_COMMIT_REQUIRED",
-        "event records require commitEvents",
-      );
-    assertNoNativeOnlyKinds(inputs);
-    return this.commitBatch(inputs, [], caller, {
-      ...(expectedAbsentActionKey === undefined
-        ? {}
-        : { expectedAbsentActionKey }),
-      ...(expectedOwnershipEpoch === undefined
-        ? {}
-        : { expectedOwnershipEpoch }),
-      ...(expectedConfigRevision === undefined
-        ? {}
-        : { expectedConfigRevision }),
-      ...(expectedActionReservation === undefined
-        ? {}
-        : { expectedActionReservation }),
-    });
-  }
-
-  /** Rejects every reused durable eventId, including identical retries. */
-  commitEvents(
-    receiptInputs: readonly AppendInput[],
-    eventDrafts: readonly SplyceEventDraft[],
-    caller: CallerContext,
-    preconditions: EventPreconditions = {},
-  ): AppendBatchResult & { events: SplyceEvent[] } {
-    if (receiptInputs.some((input) => input.kind === "event"))
-      throw new StoreError(
-        "EVENT_COMMIT_REQUIRED",
-        "receipts cannot contain event records",
-      );
-    assertNoNativeOnlyKinds(receiptInputs);
-    return this.commitBatch(receiptInputs, eventDrafts, caller, preconditions);
-  }
-
-  private commitBatch(
-    inputs: readonly AppendInput[],
-    eventDrafts: readonly SplyceEventDraft[],
-    caller: CallerContext,
-    {
-      expectedAbsentActionKey,
-      expectedOwnershipEpoch,
-      expectedConfigRevision,
-      expectedActionReservation,
-      expectedDeletionEpoch,
-      expectedEntityRevision,
-      expectedSetup,
-      expectedOnceGrant,
-      expectedGrantMint,
-      expectedActiveGrants,
-      workspaceAdmission,
-    }: EventPreconditions & {
-      expectedEntityRevision?:
-        EntityRevisionExpectation | readonly EntityRevisionExpectation[];
-      expectedSetup?: {
-        workspaceId: string;
-        expectedDeletionEpoch: number | undefined;
-        recordIds: readonly string[];
-        digestRef: string;
-        /** Receives the stored records, read under the same lock, when the request is a replay. */
-        onReplay: (records: readonly unknown[]) => void;
-        /** Re-resolves the setup references; returns the first failing field. */
-        unresolved: () => string | undefined;
-      };
-    } & NativeGrantPreconditions,
-    importedWatermarks: readonly EventWatermark[] = [],
-  ): AppendBatchResult & { events: SplyceEvent[] } {
     this.assertWritable();
-    if (
-      inputs.length === 0 &&
-      eventDrafts.length === 0 &&
-      importedWatermarks.length === 0 &&
-      expectedAbsentActionKey === undefined &&
-      expectedOwnershipEpoch === undefined &&
-      expectedConfigRevision === undefined &&
-      expectedActionReservation === undefined &&
-      expectedDeletionEpoch === undefined &&
-      expectedEntityRevision === undefined
-    )
-      return { seqs: [], events: [] };
+    if (inputs.length === 0 && expectedAbsentActionKey === undefined)
+      return { seqs: [] };
     const prepared: Array<[RecordKind, RecordByKind[RecordKind]]> = [];
     try {
       for (const input of inputs) {
@@ -1443,31 +582,13 @@ export class Store {
           typeof recordObject.scopeId === "string"
             ? recordObject.scopeId
             : "";
-        let context = this.context(scopeId, caller);
-        if (
-          input.kind === "event" &&
-          isRecordObject(recordObject.envelope) &&
-          typeof recordObject.envelope.sessionId === "string"
-        ) {
-          const sessionId = recordObject.envelope.sessionId;
-          const watermark = importedWatermarks.find(
-            (item) => item.scopeId === scopeId && item.sessionId === sessionId,
-          );
-          if (watermark === undefined)
-            throw new StoreError(
-              "IMPORT_FORMAT",
-              "event record has no selected session watermark",
-            );
-          context = this.eventContext(
-            scopeId,
-            { ...caller, sessionId },
-            inputs,
-          );
-          context.lastDurableSeq = watermark.seq;
-        }
         prepared.push([
           input.kind,
-          validateRecord(input.kind, input.record, context),
+          validateRecord(
+            input.kind,
+            input.record,
+            this.context(scopeId, caller),
+          ),
         ]);
       }
     } catch (error) {
@@ -1475,176 +596,6 @@ export class Store {
     }
     try {
       this.db.exec("BEGIN IMMEDIATE;");
-      if (expectedSetup !== undefined) {
-        if (
-          expectedSetup.expectedDeletionEpoch !== undefined &&
-          (!Number.isSafeInteger(expectedSetup.expectedDeletionEpoch) ||
-            expectedSetup.expectedDeletionEpoch < 0 ||
-            this.deletionEpoch() !== expectedSetup.expectedDeletionEpoch)
-        )
-          throw new StoreError(
-            "SETUP_INVALID",
-            "deletion epoch changed before setup commit",
-          );
-        // The target must still be the current admitted, non-superseded, non-deleted workspace.
-        if (this.currentWorkspace(expectedSetup.workspaceId) === undefined)
-          throw new StoreError(
-            "SETUP_INVALID",
-            "setup reference does not resolve: workspace",
-          );
-        // One observation of all participating rows (tombstones included) under the lock.
-        const rows = expectedSetup.recordIds.map(
-          (id) =>
-            this.db
-              .prepare(
-                "SELECT seq, kind, schema_version, payload, json_extract(payload, '$.sourceIds[0]') AS digest, " +
-                  "EXISTS (SELECT 1 FROM deletions d WHERE d.record_id = records.record_id) AS deleted " +
-                  "FROM records WHERE record_id = ?",
-              )
-              .get(id) as
-              | {
-                  seq: number;
-                  kind: string;
-                  schema_version: number;
-                  payload: string;
-                  digest: unknown;
-                  deleted: number | bigint;
-                }
-              | undefined,
-        );
-        if (rows.some((row) => row !== undefined)) {
-          // A tombstoned record is never replayed or resurrected.
-          if (
-            rows.some((row) => row !== undefined && Number(row.deleted) !== 0)
-          )
-            throw new StoreError(
-              "SETUP_DELETED",
-              "a record of this setup request was deleted; nothing appended",
-            );
-          if (
-            rows.every(
-              (row) =>
-                row !== undefined && row.digest === expectedSetup.digestRef,
-            )
-          ) {
-            expectedSetup.onReplay(
-              rows.map((row) => this.readRow(row!).record),
-            );
-            throw new StoreError(
-              "SETUP_REPLAY",
-              "setup request already committed; nothing appended",
-            );
-          }
-          throw new StoreError(
-            "SETUP_REQUEST_CONFLICT",
-            "requestId was already used with a different setup request; nothing appended",
-          );
-        }
-        // A descriptor removed after the early check must not commit.
-        const field = expectedSetup.unresolved();
-        if (field !== undefined)
-          throw new StoreError(
-            "SETUP_INVALID",
-            `setup reference does not resolve: ${field}`,
-          );
-      }
-      const expectations: readonly EntityRevisionExpectation[] =
-        expectedEntityRevision === undefined
-          ? []
-          : Array.isArray(expectedEntityRevision)
-            ? expectedEntityRevision
-            : [expectedEntityRevision as EntityRevisionExpectation];
-      // Every prepared record is guarded exactly once: one expectation per kind.
-      if (
-        expectedEntityRevision !== undefined &&
-        prepared.length !==
-          expectations.length +
-            (expectedSetup === undefined
-              ? 0
-              : prepared.filter(([kind]) => kind === "artifact").length)
-      )
-        throw new StoreError(
-          "ENTITY_GUARD_MISMATCH",
-          "entity guard must match the inserted kind, scope, identity and revision",
-        );
-      for (const expectation of expectations) {
-        const { kind, scopeId, entityId, expectedRevision } = expectation;
-        const [entityField, revisionField] = (
-          {
-            providerConnection: ["providerConnectionId", "revision"],
-            profileSnapshot: ["profileId", "profileRevision"],
-            providerEndpoint: ["endpointId", "revision"],
-          } as const
-        )[kind] ?? ["", ""];
-        const input = prepared.find(([k]) => k === kind);
-        const opaque = (value: unknown) =>
-          typeof value === "string" &&
-          value.length > 0 &&
-          !/\s|[\\/]/u.test(value);
-        if (
-          ![
-            "providerConnection",
-            "profileSnapshot",
-            "providerEndpoint",
-          ].includes(kind) ||
-          prepared.filter(([k]) => k === kind).length !== 1 ||
-          input === undefined ||
-          !opaque(scopeId) ||
-          !opaque(entityId) ||
-          (expectedRevision !== null && !opaque(expectedRevision)) ||
-          input[1].scopeId !== scopeId ||
-          input[1][entityField] !== entityId ||
-          !opaque(input[1][revisionField])
-        )
-          throw new StoreError(
-            "ENTITY_GUARD_MISMATCH",
-            "entity guard must match the inserted kind, scope, identity and revision",
-          );
-        // A future writer may have changed the entity shape, so even an
-        // unidentifiable future row in this kind/scope makes "latest" unknown.
-        const unreadable = this.db
-          .prepare(
-            "SELECT 1 FROM records WHERE kind = ? AND scope_id = ? AND schema_version != ? LIMIT 1",
-          )
-          .get(kind, scopeId, CONTRACT_VERSION);
-        if (unreadable !== undefined)
-          throw new StoreError(
-            "UNKNOWN_SCHEMA",
-            "entity revision is unknowable for this schema",
-          );
-        const latest = this.db
-          .prepare(
-            `SELECT json_extract(payload, '$.${revisionField}') AS revision FROM records WHERE kind = ? AND scope_id = ? AND json_extract(payload, '$.${entityField}') = ? ORDER BY seq DESC LIMIT 1`,
-          )
-          .get(kind, scopeId, entityId) as { revision: unknown } | undefined;
-        const revision = latest === undefined ? null : latest.revision;
-        if (revision !== expectedRevision)
-          throw new StoreError(
-            "ENTITY_STALE_REVISION",
-            "entity revision changed; nothing appended",
-          );
-        const nextRevision = input[1][revisionField];
-        const reused = this.db
-          .prepare(
-            `SELECT 1 FROM records WHERE kind = ? AND scope_id = ? AND json_extract(payload, '$.${entityField}') = ? AND json_extract(payload, '$.${revisionField}') = ? LIMIT 1`,
-          )
-          .get(kind, scopeId, entityId, nextRevision as string);
-        if (reused !== undefined)
-          throw new StoreError(
-            "ENTITY_REVISION_REUSED",
-            "entity revision is immutable; nothing appended",
-          );
-      }
-      if (
-        expectedDeletionEpoch !== undefined &&
-        (!Number.isSafeInteger(expectedDeletionEpoch) ||
-          expectedDeletionEpoch < 0 ||
-          this.deletionEpoch() !== expectedDeletionEpoch)
-      )
-        throw new StoreError(
-          "STALE_DELETION_EPOCH",
-          "deletion epoch changed before event publication",
-        );
       if (expectedOwnershipEpoch !== undefined) {
         const { workspaceId, epoch } = expectedOwnershipEpoch;
         const row = this.db
@@ -1718,167 +669,12 @@ export class Store {
           );
         }
       }
-      for (const watermark of importedWatermarks) {
-        const current = Store.eventHighwater(
-          this.db,
-          watermark.scopeId,
-          watermark.sessionId,
-        );
-        if (watermark.seq < current)
-          throw new StoreError(
-            "STALE_EVENT_SEQUENCE",
-            "import would roll back an event counter",
-          );
-        this.writeEventHighwater(
-          watermark.scopeId,
-          watermark.sessionId,
-          watermark.seq,
-        );
-      }
-      if (expectedActionReservation !== undefined) {
-        const { scopeId, actionId, idempotencyKey, recordId } =
-          expectedActionReservation;
-        const rows = this.db
-          .prepare(
-            "SELECT record_id, json_extract(payload, '$.actionId') AS action_id, " +
-              "json_extract(payload, '$.idempotencyKey') AS idempotency_key, json_extract(payload, '$.state') AS state " +
-              "FROM records WHERE scope_id = ? AND kind = 'action' AND " +
-              "(json_extract(payload, '$.actionId') = ? OR json_extract(payload, '$.idempotencyKey') = ?)",
-          )
-          .all(scopeId, actionId, idempotencyKey) as Array<{
-          record_id: string;
-          action_id: string;
-          idempotency_key: string;
-          state: string;
-        }>;
-        if (
-          rows.length !== 1 ||
-          rows[0]?.record_id !== recordId ||
-          rows[0]?.action_id !== actionId ||
-          rows[0]?.idempotency_key !== idempotencyKey ||
-          rows[0]?.state !== "proposed"
-        )
-          throw new StoreError(
-            "ACTION_RESERVATION_CHANGED",
-            "action reservation changed; nothing appended",
-          );
-      }
-      if (workspaceAdmission !== undefined) {
-        const latest = this.currentWorkspaceIdForPath(
-          workspaceAdmission.canonicalPath,
-        );
-        if (latest !== workspaceAdmission.expectedCurrent)
-          throw new StoreError(
-            "WORKSPACE_ADMISSION_CHANGED",
-            "workspace admission changed concurrently; nothing appended",
-          );
-        this.db
-          .prepare(
-            "INSERT INTO workspace_paths (workspace_id, canonical_path) VALUES (?, ?)",
-          )
-          .run(
-            workspaceAdmission.workspaceId,
-            workspaceAdmission.canonicalPath,
-          );
-      }
-      if (expectedGrantMint !== undefined) {
-        this.requireCurrentWorkspace(expectedGrantMint.workspaceId);
-        if (
-          expectedGrantMint.capability !== "net.provider" &&
-          this.db
-            .prepare(
-              "SELECT 1 FROM records WHERE kind = 'branchAnchor' AND json_extract(payload, '$.piSessionId') = ? LIMIT 1",
-            )
-            .get(expectedGrantMint.sessionId) === undefined
-        )
-          throw new StoreError(
-            "SESSION_UNKNOWN",
-            "grant session has no Pi-derived session record; nothing appended",
-          );
-      }
-      for (const grantId of expectedActiveGrants ?? []) {
-        const state = this.grantState(grantId);
-        if (state === undefined)
-          throw new StoreError("GRANT_REQUIRED", "grant does not exist");
-        if (state.revoked)
-          throw new StoreError("GRANT_REVOKED", "grant is already revoked");
-      }
-      if (expectedOnceGrant !== undefined) {
-        this.checkGrant(expectedOnceGrant, "once");
-        if (
-          !prepared.some(
-            ([kind, record]) =>
-              kind === "action" &&
-              record.actionId === expectedOnceGrant.actionId &&
-              record.state === "running" &&
-              record.argumentsDigest === expectedOnceGrant.argumentsDigest,
-          )
-        )
-          throw new StoreError(
-            "GRANT_MISMATCH",
-            "once-grant consumption must commit with its action's running receipt; nothing appended",
-          );
-      }
       const seqs: number[] = [];
       for (const [kind, record] of prepared) {
-        if (kind === "event") {
-          const context = this.eventContext(record.scopeId, {
-            ...caller,
-            sessionId:
-              isRecordObject(record.envelope) &&
-              typeof record.envelope.sessionId === "string"
-                ? record.envelope.sessionId
-                : "",
-          });
-          context.lastDurableSeq = Store.eventHighwater(
-            this.db,
-            record.scopeId,
-            context.sessionId,
-          );
-          const event = validateEvent(record.envelope, context);
-          this.assertEventSource(event, context);
-          this.assertNewEventId(event.eventId);
-          seqs.push(this.insertValidated(kind, record, event.sessionId));
-        } else seqs.push(this.insertValidated(kind, record, caller.sessionId));
+        seqs.push(this.insertValidated(kind, record, caller.sessionId));
       }
-      const events: SplyceEvent[] = [];
-      for (const draft of eventDrafts) {
-        const current = Store.eventHighwater(
-          this.db,
-          draft.scopeId,
-          draft.sessionId,
-        );
-        if (current === Number.MAX_SAFE_INTEGER)
-          throw new StoreError(
-            "EVENT_SEQUENCE_OVERFLOW",
-            "event counter exhausted",
-          );
-        const context = this.eventContext(draft.scopeId, caller);
-        context.lastDurableSeq = current;
-        const event = validateEvent({ ...draft, seq: current + 1 }, context);
-        this.assertEventSource(event, context);
-        this.assertNewEventId(event.eventId);
-        if (event.durable) {
-          const record = validateRecord(
-            "event",
-            {
-              schemaVersion: CONTRACT_VERSION,
-              recordId: `event:${event.eventId}`,
-              createdAt: event.createdAt,
-              scopeId: event.scopeId,
-              sourceIds: event.sourceIds,
-              envelope: event,
-            },
-            context,
-          );
-          this.insertValidated("event", record, event.sessionId);
-        }
-        this.writeEventHighwater(event.scopeId, event.sessionId, event.seq);
-        events.push(event);
-      }
-      if (importedWatermarks.length > 0) Store.eventWatermarks(this.db);
       this.db.exec("COMMIT;");
-      return { seqs, events };
+      return { seqs };
     } catch (error) {
       let rollbackError: unknown;
       try {
@@ -1898,28 +694,6 @@ export class Store {
     }
   }
 
-  /** Project the unchanged v1 stored envelope onto the current wire version;
-   * full validation still follows, and persisted bytes are never rewritten. */
-  private decodeStoredPayload(kind: string, payload: string): unknown {
-    let record: unknown;
-    try {
-      record = JSON.parse(payload);
-    } catch {
-      throw new StoreError("STORE_CORRUPT", "stored payload is not valid JSON");
-    }
-    if (
-      kind === "event" &&
-      isRecordObject(record) &&
-      isRecordObject(record.envelope) &&
-      record.envelope.protocolVersion === 1
-    )
-      return {
-        ...record,
-        envelope: { ...record.envelope, protocolVersion: PROTOCOL_VERSION },
-      };
-    return record;
-  }
-
   private readRow(row: unknown): StoredRecord {
     const r = row as {
       seq: number | bigint;
@@ -1933,188 +707,11 @@ export class Store {
         `record ${r.kind} carries schemaVersion ${String(r.schema_version)}; this store reads ${String(CONTRACT_VERSION)}`,
       );
     }
-    const record = this.decodeStoredPayload(r.kind, r.payload);
-    if (r.kind === "event") {
-      const attribution = this.db
-        .prepare("SELECT scope_id, session_id FROM records WHERE seq = ?")
-        .get(r.seq) as { scope_id: string; session_id: string };
-      const context = this.eventReadContext(
-        attribution.scope_id,
-        attribution.session_id,
-      );
-      const validated = validateRecord("event", record, context);
-      this.assertEventSource(validated.envelope, context);
-      return { seq: Number(r.seq), kind: "event", record: validated };
-    }
     return {
       seq: Number(r.seq),
       kind: r.kind as RecordKind,
-      record: record as RecordByKind[RecordKind],
+      record: JSON.parse(r.payload) as RecordByKind[RecordKind],
     };
-  }
-
-  private assertNewEventId(eventId: string): void {
-    if (
-      this.db
-        .prepare("SELECT 1 FROM records WHERE kind = 'event' AND record_id = ?")
-        .get(`event:${eventId}`) !== undefined
-    )
-      throw new StoreError(
-        "EVENT_ALREADY_EXISTS",
-        "durable eventId already exists; retry rejected without changes",
-      );
-  }
-
-  private writeEventHighwater(
-    scopeId: string,
-    sessionId: string,
-    seq: number,
-  ): void {
-    this.db
-      .prepare(
-        "INSERT INTO store_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-      )
-      .run(eventSequenceKey(scopeId, sessionId), String(seq));
-  }
-
-  private static eventHighwater(
-    db: DatabaseSync,
-    scopeId: string,
-    sessionId: string,
-    validateHistory = false,
-  ): number {
-    const key = eventSequenceKey(scopeId, sessionId);
-    const row = db
-      .prepare("SELECT value FROM store_meta WHERE key = ?")
-      .get(key) as { value: string } | undefined;
-    if (row !== undefined && !/^(?:0|[1-9]\d*)$/u.test(row.value))
-      throw new StoreError("STORE_LAYOUT", "invalid event counter metadata");
-    const seq = row === undefined ? 0 : Store.parseEpoch(row.value, key)!;
-    // Full audits run on open/replay/recovery; streaming checks only the newest envelope.
-    // shortcut: scope index scans intervening sessions; qualify a session index for heavy interleaving.
-    const durable = db
-      .prepare(
-        "SELECT record_id, json_extract(payload, '$.envelope.eventId') AS event_id, json_extract(payload, '$.envelope.seq') AS event_seq FROM records WHERE kind = 'event' AND scope_id = ? AND session_id = ? ORDER BY records.seq DESC" +
-          (validateHistory ? "" : " LIMIT 1"),
-      )
-      .all(scopeId, sessionId) as Array<{
-      record_id: string;
-      event_id: unknown;
-      event_seq: unknown;
-    }>;
-    const seen = new Set<number>();
-    for (const event of durable) {
-      if (
-        typeof event.event_id !== "string" ||
-        event.record_id !== `event:${event.event_id}` ||
-        typeof event.event_seq !== "number" ||
-        !Number.isSafeInteger(event.event_seq) ||
-        event.event_seq <= 0 ||
-        event.event_seq > seq ||
-        seen.has(event.event_seq)
-      )
-        throw new StoreError(
-          "STORE_LAYOUT",
-          "durable events disagree with their event counter",
-        );
-      seen.add(event.event_seq);
-    }
-    return seq;
-  }
-
-  private static eventWatermarks(db: DatabaseSync): EventWatermark[] {
-    const rows = db
-      .prepare("SELECT key, value FROM store_meta WHERE substr(key, 1, ?) = ?")
-      .all(EVENT_SEQUENCE_PREFIX.length, EVENT_SEQUENCE_PREFIX) as Array<{
-      key: string;
-      value: string;
-    }>;
-    const watermarks: EventWatermark[] = [];
-    for (const row of rows) {
-      let pair: unknown;
-      try {
-        pair = JSON.parse(row.key.slice(EVENT_SEQUENCE_PREFIX.length));
-      } catch {
-        throw new StoreError("STORE_LAYOUT", "invalid event counter key");
-      }
-      if (
-        !Array.isArray(pair) ||
-        pair.length !== 2 ||
-        typeof pair[0] !== "string" ||
-        typeof pair[1] !== "string" ||
-        eventSequenceKey(pair[0], pair[1]) !== row.key
-      )
-        throw new StoreError("STORE_LAYOUT", "invalid event counter key");
-      watermarks.push({
-        scopeId: pair[0],
-        sessionId: pair[1],
-        seq: Store.eventHighwater(db, pair[0], pair[1], true),
-      });
-    }
-    const sessions = db
-      .prepare(
-        "SELECT DISTINCT scope_id, session_id FROM records WHERE kind = 'event'",
-      )
-      .all() as Array<{ scope_id: string; session_id: string }>;
-    for (const session of sessions)
-      Store.eventHighwater(db, session.scope_id, session.session_id, true);
-    return watermarks;
-  }
-
-  /** Highest ALLOCATED envelope sequence, including transient reservations; survives reopen. */
-  eventHighwater(scopeId: string, sessionId: string): number {
-    this.assertOpen();
-    return Store.eventHighwater(this.db, scopeId, sessionId);
-  }
-
-  /** Highest retained durable envelope sequence; transient allocation is separate. */
-  eventCursor(scopeId: string, sessionId: string): number {
-    this.assertOpen();
-    Store.eventHighwater(this.db, scopeId, sessionId);
-    const row = this.db
-      .prepare(
-        "SELECT COALESCE(MAX(json_extract(payload, '$.envelope.seq')), 0) AS seq FROM records WHERE kind = 'event' AND scope_id = ? AND session_id = ?",
-      )
-      .get(scopeId, sessionId) as { seq: number };
-    return row.seq;
-  }
-
-  /** Retained envelopes only; deleted evidence fails closed. Transient gaps need a real snapshot. */
-  replayEvents(
-    scopeId: string,
-    sessionId: string,
-    afterSeq = 0,
-  ): SplyceEvent[] {
-    this.assertOpen();
-    const highwater = Store.eventHighwater(this.db, scopeId, sessionId, true);
-    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 || afterSeq > highwater)
-      throw new StoreError(
-        "INVALID_CURSOR",
-        "event cursor is outside this session's history",
-      );
-    const context = this.context(scopeId, {
-      sessionId,
-      configRevision: INITIAL_CONFIG_REVISION,
-      profileRevision: "replay",
-      policyRevision: "replay",
-    });
-    context.lastDurableSeq = highwater;
-    context.resolveReference = (id) =>
-      this.db.prepare("SELECT 1 FROM deletions WHERE record_id = ?").get(id) ===
-      undefined;
-    const rows = this.db
-      .prepare(
-        "SELECT seq, kind, schema_version, payload FROM records WHERE kind = 'event' AND scope_id = ? AND session_id = ? ORDER BY seq ASC",
-      )
-      .all(scopeId, sessionId);
-    return rows
-      .map((row) => {
-        const entry = this.readRow(row);
-        const record = validateRecord("event", entry.record, context);
-        this.assertEventSource(record.envelope, context);
-        return record.envelope;
-      })
-      .filter((event) => event.seq > afterSeq);
   }
 
   /** Reads one record by id; unknown contract versions are rejected (S5). */
@@ -2253,7 +850,6 @@ export class Store {
   private static validateBackup(dbPath: string): {
     deletionEpoch: number;
     ownershipEpoch: number;
-    eventWatermarks: EventWatermark[];
   } {
     const db = new DatabaseSync(dbPath, { readOnly: true });
     try {
@@ -2267,7 +863,6 @@ export class Store {
         );
       Store.validateStamped(db, stamped.value);
       return {
-        eventWatermarks: Store.eventWatermarks(db),
         deletionEpoch: Store.epochOf(db, "deletion_epoch", "deletions"),
         ownershipEpoch: Store.epochOf(
           db,
@@ -2317,11 +912,7 @@ export class Store {
    */
   restore(backupPath: string): void {
     this.assertWritable();
-    let backup: {
-      deletionEpoch: number;
-      ownershipEpoch: number;
-      eventWatermarks: EventWatermark[];
-    };
+    let backup: { deletionEpoch: number; ownershipEpoch: number };
     try {
       backup = Store.validateBackup(backupPath);
     } catch (error) {
@@ -2340,22 +931,6 @@ export class Store {
         `backup ownership epoch ${String(backup.ownershipEpoch)} is older than current ${String(liveOwnershipEpoch)}; restoring would roll back the workspace writer state`,
       );
 
-    const liveWatermarks = Store.eventWatermarks(this.db);
-    const assertEventRecovery = (watermarks: readonly EventWatermark[]) => {
-      for (const live of liveWatermarks) {
-        const restored = watermarks.find(
-          (item) =>
-            item.scopeId === live.scopeId && item.sessionId === live.sessionId,
-        );
-        if ((restored?.seq ?? 0) < live.seq)
-          throw new StoreError(
-            "STALE_EVENT_SEQUENCE",
-            "restore would roll back an acknowledged event sequence",
-          );
-      }
-    };
-    assertEventRecovery(backup.eventWatermarks);
-
     // Stage the replacement next to the live file and revalidate the staged
     // bytes: the live file is untouched until a validated, reopenable
     // replacement exists.
@@ -2363,7 +938,7 @@ export class Store {
     const original = `${this.path}.restore-original`;
     try {
       copyFileSync(backupPath, staging);
-      assertEventRecovery(Store.validateBackup(staging).eventWatermarks);
+      Store.validateBackup(staging);
     } catch (error) {
       try {
         // The staging path is store-reserved; clear any blocking artifact so
@@ -2647,7 +1222,7 @@ export class Store {
     };
   }
 
-  /** S8 export: legacy record lines, plus one versioned header when event counters exist. */
+  /** S8 export: one JSON line per record, `{seq, kind, record}`. */
   exportJSONL(targetPath: string, scopeId?: string): number {
     this.assertOpen();
     const rows =
@@ -2663,17 +1238,6 @@ export class Store {
             )
             .all(scopeId) as unknown[]);
     const lines: string[] = [];
-    const watermarks = Store.eventWatermarks(this.db).filter(
-      (item) => scopeId === undefined || item.scopeId === scopeId,
-    );
-    if (watermarks.length > 0)
-      lines.push(
-        JSON.stringify({
-          format: "splyce-event-ledger",
-          version: 1,
-          watermarks,
-        }),
-      );
     for (const row of rows) {
       const stored = this.readRow(row);
       lines.push(
@@ -2689,7 +1253,7 @@ export class Store {
       lines.join("\n") + (lines.length ? "\n" : ""),
       "utf8",
     );
-    return rows.length;
+    return lines.length;
   }
 
   /** S8 import: replays a JSONL export into this store in file order. */
@@ -2697,528 +1261,13 @@ export class Store {
     this.assertWritable();
     const text = readFileSync(sourcePath, "utf8");
     const inputs: AppendInput[] = [];
-    const watermarks: EventWatermark[] = [];
-    let first = true;
     for (const line of text.split("\n")) {
       if (line.trim() === "") continue;
-      const entry: unknown = JSON.parse(line);
-      if (!isRecordObject(entry))
-        throw new StoreError("IMPORT_FORMAT", "invalid JSONL entry");
-      if (Object.hasOwn(entry, "format")) {
-        if (
-          !first ||
-          entry.format !== "splyce-event-ledger" ||
-          entry.version !== 1 ||
-          Object.keys(entry).length !== 3 ||
-          !Array.isArray(entry.watermarks) ||
-          entry.watermarks.length === 0
-        )
-          throw new StoreError("IMPORT_FORMAT", "invalid event ledger header");
-        const seen = new Set<string>();
-        for (const item of entry.watermarks) {
-          if (
-            !isRecordObject(item) ||
-            Object.keys(item).length !== 3 ||
-            typeof item.scopeId !== "string" ||
-            typeof item.sessionId !== "string" ||
-            typeof item.seq !== "number" ||
-            !Number.isSafeInteger(item.seq) ||
-            item.seq < 0
-          )
-            throw new StoreError("IMPORT_FORMAT", "invalid event watermark");
-          const key = eventSequenceKey(item.scopeId, item.sessionId);
-          if (seen.has(key))
-            throw new StoreError("IMPORT_FORMAT", "duplicate event watermark");
-          seen.add(key);
-          watermarks.push({
-            scopeId: item.scopeId,
-            sessionId: item.sessionId,
-            seq: item.seq,
-          });
-        }
-      } else {
-        if (typeof entry.kind !== "string")
-          throw new StoreError("IMPORT_FORMAT", "invalid record kind");
-        if (entry.kind === "event" && watermarks.length === 0)
-          throw new StoreError(
-            "IMPORT_FORMAT",
-            "event records require a watermark header",
-          );
-        inputs.push({ kind: entry.kind as RecordKind, record: entry.record });
-      }
-      first = false;
+      const entry = JSON.parse(line) as { kind: string; record: unknown };
+      inputs.push({ kind: entry.kind as RecordKind, record: entry.record });
     }
-    this.commitBatch(inputs, [], caller, {}, watermarks);
+    this.appendBatch(inputs, caller);
     return inputs.length;
-  }
-
-  // ---- TD-13 admitted workspaces and grants (native write path only) ----
-
-  /**
-   * Admits a native-resolved directory. The same path with the same identity
-   * returns the existing workspace; the same path with another identity is
-   * WORKSPACE_IDENTITY_CHANGED unless `readmit` is set, which supersedes the
-   * old workspaceId (its grants stop working) with a fresh one.
-   */
-  admitWorkspace(
-    input: WorkspaceAdmissionInput,
-    caller: CallerContext,
-    { readmit = false }: { readmit?: boolean } = {},
-  ): AdmittedWorkspace {
-    this.assertWritable();
-    if (
-      !isRecordObject(input) ||
-      Object.keys(input).sort().join(",") !==
-        "canonicalPath,fileId,volumeSerial"
-    )
-      throw new StoreError("WORKSPACE_INPUT", "unexpected admission fields");
-    const { canonicalPath, volumeSerial, fileId } = input;
-    // Validated before the idempotent return: a stored row in any other
-    // encoding never equals decimal input, so it needs re-admission.
-    if (
-      !canonicalUnsigned(volumeSerial, 0xffff_ffffn) ||
-      !canonicalUnsigned(fileId, 0xffff_ffff_ffff_ffffn)
-    )
-      throw new StoreError(
-        "WORKSPACE_INPUT",
-        "directory identity must be canonical decimal u32 volumeSerial and u64 fileId",
-      );
-    const displayName = workspaceDisplayName(canonicalPath);
-    for (let attempt = 0; ; attempt += 1) {
-      const currentId = this.currentWorkspaceIdForPath(canonicalPath);
-      const current =
-        currentId === null ? undefined : this.workspaceRecord(currentId);
-      if (
-        current !== undefined &&
-        current.volumeSerial === volumeSerial &&
-        current.fileId === fileId
-      )
-        return { ...current, canonicalPath };
-      if (current !== undefined && !readmit)
-        throw new StoreError(
-          "WORKSPACE_IDENTITY_CHANGED",
-          "directory identity changed at this path; re-admit is required",
-        );
-      const workspaceId = `ws-${randomUUID()}`;
-      const now = new Date().toISOString();
-      const record: AdmittedWorkspaceRecord = {
-        schemaVersion: CONTRACT_VERSION,
-        recordId: `${workspaceId}.admitted`,
-        createdAt: now,
-        scopeId: workspaceId,
-        sourceIds: [],
-        workspaceId,
-        displayName,
-        admittedAt: now,
-        revision: String(Number(current?.revision ?? "0") + 1),
-        volumeSerial,
-        fileId,
-      };
-      try {
-        this.commitBatch([{ kind: "admittedWorkspace", record }], [], caller, {
-          workspaceAdmission: {
-            canonicalPath,
-            workspaceId,
-            expectedCurrent: currentId,
-          },
-        });
-        return { ...record, canonicalPath };
-      } catch (error) {
-        if (
-          attempt === 0 &&
-          error instanceof StoreError &&
-          error.code === "WORKSPACE_ADMISSION_CHANGED"
-        )
-          continue;
-        throw error;
-      }
-    }
-  }
-
-  /** Engine/native-only read (includes canonicalPath); project with workspaceView for the renderer. */
-  getWorkspace(workspaceId: string): AdmittedWorkspace | undefined {
-    this.assertOpen();
-    try {
-      const record = this.workspaceRecord(workspaceId);
-      const path = this.workspacePath(workspaceId);
-      return record === undefined || path === undefined
-        ? undefined
-        : { ...record, canonicalPath: path };
-    } catch (error) {
-      throw mapSqliteError(error);
-    }
-  }
-
-  /**
-   * Engine/native-only: current admitted workspaces (includes canonicalPath),
-   * excluding superseded and deleted ones, ordered by admittedAt then workspaceId.
-   */
-  listWorkspaces(): AdmittedWorkspace[] {
-    this.assertOpen();
-    if (!this.hasWorkspacePaths()) return [];
-    try {
-      return (
-        this.db
-          .prepare(
-            "SELECT p.canonical_path, r.seq, r.kind, r.schema_version, r.payload FROM workspace_paths p " +
-              "JOIN records r ON r.record_id = p.workspace_id || '.admitted' " +
-              "WHERE p.rowid = (SELECT MAX(q.rowid) FROM workspace_paths q WHERE q.canonical_path = p.canonical_path) " +
-              "AND NOT EXISTS (SELECT 1 FROM deletions d WHERE d.record_id = r.record_id)",
-          )
-          .all() as Array<{ canonical_path: string }>
-      )
-        .map((row) => ({
-          ...(this.readRow(row).record as AdmittedWorkspaceRecord),
-          canonicalPath: row.canonical_path,
-        }))
-        .sort((a, b) =>
-          a.admittedAt < b.admittedAt
-            ? -1
-            : a.admittedAt > b.admittedAt
-              ? 1
-              : a.workspaceId < b.workspaceId
-                ? -1
-                : 1,
-        );
-    } catch (error) {
-      throw mapSqliteError(error);
-    }
-  }
-
-  /** Renderer-safe listing: no path, no directory identity. */
-  listWorkspaceViews(): WorkspaceView[] {
-    return this.listWorkspaces().map(workspaceView);
-  }
-
-  /**
-   * Mints a grant on a current admitted workspace. fs.read/fs.write/shell.run
-   * require the Pi-derived session to already exist in this store.
-   */
-  mintGrant(input: GrantInput, caller: CallerContext): GrantRecord {
-    this.assertWritable();
-    if (
-      !isRecordObject(input) ||
-      Object.hasOwn(input, "consumedAt") ||
-      Object.hasOwn(input, "revokedAt")
-    )
-      throw new StoreError("GRANT_INPUT", "grant input is invalid");
-    const grantId = `grant-${randomUUID()}`;
-    const record = {
-      ...input,
-      schemaVersion: CONTRACT_VERSION,
-      recordId: grantId,
-      createdAt: new Date().toISOString(),
-      scopeId: input.workspaceId,
-      sourceIds: [],
-      grantId,
-    } as GrantRecord;
-    this.commitBatch([{ kind: "grant", record }], [], caller, {
-      expectedGrantMint: input,
-    });
-    return record;
-  }
-
-  /**
-   * Read-only check for a session grant at dispatch; same typed errors as consume.
-   * Caller contract: this cannot verify `use.observedIdentity` under a lock, so native
-   * dispatch MUST pass `observedIdentity` on every use (and once grants re-verify at consume).
-   */
-  requireGrant(use: GrantUse): GrantRecord {
-    this.assertOpen();
-    try {
-      return this.checkGrant(use, "session");
-    } catch (error) {
-      throw mapSqliteError(error);
-    }
-  }
-
-  /**
-   * Read-only check for a once grant around effect handoff. Accepts the grant
-   * while unconsumed, or when it was consumed together with this action's
-   * running receipt and that receipt is still the action's latest (so the
-   * action's own consumption is not a replay). Every other state keeps the
-   * typed errors of consume.
-   */
-  checkOnceGrantForActive(use: OnceGrantConsumption): GrantRecord {
-    this.assertOpen();
-    try {
-      return this.checkGrant(use, "once", true);
-    } catch (error) {
-      throw mapSqliteError(error);
-    }
-  }
-
-  /**
-   * Consumes a once grant in the SAME transaction as the action's
-   * approved->running receipts: either both commit or neither does.
-   */
-  consumeOnceGrant(
-    consumption: OnceGrantConsumption,
-    receipts: readonly AppendInput[],
-    caller: CallerContext,
-    preconditions: EventPreconditions = {},
-  ): AppendBatchResult {
-    this.assertWritable();
-    assertNoNativeOnlyKinds(receipts);
-    if (receipts.some((input) => input.kind === "event"))
-      throw new StoreError(
-        "EVENT_COMMIT_REQUIRED",
-        "event records require commitEvents",
-      );
-    const state = this.grantState(consumption.grantId);
-    if (state === undefined)
-      throw new StoreError("GRANT_REQUIRED", "no such grant; nothing appended");
-    if (state.grant.scope !== "once")
-      throw new StoreError(
-        "GRANT_MISMATCH",
-        "only a once grant can be consumed; nothing appended",
-      );
-    const now = new Date().toISOString();
-    const consumed: GrantRecord = {
-      ...state.grant,
-      recordId: `${state.grant.grantId}.consumed`,
-      createdAt: now,
-      consumedAt: now,
-    };
-    const { seqs } = this.commitBatch(
-      [...receipts, { kind: "grant", record: consumed }],
-      [],
-      caller,
-      { ...preconditions, expectedOnceGrant: consumption },
-    );
-    return { seqs };
-  }
-
-  /** Revokes one grant (append-only `<grantId>.revoked`). */
-  revokeGrant(grantId: string, caller: CallerContext): void {
-    this.assertWritable();
-    this.revokeGrants([grantId], caller);
-  }
-
-  /** Profile change: revokes every live net.provider grant on a workspace; returns the count. */
-  revokeProviderGrants(workspaceId: string, caller: CallerContext): number {
-    this.assertWritable();
-    const ids = (
-      this.db
-        .prepare(
-          "SELECT DISTINCT json_extract(payload, '$.grantId') AS id FROM records WHERE kind = 'grant' " +
-            "AND json_extract(payload, '$.workspaceId') = ? AND json_extract(payload, '$.capability') = 'net.provider'",
-        )
-        .all(workspaceId) as Array<{ id: string }>
-    )
-      .map((row) => row.id)
-      .filter((id) => this.grantState(id)?.revoked === false);
-    if (ids.length > 0) this.revokeGrants(ids, caller);
-    return ids.length;
-  }
-
-  /** Native/engine-only: the canonical URL of an endpoint at a pinned revision. */
-  resolveEndpoint(
-    scopeId: string,
-    endpointRef: string,
-    revision: string,
-  ): string {
-    this.assertOpen();
-    const row = this.db
-      .prepare(
-        "SELECT seq, kind, schema_version, payload FROM records WHERE kind = 'providerEndpoint' AND scope_id = ? " +
-          "AND json_extract(payload, '$.endpointId') = ? AND json_extract(payload, '$.revision') = ? ORDER BY seq DESC LIMIT 1",
-      )
-      .get(scopeId, endpointRef, revision);
-    if (row === undefined)
-      throw new StoreError(
-        "ENDPOINT_UNKNOWN",
-        "no endpoint at that pinned revision",
-      );
-    return (this.readRow(row).record as ProviderEndpointRecord).canonicalUrl;
-  }
-
-  private revokeGrants(
-    grantIds: readonly string[],
-    caller: CallerContext,
-  ): void {
-    const now = new Date().toISOString();
-    const inputs = grantIds.map((grantId) => {
-      const state = this.grantState(grantId);
-      if (state === undefined)
-        throw new StoreError("GRANT_REQUIRED", "no such grant");
-      const record: GrantRecord = {
-        ...state.grant,
-        recordId: `${grantId}.revoked`,
-        createdAt: now,
-        revokedAt: now,
-      };
-      return { kind: "grant" as const, record };
-    });
-    this.commitBatch(inputs, [], caller, { expectedActiveGrants: grantIds });
-  }
-
-  private currentWorkspaceIdForPath(canonicalPath: string): string | null {
-    if (!this.hasWorkspacePaths()) return null;
-    const row = this.db
-      .prepare(
-        "SELECT workspace_id FROM workspace_paths WHERE canonical_path = ? ORDER BY rowid DESC LIMIT 1",
-      )
-      .get(canonicalPath) as { workspace_id: string } | undefined;
-    return row?.workspace_id ?? null;
-  }
-
-  private workspacePath(workspaceId: string): string | undefined {
-    if (!this.hasWorkspacePaths()) return undefined;
-    const row = this.db
-      .prepare(
-        "SELECT canonical_path FROM workspace_paths WHERE workspace_id = ?",
-      )
-      .get(workspaceId) as { canonical_path: string } | undefined;
-    return row?.canonical_path;
-  }
-
-  /** Read-only opens of a pre-TD-13 store have no path table (nothing admitted). */
-  private hasWorkspacePaths(): boolean {
-    return (
-      this.db
-        .prepare(
-          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_paths'",
-        )
-        .get() !== undefined
-    );
-  }
-
-  private workspaceRecord(
-    workspaceId: string,
-  ): AdmittedWorkspaceRecord | undefined {
-    const row = this.db
-      .prepare(
-        "SELECT seq, kind, schema_version, payload FROM records WHERE kind = 'admittedWorkspace' " +
-          "AND json_extract(payload, '$.workspaceId') = ? ORDER BY seq DESC LIMIT 1",
-      )
-      .get(workspaceId);
-    return row === undefined
-      ? undefined
-      : (this.readRow(row).record as AdmittedWorkspaceRecord);
-  }
-
-  /** The admitted workspace if it is still current: path mapped to it, not superseded, not deleted. */
-  private currentWorkspace(workspaceId: string): AdmittedWorkspace | undefined {
-    const record = this.workspaceRecord(workspaceId);
-    const path = this.workspacePath(workspaceId);
-    if (
-      record === undefined ||
-      path === undefined ||
-      this.currentWorkspaceIdForPath(path) !== workspaceId ||
-      this.db
-        .prepare("SELECT 1 FROM deletions WHERE record_id = ?")
-        .get(record.recordId) !== undefined
-    )
-      return undefined;
-    return { ...record, canonicalPath: path };
-  }
-
-  /** Fails unless the workspace was admitted natively and is not superseded. */
-  private requireCurrentWorkspace(
-    workspaceId: string,
-    observed?: DirectoryIdentity,
-  ): void {
-    const record = this.workspaceRecord(workspaceId);
-    const path = this.workspacePath(workspaceId);
-    if (record === undefined || path === undefined)
-      throw new StoreError(
-        "WORKSPACE_NOT_ADMITTED",
-        "workspace was not admitted by the native write path",
-      );
-    if (
-      this.currentWorkspaceIdForPath(path) !== workspaceId ||
-      (observed !== undefined &&
-        (observed.volumeSerial !== record.volumeSerial ||
-          observed.fileId !== record.fileId))
-    )
-      throw new StoreError(
-        "WORKSPACE_IDENTITY_CHANGED",
-        "workspace directory identity changed; re-admit is required",
-      );
-  }
-
-  /** Folds a grant's append-only history: the mint plus any consumed/revoked revisions. */
-  private grantState(
-    grantId: string,
-  ):
-    | { grant: GrantRecord; consumedSeq: number | undefined; revoked: boolean }
-    | undefined {
-    const history = this.db
-      .prepare(
-        "SELECT seq, kind, schema_version, payload FROM records WHERE kind = 'grant' " +
-          "AND json_extract(payload, '$.grantId') = ? ORDER BY seq ASC",
-      )
-      .all(grantId)
-      .map((row) => {
-        const { seq, record } = this.readRow(row);
-        return { seq, record: record as GrantRecord };
-      });
-    const grant = history.find(({ record }) => record.recordId === grantId);
-    if (grant === undefined) return undefined;
-    return {
-      grant: grant.record,
-      consumedSeq: history.find(({ record }) => record.consumedAt !== undefined)
-        ?.seq,
-      revoked: history.some(({ record }) => record.revokedAt !== undefined),
-    };
-  }
-
-  /** True when the consumption committed with this action's running receipt and nothing followed it. */
-  private consumedByActiveAction(consumedSeq: number, use: GrantUse): boolean {
-    const row = this.db
-      .prepare(
-        "SELECT seq, kind, schema_version, payload FROM records WHERE kind = 'action' " +
-          "AND json_extract(payload, '$.actionId') = ? ORDER BY seq DESC LIMIT 1",
-      )
-      .get(use.actionId ?? null);
-    if (row === undefined) return false;
-    const latest = this.readRow(row);
-    const action = latest.record as ActionRecord;
-    return (
-      latest.seq < consumedSeq &&
-      action.state === "running" &&
-      action.argumentsDigest === use.argumentsDigest
-    );
-  }
-
-  private checkGrant(
-    use: GrantUse,
-    scope: GrantRecord["scope"],
-    active = false,
-  ): GrantRecord {
-    const state = this.grantState(use.grantId);
-    if (state === undefined)
-      throw new StoreError("GRANT_REQUIRED", "no such grant; nothing appended");
-    if (state.revoked)
-      throw new StoreError(
-        "GRANT_REVOKED",
-        "grant was revoked; nothing appended",
-      );
-    if (
-      state.consumedSeq !== undefined &&
-      !(active && this.consumedByActiveAction(state.consumedSeq, use))
-    )
-      throw new StoreError(
-        "GRANT_CONSUMED",
-        "once grant was already consumed; nothing appended",
-      );
-    const { grant } = state;
-    if (
-      grant.scope !== scope ||
-      grant.workspaceId !== use.workspaceId ||
-      grant.sessionId !== use.sessionId ||
-      grant.capability !== use.capability ||
-      grant.actionId !== use.actionId ||
-      grant.argumentsDigest !== use.argumentsDigest ||
-      grant.origin !== use.origin
-    )
-      throw new StoreError(
-        "GRANT_MISMATCH",
-        "grant does not match this workspace, session, capability or action; nothing appended",
-      );
-    this.requireCurrentWorkspace(grant.workspaceId, use.observedIdentity);
-    return grant;
   }
 
   close(): void {

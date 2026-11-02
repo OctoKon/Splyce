@@ -57,7 +57,7 @@
 
   {#if stale}
     <p class="banner" role="status">
-      This transcript may be incomplete.
+      Engine stopped. This transcript may be incomplete.
     </p>
   {/if}
 

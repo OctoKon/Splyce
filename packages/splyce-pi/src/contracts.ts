@@ -1,5 +1,5 @@
 export const CONTRACT_VERSION = 1 as const;
-export const PROTOCOL_VERSION = 2 as const;
+export const PROTOCOL_VERSION = 1 as const;
 // Proposed bounded defaults; performance qualification remains outstanding.
 export const TRANSPORT_LIMITS = Object.freeze({
   maxInlineBytes: 65536,
@@ -142,7 +142,6 @@ export interface RecordMetadata {
 }
 
 export interface RecordBodies {
-  event: { envelope: SplyceEvent };
   run: {
     runId: string;
     piSessionId: string;
@@ -235,14 +234,6 @@ export interface RecordBodies {
     installedModuleRefs: string[];
     egressPolicyRefs: string[];
     limitsArtifactId: string;
-    /** Exact connection revisions; absent on historical snapshots. */
-    bindings?: {
-      role: string;
-      providerConnectionId: string;
-      connectionRevision: string;
-      /** Exact model the binding dispatches; absent on historical snapshots. */
-      modelId?: string;
-    }[];
   };
   selectionTransition: {
     transitionId: string;
@@ -277,9 +268,6 @@ export interface RecordBodies {
     changedValuesArtifactId: string;
     state: (typeof CONFIGURATION_STATES)[number];
     outcomeRef: string | null;
-    /** Present together only for an explicit provider-profile selection. */
-    profileId?: string;
-    profileRevision?: string;
   };
   sessionWriterLease: {
     piSessionId: string;
@@ -289,57 +277,7 @@ export interface RecordBodies {
     lastDurableCursor: string;
     expiresAt: string | null;
   };
-  /** Pi-derived ancestry anchor (TD-10); Pi entry ids, never file paths. */
-  branchAnchor: {
-    branchAnchorId: string;
-    piSessionId: string;
-    parentAnchorId: string | null;
-    forkPointEntryId: string | null;
-    firstChildEntryId: string | null;
-    activeLeafEntryId: string | null;
-  };
-  /** TD-13 native-admitted directory. The canonical path is never persisted
-   * here (records are exportable and path-free); it lives in the native-only
-   * `workspace_paths` table keyed by workspaceId. */
-  admittedWorkspace: {
-    workspaceId: string;
-    displayName: string;
-    admittedAt: string;
-    revision: string;
-    volumeSerial: string;
-    fileId: string;
-  };
-  /** TD-13 append-only grant: consume/revoke append `<grantId>.consumed` /
-   * `<grantId>.revoked` revisions carrying consumedAt / revokedAt. */
-  grant: {
-    grantId: string;
-    workspaceId: string;
-    sessionId: string;
-    capability: (typeof GRANT_CAPABILITIES)[number];
-    scope: (typeof GRANT_SCOPES)[number];
-    consumedAt?: string;
-    revokedAt?: string;
-    actionId?: string;
-    argumentsDigest?: string;
-    origin?: string;
-  };
-  /** TD-13 canonical provider endpoint, immutable per revision (TD-26 CAS). */
-  providerEndpoint: {
-    endpointId: string;
-    canonicalUrl: string;
-    apiFamily: string;
-    locality: (typeof ENDPOINT_LOCALITIES)[number];
-    revision: string;
-  };
 }
-export const GRANT_CAPABILITIES = [
-  "fs.read",
-  "fs.write",
-  "shell.run",
-  "net.provider",
-] as const;
-export const GRANT_SCOPES = ["session", "once"] as const;
-export const ENDPOINT_LOCALITIES = ["hosted", "loopback"] as const;
 export type RecordKind = keyof RecordBodies;
 export type RecordByKind = {
   [K in RecordKind]: RecordMetadata & RecordBodies[K];
@@ -359,19 +297,13 @@ export type PackageInstallationRecord = RecordByKind["packageInstallation"];
 export type ConfigurationTransitionRecord =
   RecordByKind["configurationTransition"];
 export type SessionWriterLeaseRecord = RecordByKind["sessionWriterLease"];
-export type BranchAnchorRecord = RecordByKind["branchAnchor"];
-export type AdmittedWorkspaceRecord = RecordByKind["admittedWorkspace"];
-export type GrantRecord = RecordByKind["grant"];
-export type ProviderEndpointRecord = RecordByKind["providerEndpoint"];
 
 type Rule =
   | "text"
   | "delta"
   | "id"
-  | "modelRef"
   | "ref"
   | "nullableRef"
-  | "nullableId"
   | "refs"
   | "strings"
   | "utc"
@@ -379,12 +311,9 @@ type Rule =
   | "uint"
   | "bool"
   | "limits"
-  | "portAvailability"
-  | "eventEnvelope"
   | readonly string[];
 type Shape = { readonly [key: string]: Rule };
 export const RECORD_SCHEMAS = {
-  event: { envelope: "eventEnvelope" },
   run: {
     runId: "id",
     piSessionId: "ref",
@@ -520,122 +449,7 @@ export const RECORD_SCHEMAS = {
     lastDurableCursor: "text",
     expiresAt: "nullableUtc",
   },
-  branchAnchor: {
-    branchAnchorId: "id",
-    piSessionId: "ref",
-    parentAnchorId: "nullableRef",
-    forkPointEntryId: "nullableId",
-    firstChildEntryId: "nullableId",
-    activeLeafEntryId: "nullableId",
-  },
-  admittedWorkspace: {
-    workspaceId: "id",
-    displayName: "text",
-    admittedAt: "utc",
-    revision: "id",
-    volumeSerial: "id",
-    fileId: "id",
-  },
-  grant: {
-    grantId: "id",
-    workspaceId: "id",
-    sessionId: "id",
-    capability: GRANT_CAPABILITIES,
-    scope: GRANT_SCOPES,
-  },
-  providerEndpoint: {
-    endpointId: "id",
-    canonicalUrl: "text",
-    apiFamily: "id",
-    locality: ENDPOINT_LOCALITIES,
-    revision: "id",
-  },
 } as const satisfies { [K in RecordKind]: Shape };
-const STRICT_OPTIONAL: Partial<Record<RecordKind, Shape>> = {
-  admittedWorkspace: {},
-  grant: {
-    consumedAt: "utc",
-    revokedAt: "utc",
-    actionId: "id",
-    argumentsDigest: "text",
-    origin: "text",
-  },
-  providerEndpoint: {},
-};
-const METADATA_KEYS = [
-  "schemaVersion",
-  "recordId",
-  "createdAt",
-  "scopeId",
-  "sourceIds",
-];
-const LOOPBACK_HOSTS = ["127.0.0.1", "[::1]", "localhost"];
-
-/**
- * Canonical provider base URL (TD-13): absolute https, or http only on a
- * loopback host with locality "loopback"; no userinfo, query, fragment,
- * backslashes, whitespace or dot segments; lowercase scheme/host, default
- * port stripped, trailing slashes removed.
- */
-export function canonicalEndpointUrl(raw: unknown, locality: unknown): string {
-  requireThat(
-    typeof raw === "string" &&
-      raw.length <= 2048 &&
-      !/[\s\\#?@]/u.test(raw) &&
-      /^[a-z][a-z0-9+.-]*:\/\//iu.test(raw),
-    "INVALID_ENDPOINT",
-    "canonicalUrl",
-  );
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ContractError("INVALID_ENDPOINT", "Invalid endpoint URL");
-  }
-  const path = raw.replace(/^[^:]+:\/\/[^/]*/u, "");
-  requireThat(
-    !/(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/iu.test(path) && !/\/\//u.test(path),
-    "INVALID_ENDPOINT",
-    "dot or empty path segment",
-  );
-  const loopback = LOOPBACK_HOSTS.includes(url.hostname);
-  requireThat(
-    (locality === "loopback" &&
-      loopback &&
-      (url.protocol === "http:" || url.protocol === "https:")) ||
-      (locality === "hosted" && !loopback && url.protocol === "https:"),
-    "INVALID_ENDPOINT",
-    "scheme/locality",
-  );
-  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/u, "")}`;
-}
-
-/** Renderer/grant-safe origin `scheme://host:port` (explicit port, no path). */
-export function originView(endpoint: { canonicalUrl: string }): string {
-  let url: URL;
-  try {
-    url = new URL(endpoint.canonicalUrl);
-  } catch {
-    throw new ContractError("INVALID_ENDPOINT", "Invalid endpoint URL");
-  }
-  const port = url.port || (url.protocol === "https:" ? "443" : "80");
-  return `${url.protocol}//${url.hostname}:${port}`;
-}
-
-function validOrigin(origin: unknown): boolean {
-  if (typeof origin !== "string" || !/^https?:\/\/[^/]+:\d+$/u.test(origin))
-    return false;
-  try {
-    const host = new URL(origin).hostname;
-    const canonicalUrl = canonicalEndpointUrl(
-      origin,
-      LOOPBACK_HOSTS.includes(host) ? "loopback" : "hosted",
-    );
-    return originView({ canonicalUrl }) === origin;
-  } catch {
-    return false;
-  }
-}
 
 for (const schema of Object.values(RECORD_SCHEMAS)) {
   for (const spec of Object.values(schema))
@@ -709,6 +523,7 @@ const COMMAND_OPTIONAL: Partial<Record<CommandOp, Shape>> = {
 export const COMMAND_OPS = Object.freeze(
   Object.keys(COMMAND_SCHEMAS) as CommandOp[],
 );
+
 export const ERROR_CODES = [
   "POLICY_DENIED",
   "UNSUPPORTED_PROVIDER",
@@ -769,7 +584,6 @@ export interface EventPayloads {
   "engine.status": {
     state: "ready" | "busy" | "stopping" | "stopped";
     activeWorkers: number;
-    ports?: PortAvailability;
   };
   "stream.resync": { fromSeq: number };
   "run.reconnect_snapshot": {
@@ -800,9 +614,6 @@ export type SplyceEvent = {
   );
 }[EventKind];
 export type SplyceEventEnvelope = SplyceEvent;
-export type SplyceEventDraft = {
-  [K in EventKind]: Omit<Extract<SplyceEvent, { kind: K }>, "seq">;
-}[EventKind];
 const EVENT_SCHEMAS = {
   "turn.started": { runId: "ref", turnId: "ref" },
   "turn.stream_delta": { runId: "ref", delta: "delta" },
@@ -853,7 +664,6 @@ const EVENT_SCHEMAS = {
   },
 } as const satisfies { [K in EventKind]: Shape };
 const EVENT_OPTIONAL: Partial<Record<EventKind, Shape>> = {
-  "engine.status": { ports: "portAvailability" },
   "turn.tool_outcome": { outcomeRef: "ref", error: "text" },
   "approval.requested": { timeoutMs: "uint" },
   "turn.stream_delta": { turnId: "ref" },
@@ -863,23 +673,6 @@ const EVENT_OPTIONAL: Partial<Record<EventKind, Shape>> = {
 export const EVENT_KINDS = Object.freeze(
   Object.keys(EVENT_SCHEMAS) as EventKind[],
 );
-export const BRIDGE_PROTOCOL_JSON = JSON.stringify({
-  schemaVersion: CONTRACT_VERSION,
-  protocolVersion: PROTOCOL_VERSION,
-  piRevision: PI_REVISION,
-  foundation: FOUNDATION,
-  transportLimits: TRANSPORT_LIMITS,
-  commands: COMMAND_SCHEMAS,
-  optional: COMMAND_OPTIONAL,
-  eventKinds: EVENT_KINDS,
-});
-
-export interface PortAvailability {
-  generation: boolean;
-  provider: boolean;
-  workspace: boolean;
-  modules: boolean;
-}
 
 export interface Handshake {
   protocolVersion: typeof PROTOCOL_VERSION;
@@ -894,7 +687,6 @@ export interface Handshake {
     policy: boolean;
     store: boolean;
     receipts: boolean;
-    ports: PortAvailability;
   };
 }
 
@@ -932,18 +724,6 @@ function text(value: unknown, field: string): asserts value is string {
 function opaque(value: unknown, field: string): asserts value is string {
   text(value, field);
   requireThat(!/\s|[\\/]/u.test(value), "INVALID_SHAPE", field);
-}
-/** A model reference may contain `/` and `:` (OpenRouter, Bedrock); no whitespace, control or format chars. */
-export function modelRef(
-  value: unknown,
-  field: string,
-): asserts value is string {
-  text(value, field);
-  requireThat(
-    value.length <= 256 && !/[\s\u0000-\u001f\u007f-\u009f\p{Cf}]/u.test(value),
-    "INVALID_SHAPE",
-    field,
-  );
 }
 function uint(value: unknown, field: string): asserts value is number {
   requireThat(
@@ -1050,12 +830,6 @@ function json(
   ancestors.delete(value);
 }
 
-/** Preserve strict JSON admissibility before cloning, without reference callbacks. */
-export function snapshotPersistedJson(value: unknown): unknown {
-  json(value, true);
-  return structuredClone(value);
-}
-
 function contextValid(context: ContractContext): void {
   requireThat(
     context !== null &&
@@ -1108,15 +882,6 @@ function rule(
     return;
   }
   switch (spec) {
-    case "portAvailability":
-      validatePortAvailability(value);
-      break;
-    case "eventEnvelope": {
-      const event = validateEvent(value, context);
-      requireThat(event.durable, "INVALID_SHAPE", "durable event");
-      reference(event.recordId, "recordId", context);
-      break;
-    }
     case "delta":
       requireThat(typeof value === "string", "INVALID_SHAPE", field);
       break;
@@ -1126,17 +891,11 @@ function rule(
     case "id":
       opaque(value, field);
       break;
-    case "modelRef":
-      modelRef(value, field);
-      break;
     case "ref":
       reference(value, field, context);
       break;
     case "nullableRef":
       if (value !== null) reference(value, field, context);
-      break;
-    case "nullableId":
-      if (value !== null) opaque(value, field);
       break;
     case "utc":
       utc(value, field);
@@ -1188,11 +947,7 @@ function shape(
       );
 }
 function version(value: unknown, field: string): void {
-  requireThat(
-    value === (field === "schemaVersion" ? CONTRACT_VERSION : PROTOCOL_VERSION),
-    "UNSUPPORTED_VERSION",
-    field,
-  );
+  requireThat(value === CONTRACT_VERSION, "UNSUPPORTED_VERSION", field);
 }
 function current(
   value: Record<string, unknown>,
@@ -1231,105 +986,11 @@ export function validateRecord<K extends RecordKind>(
   const record = object(value, "record");
   metadata(record, context);
   shape(record, RECORD_SCHEMAS[kind], {}, context, false);
-  if (kind === "profileSnapshot" && Object.hasOwn(record, "bindings"))
-    validateProfileBindings(record.bindings, context);
-  if (kind === "configurationTransition") {
-    const hasProfile = Object.hasOwn(record, "profileId");
-    const hasRevision = Object.hasOwn(record, "profileRevision");
-    requireThat(
-      hasProfile === hasRevision,
-      "INVALID_SHAPE",
-      "profile identity",
-    );
-    if (hasProfile) {
-      opaque(record.profileId, "profileId");
-      opaque(record.profileRevision, "profileRevision");
-    }
-  }
-  if (kind === "event") {
-    const envelope = object(record.envelope, "envelope");
-    requireThat(
-      record.scopeId === envelope.scopeId &&
-        record.createdAt === envelope.createdAt &&
-        JSON.stringify(record.sourceIds) ===
-          JSON.stringify(envelope.sourceIds) &&
-        record.recordId === `event:${String(envelope.eventId)}`,
-      "INVALID_SHAPE",
-      "event record metadata",
-    );
-  }
   if (kind === "action")
     requireThat(
       record.targetScopeId === context.scopeId,
       "WRONG_SCOPE",
       "targetScopeId",
-    );
-  const strictOptional = STRICT_OPTIONAL[kind];
-  if (strictOptional !== undefined) {
-    const required = RECORD_SCHEMAS[kind] as Shape;
-    for (const key of Object.keys(record))
-      requireThat(
-        METADATA_KEYS.includes(key) ||
-          Object.hasOwn(required, key) ||
-          Object.hasOwn(strictOptional, key),
-        "INVALID_SHAPE",
-        "unknown field",
-      );
-    for (const [key, spec] of Object.entries(strictOptional))
-      if (Object.hasOwn(record, key)) rule(record[key], spec, key, context);
-    for (const key of Object.keys(record))
-      if (
-        key === "recordId" ||
-        required[key] === "id" ||
-        strictOptional[key] === "id"
-      )
-        requireThat(
-          (record[key] as string).length <= 128,
-          "INVALID_SHAPE",
-          `${key} length`,
-        );
-  }
-  if (kind === "grant") {
-    const once = record.scope === "once";
-    const provider = record.capability === "net.provider";
-    const bound = ["actionId", "argumentsDigest"].map((key) =>
-      Object.hasOwn(record, key),
-    );
-    requireThat(
-      bound.every((present) => present === once),
-      "INVALID_SHAPE",
-      "once grant binding",
-    );
-    if (once)
-      requireThat(
-        /^sha256:[0-9a-f]{64}$/u.test(record.argumentsDigest as string),
-        "INVALID_SHAPE",
-        "argumentsDigest",
-      );
-    requireThat(
-      once || !Object.hasOwn(record, "consumedAt"),
-      "INVALID_SHAPE",
-      "consumedAt",
-    );
-    requireThat(
-      provider === Object.hasOwn(record, "origin") &&
-        (!provider || (!once && validOrigin(record.origin))),
-      "INVALID_SHAPE",
-      "origin",
-    );
-    requireThat(
-      (record.capability !== "fs.write" && record.capability !== "shell.run") ||
-        once,
-      "INVALID_SHAPE",
-      "mutating capability requires a once grant",
-    );
-  }
-  if (kind === "providerEndpoint")
-    requireThat(
-      canonicalEndpointUrl(record.canonicalUrl, record.locality) ===
-        record.canonicalUrl,
-      "INVALID_ENDPOINT",
-      "canonicalUrl",
     );
   if (kind === "providerRole" && record.locality === "hosted")
     reference(record.qualificationRef, "qualificationRef", context);
@@ -1337,40 +998,6 @@ export function validateRecord<K extends RecordKind>(
     requireThat(record.kind === kind, "UNKNOWN_KIND", "kind");
   return value as RecordByKind[K];
 }
-
-/** Binding-set invariants of a profile snapshot: strict shape, unique roles, a chat binding. */
-export function validateProfileBindings(
-  bindings: unknown,
-  context: ContractContext = BINDINGS_CONTEXT,
-): void {
-  requireThat(Array.isArray(bindings), "INVALID_SHAPE", "bindings");
-  const roles = new Set<string>();
-  for (const value of bindings as unknown[]) {
-    const binding = object(value, "binding");
-    shape(
-      binding,
-      { role: "id", providerConnectionId: "id", connectionRevision: "id" },
-      { modelId: "modelRef" },
-      context,
-      true,
-    );
-    const role = binding.role as string;
-    requireThat(!roles.has(role), "INVALID_SHAPE", "duplicate binding role");
-    roles.add(role);
-  }
-  requireThat(roles.has("chat"), "INVALID_SHAPE", "chat binding");
-}
-// Binding fields are ids and model references only, so nothing is ever resolved.
-const BINDINGS_CONTEXT: ContractContext = {
-  scopeId: "bindings",
-  sessionId: "bindings",
-  configRevision: "bindings",
-  profileRevision: "bindings",
-  policyRevision: "bindings",
-  lastDurableSeq: 0,
-  maxInlineBytes: 1,
-  resolveReference: () => false,
-};
 
 export function validateCursor(
   afterSeq: unknown,
@@ -1566,26 +1193,6 @@ export function validateEvent(
   return value as SplyceEvent;
 }
 
-export function validatePortAvailability(value: unknown): PortAvailability {
-  json(value, false);
-  const ports = object(value, "readiness.ports");
-  const keys = ["generation", "provider", "workspace", "modules"];
-  requireThat(
-    Object.keys(ports).length === keys.length &&
-      keys.every(
-        (key) => Object.hasOwn(ports, key) && typeof ports[key] === "boolean",
-      ),
-    "INVALID_SHAPE",
-    "readiness.ports",
-  );
-  return Object.freeze({
-    generation: ports.generation as boolean,
-    provider: ports.provider as boolean,
-    workspace: ports.workspace as boolean,
-    modules: ports.modules as boolean,
-  });
-}
-
 export function validateHandshake(value: unknown): Handshake {
   json(value, false);
   const handshake = object(value, "handshake");
@@ -1631,9 +1238,9 @@ export function validateHandshake(value: unknown): Handshake {
   );
   const readiness = object(handshake.readiness, "readiness");
   requireThat(
-    Object.keys(readiness).length === 5 &&
+    Object.keys(readiness).length === 4 &&
       Object.keys(readiness).every((key) =>
-        ["state", "policy", "store", "receipts", "ports"].includes(key),
+        ["state", "policy", "store", "receipts"].includes(key),
       ),
     "INVALID_SHAPE",
     "readiness",
@@ -1645,12 +1252,6 @@ export function validateHandshake(value: unknown): Handshake {
   );
   for (const key of ["policy", "store", "receipts"])
     requireThat(typeof readiness[key] === "boolean", "INVALID_SHAPE", key);
-  const ports = validatePortAvailability(readiness.ports);
-  requireThat(
-    readiness.state === "ready" || !Object.values(ports).some(Boolean),
-    "INVALID_SHAPE",
-    "readiness.ports",
-  );
   requireThat(
     readiness.state !== "ready" ||
       (readiness.policy === true &&

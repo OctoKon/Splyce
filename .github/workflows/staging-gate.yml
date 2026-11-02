@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: .node-version
+          node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run test:contracts -- --case TD-01
@@ -37,8 +37,6 @@ jobs:
     needs: contracts
     runs-on: windows-latest
     timeout-minutes: 120
-    env:
-      RUSTUP_TOOLCHAIN: 1.99.1
     defaults:
       run:
         shell: bash
@@ -48,33 +46,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: .node-version
+          node-version: 24
           cache: npm
-      - name: Install the pinned Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --target x86_64-pc-windows-msvc
-      - name: Prepare checksum-verified Node and npm
-        run: |
-          npm run prepare:runtime
-          echo "$GITHUB_WORKSPACE/apps/desktop/src-tauri/resources/engine" >> "$GITHUB_PATH"
-          echo "$GITHUB_WORKSPACE/apps/desktop/src-tauri/target/build-tools" >> "$GITHUB_PATH"
-      - name: Install locked Node dependencies
-        run: npm ci --ignore-scripts
-      - name: Hydrate pinned Pi model data
-        run: node vendor/pi/scripts/update-model-catalog-pin.mjs --hydrate-pinned
-      - name: Build the uninstrumented release app
-        run: npm run build:desktop
-      - name: Run Rust tests
-        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
-      - name: Test release-smoke preparation guards
-        shell: pwsh
-        run: ./tests/bootstrap/prepare-release-drivers.ps1 -TestOnly
-      - name: Build and qualify per-run release-smoke drivers
-        shell: pwsh
-        run: ./tests/bootstrap/prepare-release-drivers.ps1
-      - name: Run release and embedded desktop gates
+      - name: Run the release gate
         run: |
           # Once defined, the release gate always runs; path detection only decides whether a missing script is an error.
           if node -e "process.exit(require('./package.json').scripts?.['test:release-gate'] ? 0 : 1)"; then
+            npm ci --ignore-scripts
             npm run test:release-gate
             exit 0
           fi

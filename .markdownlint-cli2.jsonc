@@ -6,11 +6,5 @@
     "MD041": false,
     "MD060": false,
   },
-  "ignores": [
-    ".git/**",
-    "node_modules/**",
-    "**/node_modules/**",
-    "apps/desktop/src-tauri/target/**",
-    "vendor/pi/**",
-  ],
+  "ignores": [".git/**", "node_modules/**", "**/node_modules/**"],
 }
