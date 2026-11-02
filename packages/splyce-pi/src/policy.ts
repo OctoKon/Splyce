@@ -76,6 +76,8 @@ export interface ExecuteEvents<T> {
     /** The completion (or uncertain) action receipt committed with the event. */
     action: ActionRecord;
     uncertain: boolean;
+    /** Single private post-effect cleanup observation; absent when not required. */
+    cleanupComplete: boolean | undefined;
     /** Absent when the effect threw (EFFECT_UNCERTAIN). */
     result?: T;
   }) => SplyceEventDraft | Promise<SplyceEventDraft>;
@@ -458,23 +460,32 @@ export class NativePolicy {
     }
     // No asynchronous callback separates the final fences from executor handoff.
     this.check(toolCallId, toolName, signal);
-    let result: T;
+    let result: T | undefined;
+    let effectFailed = false;
     try {
       result = await invoke(admittedArgs);
     } catch {
-      const cleanupComplete = events?.shellCleanup?.();
-      await this.commitOutcome(action, true, cleanupComplete, events);
-      throw new AdmissionError("EFFECT_UNCERTAIN");
+      effectFailed = true;
     }
-    const cleanupComplete = events?.shellCleanup?.();
+    let cleanupComplete: boolean | undefined;
+    try {
+      cleanupComplete = events?.shellCleanup?.();
+    } catch {
+      cleanupComplete = false;
+    }
     await this.commitOutcome(
       action,
-      result.isError || signal?.aborted === true || cleanupComplete === false,
+      effectFailed ||
+        result === undefined ||
+        result.isError ||
+        signal?.aborted === true ||
+        cleanupComplete === false,
       cleanupComplete,
       events,
       result,
     );
-    if (cleanupComplete === false) throw new AdmissionError("EFFECT_UNCERTAIN");
+    if (effectFailed || result === undefined || cleanupComplete === false)
+      throw new AdmissionError("EFFECT_UNCERTAIN");
     return result;
   }
 
@@ -645,6 +656,7 @@ export class NativePolicy {
           await events.outcome({
             action: completion,
             uncertain,
+            cleanupComplete,
             ...(result === undefined ? {} : { result }),
           }),
         ];

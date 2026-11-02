@@ -472,6 +472,29 @@ test("tool_intent and tool_outcome(+summary) commit in the same batch as the rec
   assert.ok(summary.preview.length <= 2048);
 });
 
+test("real shell dispatch agrees across cleanup receipt, action and outcome event", async (t) => {
+  const f = await setup(t);
+  const result = await f.drive("cleanup-agreement", "powershell", {
+    command: "Write-Output OK",
+  });
+  assert.equal(result.isError, false);
+  const receipt = f.store
+    .list(f.scope)
+    .records.find(
+      ({ kind, record }) =>
+        kind === "outcome" && record.actionId === "cleanup-agreement",
+    )?.record as { cleanupState: string; effectState: string };
+  const event = f.events().at(-1);
+  assert.equal(event?.kind, "turn.tool_outcome");
+  assert.equal(receipt.cleanupState, "complete");
+  assert.equal(receipt.effectState, "observed-success");
+  assert.equal(
+    f.actions("cleanup-agreement").at(-1)?.record.state,
+    "completed",
+  );
+  assert.equal(event?.payload.status, "success");
+});
+
 test("read runs on the session grant with a redacted preview and no receipts besides the action", async (t) => {
   const f = await setup(t);
   const out = await f.drive("call-r", "read", { path: "hello.txt" });

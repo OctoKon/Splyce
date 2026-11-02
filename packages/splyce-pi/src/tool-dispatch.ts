@@ -735,12 +735,12 @@ export function createToolDispatch(deps: ToolDispatchDeps): ToolDispatch {
             target: deps.workspaceId,
             argsSummary: call.argsSummary,
           }),
-        outcome: async ({ action, uncertain, result }) => {
+        outcome: async ({ action, uncertain, cleanupComplete, result }) => {
           const executed = result as unknown as Executed | undefined;
           const status: "success" | "error" | "uncertain" =
             executed === undefined
               ? "uncertain"
-              : shell && !events.shellCleanup?.()
+              : shell && cleanupComplete === false
                 ? "uncertain"
                 : executed.isError || uncertain
                   ? "error"

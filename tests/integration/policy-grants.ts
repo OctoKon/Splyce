@@ -175,6 +175,11 @@ async function dispatch(
   effects: { n: number },
   shellCleanup?: () => boolean,
   failEffect = false,
+  options: {
+    signal?: AbortSignal;
+    afterEffect?: () => void;
+    resultIsError?: boolean;
+  } = {},
 ) {
   policy.authorize(permit as never);
   policy.reserve(permit.toolCallId, permit.toolName, undefined);
@@ -192,12 +197,68 @@ async function dispatch(
     ARGS,
     async () => {
       effects.n += 1;
+      options.afterEffect?.();
       if (failEffect) throw new Error("executor failed");
-      return { isError: false };
+      return { isError: options.resultIsError ?? false };
     },
-    undefined,
+    options.signal,
     shellCleanup ? { shellCleanup } : undefined,
   );
+}
+
+test("throwing cleanup observer records uncertainty and hides its error", async (t) => {
+  const f = fixture(t);
+  const grantId = f.mint("shell.run", "a1");
+  let observations = 0;
+  const error = await attempt(
+    dispatch(f.policy(), f.permit("a1", grantId, "shell.run"), { n: 0 }, () => {
+      observations += 1;
+      throw new Error("private observer failure");
+    }),
+  );
+  assertDenied(error, "EFFECT_UNCERTAIN");
+  assert.equal(observations, 1);
+  const outcome = f.store
+    .list("w-demo")
+    .records.find(({ kind }) => kind === "outcome")?.record as {
+    cleanupState: string;
+    effectState: string;
+  };
+  assert.equal(outcome.cleanupState, "uncertain");
+  assert.equal(outcome.effectState, "uncertain");
+  assert.equal(f.states("a1").at(-1), "uncertain");
+});
+
+for (const cause of ["result error", "abort"] as const) {
+  test(`${cause} records uncertainty but returns the tool result`, async (t) => {
+    const f = fixture(t);
+    const grantId = f.mint("shell.run", "a1");
+    const controller = new AbortController();
+    const result = await dispatch(
+      f.policy(),
+      f.permit("a1", grantId, "shell.run"),
+      { n: 0 },
+      () => true,
+      false,
+      {
+        signal: controller.signal,
+        afterEffect: () => {
+          if (cause === "abort") controller.abort();
+        },
+        resultIsError: cause === "result error",
+      },
+    );
+    assert.equal(result.isError, cause === "result error");
+    const outcome = f.store
+      .list("w-demo")
+      .records.find(({ kind }) => kind === "outcome")?.record as {
+      effectState: string;
+      cleanupState: string;
+    };
+    assert.equal(outcome.effectState, "uncertain");
+    assert.equal(outcome.cleanupState, "complete");
+    assert.equal(f.states("a1").at(-1), "uncertain");
+  });
 }
 
 test("cleanup observation is sampled once for the outcome and caller decision", async (t) => {
