@@ -44,6 +44,7 @@ export function sanitizeSmokeDiagnostics(report, driverLog) {
     "pins",
     "appSha256",
     "driverSha256",
+    "timingPatchSha256",
     "edgeSha256",
     "edgeArchiveSha256",
     "webviewVersion",
@@ -64,18 +65,179 @@ export function sanitizeSmokeDiagnostics(report, driverLog) {
     "driverCleanup",
     "cleanupInspection",
   ];
+  const driverTiming = driverLog
+    .slice(-65536)
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const match =
+        /^SPLYCE_TIMING (native_forward_start|native_response_headers) (0|[1-9]\d{0,7})$/.exec(
+          line,
+        );
+      return match && Number(match[2]) <= 86400000
+        ? [{ event: match[1], elapsedMs: Number(match[2]) }]
+        : [];
+    })
+    .slice(0, 2);
+  const parentTiming = Array.isArray(report.parentTiming)
+    ? report.parentTiming
+        .filter(
+          (item) =>
+            item &&
+            Object.keys(item).sort().join(",") === "elapsedMs,event" &&
+            [
+              "request_start",
+              "response_headers",
+              "body_complete",
+              "abort",
+            ].includes(item.event) &&
+            Number.isInteger(item.elapsedMs) &&
+            item.elapsedMs >= 0 &&
+            item.elapsedMs <= 86400000,
+        )
+        .slice(0, 4)
+    : [];
   const result = Object.fromEntries(
     fields
       .filter((name) => report[name] !== undefined)
       .map((name) => [name, report[name]]),
   );
+  result.case = [
+    "bootstrap-generation-unconfigured-release",
+    "bootstrap-unavailable-release",
+  ].includes(result.case)
+    ? result.case
+    : undefined;
+  result.passed =
+    typeof result.passed === "boolean" ? result.passed : undefined;
+  if (result.pins)
+    result.pins = Object.fromEntries(
+      Object.entries(result.pins).filter(
+        ([key, value]) =>
+          ["node", "tauriDriver", "webview2", "edgeDriver"].includes(key) &&
+          typeof value === "string" &&
+          /^\d+(?:\.\d+){1,3}$/.test(value),
+      ),
+    );
+  for (const key of [
+    "appSha256",
+    "driverSha256",
+    "edgeSha256",
+    "edgeArchiveSha256",
+    "timingPatchSha256",
+  ])
+    if (!/^[0-9a-f]{64}$/.test(result[key] ?? "")) delete result[key];
+  for (const key of ["webviewVersion", "edgeDriverVersion"])
+    if (!/^\d+(?:\.\d+){1,3}$/.test(result[key] ?? "")) delete result[key];
+  if (!["machine", "user"].includes(result.webviewScope))
+    delete result.webviewScope;
+  if (result.nativeDriverStdout !== undefined)
+    result.nativeDriverStdout = "suppressed";
+  if (result.failedRequest) {
+    const method = ["GET", "POST", "DELETE"].includes(
+      result.failedRequest.method,
+    )
+      ? result.failedRequest.method
+      : "unknown";
+    const route =
+      result.failedRequest.path === "/session" ? "/session" : "other";
+    result.failedRequest = { method, path: route };
+  }
+  if (result.applicationElevation)
+    result.applicationElevation = Array.isArray(result.applicationElevation)
+      ? result.applicationElevation.slice(0, 8).map((item) => ({
+          status: item?.status === "observed" ? "observed" : "unknown",
+          elevated: typeof item?.elevated === "boolean" ? item.elevated : null,
+        }))
+      : [];
+  if (result.nativeSessionObservation) {
+    const item = result.nativeSessionObservation;
+    result.nativeSessionObservation = {};
+    for (const key of ["elapsedSinceSessionStartMs", "sessionCount"])
+      if (
+        Number.isInteger(item[key]) &&
+        item[key] >= 0 &&
+        item[key] <= 86400000
+      )
+        result.nativeSessionObservation[key] = item[key];
+    if (item.error !== undefined)
+      result.nativeSessionObservation.error = "OtherError";
+  }
+  if (
+    !Number.isInteger(result.sessionRequestElapsedMs) ||
+    result.sessionRequestElapsedMs < 0 ||
+    result.sessionRequestElapsedMs > 86400000
+  )
+    delete result.sessionRequestElapsedMs;
+  for (const key of [
+    "error",
+    "captureError",
+    "sessionCleanup",
+    "driverCleanup",
+    "cleanupInspection",
+    "failureProcessInspection",
+  ]) {
+    if (result[key] !== undefined)
+      result[key] = String(result[key]).startsWith("TimeoutError")
+        ? "TimeoutError"
+        : "OtherError";
+  }
+  if (result.webviewDebugging) {
+    const value = result.webviewDebugging;
+    result.webviewDebugging = {
+      pipe: value.pipe === true,
+      disableGpu:
+        typeof value.disableGpu === "boolean" ? value.disableGpu : null,
+      requestedFolderMatch:
+        typeof value.requestedFolderMatch === "boolean"
+          ? value.requestedFolderMatch
+          : null,
+      observedCommandCount:
+        Number.isInteger(value.observedCommandCount) &&
+        value.observedCommandCount >= 0 &&
+        value.observedCommandCount <= 100
+          ? value.observedCommandCount
+          : null,
+      endpoints: Array.isArray(value.endpoints)
+        ? value.endpoints
+            .slice(0, 8)
+            .map((endpoint) => ({ devtools: endpoint?.devtools === true }))
+        : [],
+    };
+  }
+  for (const key of ["runnerProfile", "failureProcesses"]) {
+    if (result[key]) {
+      const allowed =
+        key === "runnerProfile"
+          ? [
+              "configured",
+              "exists",
+              "writeAccessCheck",
+              "webviewFolderOverride",
+            ]
+          : [
+              "driverAlive",
+              "nativeDriverStarted",
+              "applicationStarted",
+              "applicationWindowStarted",
+              "webviewStarted",
+              "engineStarted",
+            ];
+      result[key] = Object.fromEntries(
+        allowed
+          .filter((name) => typeof result[key][name] === "boolean")
+          .map((name) => [name, result[key][name]]),
+      );
+    }
+  }
+  result.driverTiming = driverTiming;
+  result.parentTiming = parentTiming;
   return {
     result: JSON.stringify(
       result,
       (_key, value) => (typeof value === "string" ? redact(value) : value),
       2,
     ),
-    driverLog: redact(driverLog.slice(-65536)),
+    driverLog: "",
   };
 }
 
@@ -447,6 +609,13 @@ export async function runSmoke() {
     },
     checks: [],
   };
+  report.timingPatchSha256 = createHash("sha256")
+    .update(
+      await readFile(
+        resolve(root, "tests/bootstrap/tauri-driver-session-timing.patch"),
+      ),
+    )
+    .digest("hex");
   const logs = createWriteStream(resolve(artifacts, "driver.log"));
   let child;
   let session;
@@ -457,13 +626,46 @@ export async function runSmoke() {
   const base = `http://127.0.0.1:${port}`;
   async function request(method, path, body) {
     report.lastRequest = { method, path };
-    const response = await fetch(`${base}${path}`, {
-      method,
-      headers: { "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(20000),
-    });
-    const result = await response.json();
+    const timed = method === "POST" && path === "/session";
+    const started = performance.now();
+    if (timed) report.parentTiming = [{ event: "request_start", elapsedMs: 0 }];
+    let response;
+    try {
+      response = await fetch(`${base}${path}`, {
+        method,
+        headers: { "content-type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(20000),
+      });
+    } catch (error) {
+      if (timed && error.name === "TimeoutError")
+        report.parentTiming.push({
+          event: "abort",
+          elapsedMs: Math.round(performance.now() - started),
+        });
+      throw error;
+    }
+    if (timed)
+      report.parentTiming.push({
+        event: "response_headers",
+        elapsedMs: Math.round(performance.now() - started),
+      });
+    let result;
+    try {
+      result = await response.json();
+    } catch (error) {
+      if (timed && error.name === "TimeoutError")
+        report.parentTiming.push({
+          event: "abort",
+          elapsedMs: Math.round(performance.now() - started),
+        });
+      throw error;
+    }
+    if (timed)
+      report.parentTiming.push({
+        event: "body_complete",
+        elapsedMs: Math.round(performance.now() - started),
+      });
     if (!response.ok || result.value?.error)
       throw new Error(JSON.stringify(result));
     return result.value;

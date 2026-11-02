@@ -167,6 +167,17 @@ Assert-SafeArchiveEntries $sourcePath @($archiveEntries | ForEach-Object { [pscu
 New-Item -ItemType Directory -Path $sourcePath -Force | Out-Null
 & tar.exe -xzf $crateArchive -C $sourcePath --strip-components=1
 if ($LASTEXITCODE -ne 0) { throw "Could not extract the verified tauri-driver source archive." }
+$timingPatch = Join-Path $PSScriptRoot 'tauri-driver-session-timing.patch'
+$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$sourceRelative = [IO.Path]::GetRelativePath($repositoryRoot, $sourcePath).Replace('\', '/')
+Push-Location $repositoryRoot
+try {
+  & git apply --check "--directory=$sourceRelative" $timingPatch
+  if ($LASTEXITCODE -ne 0) { throw 'Timing patch does not match the pinned source.' }
+  & git apply "--directory=$sourceRelative" $timingPatch
+  if ($LASTEXITCODE -ne 0) { throw 'Could not apply the timing patch.' }
+}
+finally { Pop-Location }
 $cargoToml = Join-Path $sourcePath 'Cargo.toml'
 if (-not (Test-Path -LiteralPath $cargoToml -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $sourcePath 'Cargo.lock') -PathType Leaf)) {
   throw "The verified tauri-driver archive lacks its manifest or locked dependency file."

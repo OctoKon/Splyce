@@ -216,7 +216,7 @@ test("public smoke diagnostics retain the failed request and omit private data",
   assert.equal(result.pins.webview2, "155.0.4283.62");
   assert.deepEqual(result.failedRequest, {
     method: "POST",
-    path: "/session/<session>/execute/sync",
+    path: "other",
   });
   for (const value of [diagnostic.result, diagnostic.driverLog]) {
     assert.doesNotMatch(
@@ -405,4 +405,93 @@ test("driver provenance rejects tampered bytes and mismatched versions", () => {
       { ...actual, edgeDriverVersion: "155.0.4284.1" },
     ),
   );
+});
+
+test("timing diagnostics admit only bounded fixed records and discard arbitrary driver output", () => {
+  const secret = "opaque-canary-739";
+  const diagnostic = sanitizeSmokeDiagnostics(
+    { case: "bootstrap-generation-unconfigured-release", passed: false },
+    [
+      "SPLYCE_TIMING native_forward_start 0",
+      "SPLYCE_TIMING native_response_headers 987",
+      `SPLYCE_TIMING native_response_headers 2 ${secret}`,
+      `SPLYCE_TIMING ${secret} 3`,
+      "SPLYCE_TIMING native_forward_start 99999999999999999999999",
+      "SPLYCE_TIMING native_response_headers -1",
+      secret,
+    ].join("\n"),
+  );
+  assert.deepEqual(JSON.parse(diagnostic.result).driverTiming, [
+    { event: "native_forward_start", elapsedMs: 0 },
+    { event: "native_response_headers", elapsedMs: 987 },
+  ]);
+  assert.doesNotMatch(
+    diagnostic.result + diagnostic.driverLog,
+    /opaque-canary-739/,
+  );
+});
+
+test("parent timing records reject injected fields and invalid numbers", () => {
+  const diagnostic = sanitizeSmokeDiagnostics(
+    {
+      passed: false,
+      parentTiming: [
+        { event: "request_start", elapsedMs: 0 },
+        { event: "response_headers", elapsedMs: 5 },
+        { event: "abort", elapsedMs: 20000 },
+        { event: "body_complete", elapsedMs: 6, secret: "opaque-canary-739" },
+        { event: "opaque-canary-739", elapsedMs: 1 },
+        { event: "abort", elapsedMs: 1000000000 },
+      ],
+    },
+    "",
+  );
+  assert.deepEqual(JSON.parse(diagnostic.result).parentTiming, [
+    { event: "request_start", elapsedMs: 0 },
+    { event: "response_headers", elapsedMs: 5 },
+    { event: "abort", elapsedMs: 20000 },
+  ]);
+  assert.doesNotMatch(diagnostic.result, /opaque-canary-739/);
+});
+
+test("public diagnostic fields reject nested arbitrary data and free-text errors", () => {
+  const secret = "opaque-canary-739";
+  const diagnostic = sanitizeSmokeDiagnostics(
+    {
+      passed: false,
+      error: `Error: ${secret}\nstack ${secret}`,
+      webviewDebugging: {
+        declaredPorts: [9222],
+        pipe: false,
+        endpoints: [{ host: secret, port: 9222, devtools: true }],
+        unknown: secret,
+      },
+      runnerProfile: { configured: true, unknown: secret },
+      failureProcesses: { driverAlive: true, unknown: secret },
+    },
+    `unexpected ${secret}`,
+  );
+  assert.doesNotMatch(
+    diagnostic.result + diagnostic.driverLog,
+    /opaque-canary-739|9222/,
+  );
+});
+
+test("all public raw fields reject arbitrary nested strings", () => {
+  const secret = "opaque-canary-739";
+  const result = sanitizeSmokeDiagnostics(
+    {
+      case: secret,
+      pins: { node: secret, unknown: secret },
+      appSha256: secret,
+      failedRequest: { method: secret, path: secret, unknown: secret },
+      applicationElevation: [
+        { status: secret, elevated: secret, unknown: secret },
+      ],
+      nativeSessionObservation: { error: secret, unknown: secret },
+      nativeDriverStdout: secret,
+    },
+    secret,
+  );
+  assert.doesNotMatch(result.result + result.driverLog, /opaque-canary-739/);
 });

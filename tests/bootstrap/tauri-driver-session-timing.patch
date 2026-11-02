@@ -1,0 +1,33 @@
+diff --git a/src/server.rs b/src/server.rs
+index c113bcc..86cb7c6 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -74,6 +74,7 @@ async fn handle(
+   req: Request<Incoming>,
+   args: Args,
+ ) -> Result<Response<Incoming>, Error> {
++  let session_request = req.method() == Method::POST && req.uri().path() == "/session";
+   // manipulate a new session to convert options to the native driver format
+   let new_req: Request<Full<Bytes>> =
+     if let (&Method::POST, "/session") = (req.method(), req.uri().path()) {
+@@ -99,10 +100,16 @@ async fn handle(
+       Request::from_parts(parts, Full::new(body.into()))
+     };
+ 
+-  client
+-    .request(forward_to_native_driver(new_req, args)?)
+-    .err_into()
+-    .await
++  let forwarded = forward_to_native_driver(new_req, args)?;
++  let started = std::time::Instant::now();
++  if session_request {
++    eprintln!("SPLYCE_TIMING native_forward_start 0");
++  }
++  let response = client.request(forwarded).err_into().await;
++  if session_request && response.is_ok() {
++    eprintln!("SPLYCE_TIMING native_response_headers {}", started.elapsed().as_millis().min(86400000));
++  }
++  response
+ }
+ 
+ /// Transform the request to a request for the native webdriver server.
