@@ -41,7 +41,7 @@ fn associated_member_case(bcl: bool) {
         &request(if bcl {
             "[IO.File]::WriteAllText('root-entered','entered'); [Console]::Out.WriteLine('root'); [IO.File]::WriteAllText('root-after','done')"
         } else {
-            "[IO.File]::WriteAllText('root-entered','entered'); Write-Output root; [IO.File]::WriteAllText('root-after','done')"
+            "$env:PSModulePath=$PSHOME+'\\Modules'; [IO.File]::WriteAllText('root-module',[string]($env:PSModulePath -eq ($PSHOME+'\\Modules'))); [IO.File]::WriteAllText('root-entered','entered'); Write-Output root; [IO.File]::WriteAllText('root-after','done')"
         }),
     )
     .unwrap();
@@ -52,7 +52,7 @@ fn associated_member_case(bcl: bool) {
         &request(if bcl {
             "[IO.File]::WriteAllText('member-entered',[string]($PWD.Path -eq [Environment]::CurrentDirectory)); while (![IO.File]::Exists('go')) { [Threading.Thread]::Sleep(20) }; [Console]::Out.WriteLine('member')"
         } else {
-            "[IO.File]::WriteAllText('member-entered',[string]($PWD.Path -eq [Environment]::CurrentDirectory)); while (!(Test-Path go)) { Start-Sleep -Milliseconds 20 }; Write-Output member"
+            "$env:PSModulePath=$PSHOME+'\\Modules'; [IO.File]::WriteAllText('member-module',[string]($env:PSModulePath -eq ($PSHOME+'\\Modules'))); [IO.File]::WriteAllText('member-entered',[string]($PWD.Path -eq [Environment]::CurrentDirectory)); while (!(Test-Path go)) { Start-Sleep -Milliseconds 20 }; Write-Output member"
         }),
     )
     .unwrap();
@@ -104,6 +104,15 @@ fn associated_member_case(bcl: bool) {
         }
     }
     release.unwrap();
+    if !bcl {
+        let root_module = fs::read_to_string(dir.join("root-module"));
+        let member_module = fs::read_to_string(dir.join("member-module"));
+        eprintln!(
+            "root_module_controlled={root_module:?} member_module_controlled={member_module:?}"
+        );
+        assert_eq!(root_module.unwrap(), "True");
+        assert_eq!(member_module.unwrap(), "True");
+    }
     assert_eq!(root_wait, WAIT_OBJECT_0);
     assert_eq!(member_wait, WAIT_TIMEOUT);
     assert!(!root_finished);
@@ -122,6 +131,10 @@ fn associated_member_case(bcl: bool) {
     fs::remove_file(dir.join("root-entered")).unwrap();
     fs::remove_file(dir.join("root-after")).unwrap();
     fs::remove_file(dir.join("member-entered")).unwrap();
+    if !bcl {
+        fs::remove_file(dir.join("root-module")).unwrap();
+        fs::remove_file(dir.join("member-module")).unwrap();
+    }
     fs::remove_dir(temp).unwrap();
     fs::remove_dir(dir).unwrap();
 }
