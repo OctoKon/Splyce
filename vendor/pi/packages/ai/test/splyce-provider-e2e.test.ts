@@ -51,6 +51,7 @@ vi.mock("@anthropic-ai/sdk", () => {
 
 vi.mock("@google/genai", () => {
 	class GoogleGenAI {
+		apiClient = { apiCall() {} };
 		constructor(opts: Record<string, unknown>) {
 			sdk.googleOpts.push(opts);
 		}
