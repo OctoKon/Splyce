@@ -462,19 +462,19 @@ export class NativePolicy {
     try {
       result = await invoke(admittedArgs);
     } catch {
-      await this.commitOutcome(action, true, events);
+      const cleanupComplete = events?.shellCleanup?.();
+      await this.commitOutcome(action, true, cleanupComplete, events);
       throw new AdmissionError("EFFECT_UNCERTAIN");
     }
+    const cleanupComplete = events?.shellCleanup?.();
     await this.commitOutcome(
       action,
-      result.isError ||
-        signal?.aborted === true ||
-        events?.shellCleanup?.() === false,
+      result.isError || signal?.aborted === true || cleanupComplete === false,
+      cleanupComplete,
       events,
       result,
     );
-    if (events?.shellCleanup?.() === false)
-      throw new AdmissionError("EFFECT_UNCERTAIN");
+    if (cleanupComplete === false) throw new AdmissionError("EFFECT_UNCERTAIN");
     return result;
   }
 
@@ -592,6 +592,7 @@ export class NativePolicy {
   private async commitOutcome<T>(
     action: ActionRecord,
     uncertain: boolean,
+    cleanupComplete: boolean | undefined,
     events?: ExecuteEvents<T>,
     result?: T,
   ): Promise<void> {
@@ -605,13 +606,14 @@ export class NativePolicy {
       effectState: uncertain ? "uncertain" : "observed-success",
       observedAt: new Date().toISOString(),
       resultArtifactId: null,
-      cleanupState: events?.shellCleanup
-        ? events.shellCleanup()
-          ? "complete"
-          : "uncertain"
-        : uncertain
-          ? "uncertain"
-          : "not-required",
+      cleanupState:
+        cleanupComplete !== undefined
+          ? cleanupComplete
+            ? "complete"
+            : "uncertain"
+          : uncertain
+            ? "uncertain"
+            : "not-required",
       errorClass: uncertain ? "execution" : "none",
       ...(action.approvedBy ? { approvedBy: action.approvedBy } : {}),
     };
