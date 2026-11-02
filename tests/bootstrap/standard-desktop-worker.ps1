@@ -24,6 +24,13 @@ function Test-ProfileWritable([string]$Profile, [string]$RunNonce) {
   }
 }
 
+function New-RunSummary([string]$Directory) {
+  $path = Join-Path $Directory 'step-summary.md'
+  $stream = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+  $stream.Dispose()
+  return $path
+}
+
 function Invoke-OwnedChild([string]$FilePath, [string[]]$ArgumentVector, [string]$WorkingDirectory,
     [string]$StandardOutputPath, [string]$StandardErrorPath) {
   $child = [Diagnostics.Process]::new()
@@ -156,15 +163,31 @@ if ($SelfCheck) {
     if ($versionExit -ne 0 -or [IO.File]::ReadAllText($versionOut).Trim() -cne "v$nodeVersion" -or [IO.File]::ReadAllBytes($versionErr).Length -ne 0) {
       throw 'Owned child did not report the pinned Node version.'
     }
+    $inheritedSummary = $env:GITHUB_STEP_SUMMARY
+    $parentSummary = Join-Path $childDirectory 'parent-summary.md'
+    [IO.File]::WriteAllBytes($parentSummary, $bytes)
+    try {
+      $env:GITHUB_STEP_SUMMARY = $parentSummary
+      $env:GITHUB_STEP_SUMMARY = New-RunSummary $childDirectory
+      $summaryExit = Invoke-OwnedChild $node @('-e', 'require("node:fs").writeFileSync(process.env.GITHUB_STEP_SUMMARY, "summary\n");') $root (Join-Path $childDirectory 'summary-out.log') (Join-Path $childDirectory 'summary-err.log')
+      $refused = $false
+      try { New-RunSummary $childDirectory | Out-Null } catch [IO.IOException] { $refused = $true }
+      if ($summaryExit -ne 0 -or -not $refused -or [IO.File]::ReadAllText($env:GITHUB_STEP_SUMMARY) -cne "summary`n" -or
+          -not [Linq.Enumerable]::SequenceEqual([byte[]][IO.File]::ReadAllBytes($parentSummary), $bytes)) {
+        throw 'Run-owned summary write, collision refusal, or inherited sentinel preservation failed.'
+      }
+    } finally { $env:GITHUB_STEP_SUMMARY = $inheritedSummary }
   } finally {
     foreach ($name in @('stdout with spaces.log', 'stderr with spaces.log', 'stdout-out.log', 'stdout-err.log', 'stdout-launched.txt',
-        'stderr-out.log', 'stderr-err.log', 'stderr-launched.txt', 'version-out.log', 'version-err.log')) {
+        'stderr-out.log', 'stderr-err.log', 'stderr-launched.txt', 'version-out.log', 'version-err.log',
+        'step-summary.md', 'parent-summary.md', 'summary-out.log', 'summary-err.log')) {
       $ownedPath = Join-Path $childDirectory $name
       if (Test-Path -LiteralPath $ownedPath -PathType Leaf) { [IO.File]::Delete($ownedPath) }
     }
     [IO.Directory]::Delete($childDirectory, $false)
   }
   Write-Output 'Owned child streams, collision refusal, exit, and pinned version selfcheck passed.'
+  Write-Output 'Run-owned summary write and sentinel preservation selfcheck passed.'
   return
 }
 
@@ -259,6 +282,7 @@ public static class StandardDesktopIntegrity {
     throw 'Worker token did not attest to the current medium-integrity session.'
   }
   $env:PATH = [string]$runConfig.path
+  $env:GITHUB_STEP_SUMMARY = New-RunSummary (Join-Path $RunDirectory 'diagnostics')
   if ($runConfig.ci -in @('true', 'false')) { $env:CI = $runConfig.ci }
   else { Remove-Item Env:CI -ErrorAction SilentlyContinue }
   if ($Mode -eq 'Gate') {
