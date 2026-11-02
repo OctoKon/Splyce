@@ -1,6 +1,6 @@
 # Expo demo smoke runbook (V1)
 
-**Status: presenter checklist, updated 2026-11-01 for the expo demo build. Base runbook from `origin/staging` at `44bca6b` (PR #167, written against `d0cecc6`); every quoted string below was re-grepped against `Itachi-1824/demo-final3@59a5427` and the expo gate head `lapsecoder/demo-final3-gates@a91948c`; packaged-app runtime evidence for this build n=0.** It is a presenter checklist, not a contract: it freezes no schema, command name or copy and authorizes no operation. Copy quoted below was read from `apps/desktop/src` and `packages/splyce-pi/src` on those two commits. Steps absent from `staging` are marked `(demo build only)`; if the packaged build does not show a step, fall back to the honest unavailable state and say so. Never simulate a port, a response or an approval.
+**Status: presenter checklist, updated 2026-11-02 for the expo demo build. Base runbook from `origin/staging` at `44bca6b` (PR #167, written against `d0cecc6`); every quoted string below was re-grepped against `Itachi-1824/demo-final3@59a5427` and the expo gate head `lapsecoder/demo-final3-gates@a91948c`; packaged-app runtime evidence for this build n=0.** It is a presenter checklist, not a contract: it freezes no schema, command name or copy and authorizes no operation. Copy quoted below was read from `apps/desktop/src` and `packages/splyce-pi/src` on those two commits. Steps absent from `staging` are marked `(demo build only)`; if the packaged build does not show a step, fall back to the honest unavailable state and say so. Never simulate a port, a response or an approval.
 
 ## What staging actually has
 
@@ -13,7 +13,7 @@ The renderer, typed bridge and fixtures exist (`apps/desktop/src`, `packages/spl
 
 On a staging-only build, only step 1 and the unavailable states of steps 2, 3 and 6 can be shown honestly. The expo build is expected to cut from the demo branches below; re-grep every quoted string against the packaged exe before the expo — a source string is not runtime evidence.
 
-## What the demo build adds (expo 2026-10-28)
+## What the demo build adds
 
 The packaged demo build installs in place over 3058 and is expected to add the full feature path exercised by the demo script below. Source-verified at the commits in the status line; runtime evidence n=0 until each step is re-run on the exe:
 
@@ -153,13 +153,13 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 
 - **Action:** send one prompt containing an inert marker shaped like a secret: "remember this: sk-demo-inert-0000000000". The marker is not a credential and authorizes nothing; never paste a working provider key into a prompt. End the session, then search the persisted session JSONL and the app log folder for the marker and its first 12 characters (for example `Select-String -Path <session dir>\*.jsonl -Pattern sk-demo-inert -SimpleMatch`).
 - **Expected UI:** the renderer redacts secret-shaped text (`sk-...`, bearer tokens, `api_key=...`) in tool text as `[redacted]`. Persisted transcripts must contain neither the marker nor its prefix.
-- **Pass / Fail:** pass when the search finds nothing in the transcript, logs, crash dumps and `%APPDATA%` app data. Fail on any hit: stop the demo and file a security issue, because the same path would have persisted a real key; there is nothing to rotate, since the marker is inert, so a hit is a defect to record, not a leak to clean up. Note: renderer-side redaction is defence in depth only; persistence redaction is `(planned, not on staging yet)`, so a hit on the unredacted prompt text is a known gap to record, not hide.
+- **Pass / Fail:** pass when the search finds nothing in the transcript, logs, crash dumps and `%APPDATA%` app data. Fail on any hit: stop the demo and file a security issue, because the same path would have persisted a real key; there is nothing to rotate, since the marker is inert, so a hit is a defect to record, not a leak to clean up. Note: renderer-side redaction is defence in depth only. The demo build also routes tool arguments and action metadata through the engine's `credential.redact` before they are stored, and refuses to persist an argument payload that redaction changed or failed to verify (`NATIVE_ARGUMENTS_UNAVAILABLE`); user prompt text is a separate path, so a hit there is a gap to record, not something to hide.
 - **If a port is unavailable:** skip, say so, and do not claim hygiene is proven.
 
 ## 10. Crash and restart recovery (`planned, not on staging yet`)
 
 - **Action:** start a long turn, then end the engine process in Task Manager mid-turn.
-- **Expected UI:** the run reads "The engine stopped unexpectedly." (`ENGINE_CRASH`), in-flight actions show "Uncertain" or "Canceled" (an unconfirmed effect reads "The effect could not be confirmed. Check the target before doing anything else."), the transcript marks "Stale", and a restart offer appears (`engine.restart` exists in the contract; no restart UI is on staging). After restart the stream resyncs from the durable cursor.
+- **Expected UI:** the run reads "The engine stopped unexpectedly." (`ENGINE_CRASH`), in-flight actions show "Uncertain" or "Canceled" (an unconfirmed effect reads "The effect could not be confirmed. Check the target before doing anything else."), the transcript marks "Stale", and the engine notice reads "Engine stopped" with "The native engine exited. Reconnect to resume or restart the app; the last transcript may be incomplete." plus a `Retry` button that reconnects the binding (`connect()` in `App.svelte`). A full engine restart means relaunching the app: `engine.restart` exists in the contract but has no UI op. After reconnecting, the stream resyncs from the durable cursor. On a staging-only build the notice copy and the `Retry` button are absent.
 - **Pass / Fail:** pass when no duplicate file or command effect exists after restart (compare `notes.txt` and process list) and no action is shown "OK" without an outcome. Fail on a duplicate effect, a silently resumed write, or a UI frozen on "Running".
 - **If a port is unavailable:** do not kill anything. Say the recovery path is not exercised end to end in this build; point to the state labels, not a live run.
 
