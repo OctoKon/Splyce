@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "build:contracts": "tsc -p packages/splyce-pi/tsconfig.json",
+    "test:jobs": "npm run build:contracts && node --test tests/jobs.test.mjs",
     "test:contracts": "node scripts/run-contracts.mjs",
     "test:gui-fixtures": "node --test tests/gui-fixtures.test.mjs",
     "test:engine-store": "node --test tests/engine-store.test.mjs",
@@ -18,7 +19,7 @@
     "test:config-transition": "node scripts/run-store.mjs --case C4_config_transition",
     "test:credentials": "node scripts/run-store.mjs --case C4_credential_resolution",
     "test:dirty-snapshot": "node scripts/run-store.mjs --case C5_dirty_snapshot",
-    "test:release-gate": "npm run test:contracts && npm run test:store-contract && npm run test:receipts-cursor && npm run test:desktop-bridge && npm run test:crash-matrix && npm run test:config-transition && npm run test:credentials && npm run test:dirty-snapshot && npm run test:gui-fixtures && npm run test:engine-store && npm run test:desktop",
+    "test:release-gate": "npm run test:contracts && npm run test:jobs && npm run test:store-contract && npm run test:receipts-cursor && npm run test:desktop-bridge && npm run test:crash-matrix && npm run test:config-transition && npm run test:credentials && npm run test:dirty-snapshot && npm run test:gui-fixtures && npm run test:engine-store && npm run test:desktop",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "lint:markdown": "markdownlint-cli2 \"**/*.md\" \".skills/**/*.md\" \".github/**/*.md\" \"#node_modules\"",

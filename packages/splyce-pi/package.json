@@ -19,6 +19,10 @@
     "./provider-admission": {
       "types": "./dist/provider-admission.d.ts",
       "import": "./dist/provider-admission.js"
+    },
+    "./jobs": {
+      "types": "./dist/jobs.d.ts",
+      "import": "./dist/jobs.js"
     }
   },
   "files": [
