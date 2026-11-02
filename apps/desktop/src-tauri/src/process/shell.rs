@@ -469,9 +469,24 @@ impl Child {
     fn monitor(mut self, deadline: Instant, cancel: &AtomicBool) -> Result<Output, EngineError> {
         let mut r = Output::empty("exit");
         // SAFETY: associated suspended primary thread is owned by this effect.
-        if !cancel.load(Ordering::Acquire)
-            && unsafe { ResumeThread(self.thread.as_raw_handle()) } == u32::MAX
-        {
+        if !cancel.load(Ordering::Acquire) && {
+            #[cfg(test)]
+            let diagnostic = std::thread::current().name() == Some("shell-root-diagnostic");
+            #[cfg(test)]
+            if diagnostic {
+                eprintln!("root ResumeThread start {:?}", Instant::now());
+            }
+            let resumed = unsafe { ResumeThread(self.thread.as_raw_handle()) };
+            #[cfg(test)]
+            if diagnostic {
+                let error = (resumed == u32::MAX).then(std::io::Error::last_os_error);
+                eprintln!(
+                    "root ResumeThread end {:?}: result={resumed}, error={error:?}",
+                    Instant::now()
+                );
+            }
+            resumed == u32::MAX
+        } {
             r.status = "startFailed";
         }
         let mut terminating = None;
@@ -487,6 +502,15 @@ impl Child {
                     r.status = "timeout";
                 }
                 if r.status != "exit" {
+                    #[cfg(test)]
+                    if r.status == "timeout"
+                        && matches!(
+                            std::thread::current().name(),
+                            Some("shell-root-diagnostic" | "shell-member-diagnostic")
+                        )
+                    {
+                        eprintln!("{:?} timeout: stdout_bytes={} stderr_bytes={} out_eof={out_eof} err_eof={err_eof}", std::thread::current().name(), r.stdout.len(), r.stderr.len());
+                    }
                     // SAFETY: job denotes only this effect's associated process tree.
                     checked(unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) })?;
                     terminating = Some(Instant::now() + Duration::from_secs(5));

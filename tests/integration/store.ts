@@ -1401,11 +1401,16 @@ test("restore excludes existing writers and preserves their committed shell inte
 });
 
 test("restore denies writers through staging across processes while read and export remain available", () => {
-  const dir = freshDir(),
-    path = join(dir, "store.db"),
+  const fixture = freshDir(),
+    target = join(fixture, "target"),
+    dir = join(fixture, "alias");
+  mkdirSync(target);
+  fs.symlinkSync(target, dir, "junction");
+  const path = join(dir, "store.db"),
     backup = join(dir, "backup.db"),
     exported = join(dir, "exported.db");
   const store = Store.open(path);
+  const staging = fs.realpathSync.native(path) + ".restore-staging";
   const ownershipEpoch = store.acquireWorkspace(
     "w-demo",
     caller.sessionId,
@@ -1420,7 +1425,7 @@ test("restore denies writers through staging across processes while read and exp
   const copy = fs.copyFileSync;
   try {
     fs.copyFileSync = (src, dest, ...args) => {
-      if (dest === path + ".restore-staging") {
+      if (dest === staging) {
         const reader = Store.open(path, { readOnly: true });
         try {
           reader.backup(exported);
