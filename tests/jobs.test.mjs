@@ -337,6 +337,59 @@ function run(jobs, ticks, { states = [], enabled = true } = {}) {
 }
 const ids = (plan) => plan.dispatch.map((o) => o.occurrenceId);
 
+test("a skipped calendar date and the next date remain distinct at the same instant", () => {
+  const job = validateJob(daily({ timeZone: "Pacific/Apia" }));
+  const due = Date.parse("2011-12-30T19:00:00Z");
+  for (const after of [due - 1, Date.parse("2011-12-29T19:00:00Z")]) {
+    const scan = scanOccurrences(job, after, due);
+    assert.equal(scan.count, 2);
+    assert.equal(scan.first.occurrenceId, "job-a@r1#2011-12-30");
+    assert.equal(scan.latest.occurrenceId, "job-a@r1#2011-12-31");
+    assert.equal(scan.first.scheduledUtcMs, due);
+    assert.equal(scan.latest.scheduledUtcMs, due);
+    assert.equal(
+      nextOccurrence(job, after).occurrenceId,
+      scan.first.occurrenceId,
+    );
+  }
+  assert.equal(
+    scanOccurrences(job, Date.parse("2011-12-29T19:00:00Z"), due - 1).count,
+    0,
+  );
+  assert.equal(scanOccurrences(job, due, due + 1).count, 0);
+  const friday = validateJob(
+    daily({
+      timeZone: "Pacific/Apia",
+      schedule: { kind: "daily", localTime: "09:00", weekdays: [5] },
+    }),
+  );
+  assert.equal(
+    scanOccurrences(friday, due - 1, due).first.occurrenceId,
+    "job-a@r1#2011-12-30",
+  );
+});
+
+test("coincident daily slots dispatch once and report the other without replay", () => {
+  const job = daily({ timeZone: "Pacific/Apia" });
+  const due = Date.parse("2011-12-30T19:00:00Z");
+  const { plans, states } = run([job], [due - 1, due, due]);
+  assert.deepEqual(ids(plans[1]), ["job-a@r1#2011-12-31"]);
+  assert.deepEqual(plans[1].missed, [
+    {
+      jobId: "job-a",
+      reason: "late",
+      count: 1,
+      firstUtcMs: due,
+      latestUtcMs: due,
+    },
+  ]);
+  assert.equal(states[0].missed.count, 1);
+  assert.deepEqual(ids(plans[2]), []);
+  assert.deepEqual(plans[2].missed, []);
+  const disabled = run([job], [due - 1, due], { enabled: false });
+  assert.equal(disabled.plans[1].missed[0].count, 2);
+});
+
 test("a new job starts at the current instant and never backfills", () => {
   const job = interval();
   const { plans, states } = run([job], [10 * HOUR + 5]);

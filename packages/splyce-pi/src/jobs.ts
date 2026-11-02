@@ -339,28 +339,31 @@ function scanDaily(
     if (utcMs <= afterUtcMs || utcMs > untilUtcMs) return undefined;
     return occurrence(job, dateKey(date), utcMs);
   };
-  // A slot resolves within its own local date, so only the two boundary dates
-  // can be partly outside the window; every date strictly between is inside.
-  const start = wallTimeAt(afterUtcMs, job.timeZone);
+  // A gap can move a nominal date's slot into the following local date.
+  const start = addDays(wallTimeAt(afterUtcMs, job.timeZone), -1);
   const end = wallTimeAt(untilUtcMs, job.timeZone);
   const span = daysBetween(start, end);
   if (span < 0) return { count: 0 };
 
   let count = 0;
-  const startSlot = slotOn(start);
-  if (startSlot) count += 1;
-  const endSlot = span > 0 ? slotOn(end) : undefined;
-  if (endSlot) count += 1;
-  const interior = Math.max(0, span - 1);
+  for (let i = 0; i <= span; i += 1) {
+    if (i === 2 && span > 3) break;
+    if (slotOn(addDays(start, i))) count += 1;
+  }
+  if (span > 3) {
+    if (slotOn(addDays(end, -1))) count += 1;
+    if (slotOn(end)) count += 1;
+  }
+  const interior = Math.max(0, span - 3);
   count += Math.floor(interior / 7) * weekdays.size;
   for (let i = 1; i <= interior % 7; i += 1) {
-    if (runsOn(addDays(start, i))) count += 1;
+    if (runsOn(addDays(start, i + 1))) count += 1;
   }
   if (count === 0) return { count: 0 };
 
   // Matching weekdays recur within a week, so 8 dates either way suffice.
   let first: Occurrence | undefined;
-  for (let i = 0; i <= Math.min(span, 7) && !first; i += 1) {
+  for (let i = 0; i <= Math.min(span, 8) && !first; i += 1) {
     first = slotOn(addDays(start, i));
   }
   let latest: Occurrence | undefined;
@@ -666,7 +669,19 @@ export function planTick(input: TickInput): TickPlan {
       const runs = !alreadyDispatched && (onTime || job.catchUp === "latest");
       const lateUntil =
         runs || alreadyDispatched ? latest.scheduledUtcMs - 1 : now;
-      const late = scanOccurrences(job, state.cursorUtcMs, lateUntil);
+      let late = scanOccurrences(job, state.cursorUtcMs, lateUntil);
+      if ((runs || alreadyDispatched) && window.count > late.count + 1) {
+        const coincident = scanOccurrences(
+          job,
+          lateUntil,
+          latest.scheduledUtcMs,
+        );
+        late = {
+          count: window.count - 1,
+          ...(window.first ? { first: window.first } : {}),
+          ...(coincident.first ? { latest: coincident.first } : {}),
+        };
+      }
       report(job.jobId, "late", late);
       summary = addMissed(summary, "late", late);
       if (runs) {
