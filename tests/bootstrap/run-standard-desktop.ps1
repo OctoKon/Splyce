@@ -217,8 +217,8 @@ public static class StandardDesktopLauncher {
     foreach (GenericAce generic in original) {
       CommonAce ace = generic as CommonAce;
       if (ace == null || (ace.AceType != AceType.AccessAllowed && ace.AceType != AceType.AccessDenied) || ((int)ace.AceFlags & ~0x1F) != 0) throw new InvalidDataException("Unsupported token default ACE.");
+      if (ace.AceType == AceType.AccessDenied) throw new InvalidDataException("Deny ACE in token default ACL.");
       if (!ace.SecurityIdentifier.Equals(user)) continue;
-      if (ace.AceType == AceType.AccessDenied) throw new InvalidDataException("Current-user deny in token default ACL.");
       present |= (ace.AceFlags & AceFlags.InheritOnly) == 0 && (ace.AccessMask & 0x10000000) != 0;
     }
     var updated = new RawAcl(AclBytes(original), 0);
@@ -348,6 +348,11 @@ public static class StandardDesktopLauncher {
         !AclBytes(AddCurrentUserAllow(updated, user)).SequenceEqual(AclBytes(updated))) throw new InvalidOperationException("Fresh default ACL append/preservation selfcheck failed.");
     var denied = FixtureSystemAcl(); denied.InsertAce(2, new CommonAce(AceFlags.None, AceQualifier.AccessDenied, 1, user, false, null));
     var unsupported = FixtureSystemAcl(); unsupported.InsertAce(2, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, 1, user, true, null));
+    var groupDenied = FixtureSystemAcl();
+    groupDenied.InsertAce(2, new CommonAce(AceFlags.None, AceQualifier.AccessDenied, 1, new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), false, null));
+    bool groupDenyRefused = false;
+    try { AddCurrentUserAllow(groupDenied, user); } catch (InvalidDataException) { groupDenyRefused = true; }
+    if (!groupDenyRefused) throw new InvalidOperationException("Group-deny default ACL guard selfcheck failed.");
     foreach (RawAcl invalid in new RawAcl[] { null, denied, unsupported, new RawAcl(4, 0) }) {
       bool refused = false;
       try { AddCurrentUserAllow(invalid, user); } catch (InvalidDataException) { refused = true; }
