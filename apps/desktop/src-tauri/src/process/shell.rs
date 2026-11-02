@@ -320,6 +320,18 @@ fn quote(arg: &str) -> String {
     out
 }
 
+fn powershell_module_path(ps: &Path) -> std::ffi::OsString {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    // WinPS treats forward-slash spelling as custom, avoiding prepended ambient module paths.
+    std::ffi::OsString::from_wide(
+        &ps.join("Modules")
+            .as_os_str()
+            .encode_wide()
+            .map(|unit| if unit == b'\\' as u16 { b'/' as u16 } else { unit })
+            .collect::<Vec<_>>(),
+    )
+}
+
 struct Child {
     job: OwnedHandle,
     process: OwnedHandle,
@@ -365,15 +377,20 @@ fn launch(outer: &OwnedHandle, p: &Start) -> Result<Child, EngineError> {
     let cwd = launch_path(&p.cwd)?;
     let path = std::env::join_paths([system.as_path(), root.as_path(), ps.as_path()])
         .map_err(|_| invalid())?;
-    let mut env = Vec::new();
-    for (key, value) in [
+    let mut values = vec![
         ("ComSpec", system.join("cmd.exe").into_os_string()),
         ("PATH", path),
         ("PATHEXT", ".COM;.EXE;.BAT;.CMD".into()),
         ("SystemRoot", root.into_os_string()),
         ("TEMP", p.temp.clone().into_os_string()),
         ("TMP", p.temp.clone().into_os_string()),
-    ] {
+    ];
+    if p.kind == "powershell" {
+        values.push(("PSModulePath", powershell_module_path(&ps)));
+        values.sort_unstable_by_key(|(key, _)| key.to_ascii_uppercase());
+    }
+    let mut env = Vec::new();
+    for (key, value) in values {
         env.extend(key.encode_utf16());
         env.push(b'=' as u16);
         env.extend(wide(&value)?);
@@ -469,9 +486,24 @@ impl Child {
     fn monitor(mut self, deadline: Instant, cancel: &AtomicBool) -> Result<Output, EngineError> {
         let mut r = Output::empty("exit");
         // SAFETY: associated suspended primary thread is owned by this effect.
-        if !cancel.load(Ordering::Acquire)
-            && unsafe { ResumeThread(self.thread.as_raw_handle()) } == u32::MAX
-        {
+        if !cancel.load(Ordering::Acquire) && {
+            #[cfg(test)]
+            let diagnostic = std::thread::current().name() == Some("shell-root-diagnostic");
+            #[cfg(test)]
+            if diagnostic {
+                eprintln!("root ResumeThread start {:?}", Instant::now());
+            }
+            let resumed = unsafe { ResumeThread(self.thread.as_raw_handle()) };
+            #[cfg(test)]
+            if diagnostic {
+                let error = (resumed == u32::MAX).then(std::io::Error::last_os_error);
+                eprintln!(
+                    "root ResumeThread end {:?}: result={resumed}, error={error:?}",
+                    Instant::now()
+                );
+            }
+            resumed == u32::MAX
+        } {
             r.status = "startFailed";
         }
         let mut terminating = None;
@@ -487,6 +519,15 @@ impl Child {
                     r.status = "timeout";
                 }
                 if r.status != "exit" {
+                    #[cfg(test)]
+                    if r.status == "timeout"
+                        && matches!(
+                            std::thread::current().name(),
+                            Some("shell-root-diagnostic" | "shell-member-diagnostic")
+                        )
+                    {
+                        eprintln!("{:?} timeout: stdout_bytes={} stderr_bytes={} out_eof={out_eof} err_eof={err_eof}", std::thread::current().name(), r.stdout.len(), r.stderr.len());
+                    }
                     // SAFETY: job denotes only this effect's associated process tree.
                     checked(unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) })?;
                     terminating = Some(Instant::now() + Duration::from_secs(5));
