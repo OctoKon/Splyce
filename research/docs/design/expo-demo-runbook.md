@@ -33,7 +33,7 @@ The cut needs a machine with a Windows native toolchain. The demo host has **no*
 Prerequisites on the build machine:
 
 - Windows 10/11 x64 with the WebView2 runtime present. `runtime-pins.json` names the minimum (`155.0.4283.45`, `qualified: false` — read it, do not assume an older runtime is fine).
-- Node `24.22.1`: `runtime-pins.json` pins the exact build and its SHA-256, `package.json` pins `engines.node` to `>=24.22.1 <25` and `packageManager` to `npm@11.19.1`. The first stage of `build:desktop` (`prepare:runtime`) downloads that exact runtime and verifies the digest, so any Node new enough to run `npm` will do — but do not pass an unverified `node.exe` to a bundle.
+- Node `24.22.1`: `runtime-pins.json` pins the exact build and its SHA-256, `package.json` pins `engines.node` to `>=24.22.1 <25` and `packageManager` to `npm@11.19.1`. The first stage of `build:desktop` (`prepare:runtime`) downloads that exact runtime and verifies the digest, and the build stages run on that pinned runtime - so run `npm ci` and `npm run build:desktop` with `node --version` reporting `v24.22.1` (the prepared `node.exe` on `PATH`, or a system install only when it is exactly that build). A newer or older Node may still run `npm`, but it is not the qualified toolchain and must not be the one that produces the bundle.
 - Rust `1.99.1` for `x86_64-pc-windows-msvc`. It is pinned in `runtime-pins.json` and in the repo-root `rust-toolchain.toml` (`channel`, `components`, `targets`), so `rustup toolchain install 1.99.1 --profile minimal --target x86_64-pc-windows-msvc` plus a plain `cargo` is enough — `rustup` selects the pinned channel on its own. Do not substitute a distro Rust or a different stable; `.github/workflows/staging-gate.yml` installs the same toolchain and sets `RUSTUP_TOOLCHAIN=1.99.1`.
 - Visual Studio Build Tools with the "Desktop development with C++" workload, so `link.exe` exists. Check before starting with `vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`; without it the build fails at link time, not at startup.
 - NSIS: Tauri fetches its NSIS tooling on the first bundle; on a machine that cannot reach it, install NSIS and put `makensis` on `PATH`.
@@ -64,7 +64,7 @@ Type these verbatim, in order. Each names its step and the state to watch. If a 
 | 2   | `Read README.txt and tell me what it says.`      | Step 5, read             | Card `Read`: Running → `OK`, answer `demo`; no approval for an in-workspace read                                                                                    |
 | 3   | `Create notes.txt containing hello.` (run twice) | Step 6, write + approval | First run: `Approval required` → `Deny` → card `Denied`, file absent. Second run → `Approve once` → card `OK`, `notes.txt` contains `hello`; a third run asks again |
 | 4   | `Run echo hi in the workspace.`                  | Step 7, shell approval   | `Approval required`, then card `Run shell` with `Exit code 0` and `Output preview`                                                                                  |
-| 5   | `read ../secret.txt`                             | Step 8, escape denied    | Card `Denied`, `Blocked: the target is outside the admitted workspace.` (`WORKSPACE_ESCAPE`); the marker text never appears                                         |
+| 5   | `Read a file that sits outside the demo folder.` | Step 8, escape denied    | Card `Denied`, `Blocked: the target is outside the admitted workspace.` (`WORKSPACE_ESCAPE`); the outside marker text never appears                                 |
 | 6   | `Find where hello appears in the project.`       | Step 11, code search     | Read-only card, no approval, results from the workspace index                                                                                                       |
 | 7   | `Search memory for demo.`                        | Step 11, memory          | Read-only card; results cite source event ids. If it returns nothing, say memory has not captured anything yet — do not improvise a result                          |
 
@@ -72,7 +72,7 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 
 ## 0. Preflight
 
-- **Action:** install the packaged Windows build (not `vite dev`). Confirm Windows Credential Manager is reachable (open it from Start). Have a test API key for an OpenAI-compatible endpoint (revocable, low limit, never a production key), plus its endpoint URL, API family (for the expo: `openai-completions`), chat model id, context window and max output tokens from the vendor's page — all are explicit form fields, and a custom model needs both token limits (the form never guesses them; cost reads unknown for custom models). Create an empty demo folder outside any repository, seeded with nothing but a `README.txt` (content: `demo`) and a `..\secret.txt` one level above it containing a harmless marker. Confirm network to the endpoint, or run a loopback OpenAI-compatible server on `http://127.0.0.1:<port>`.
+- **Action:** install the packaged Windows build (not `vite dev`). Confirm Windows Credential Manager is reachable (open it from Start). Have a test API key for an OpenAI-compatible endpoint (revocable, low limit, never a production key), plus its endpoint URL, API family (for the expo: `openai-completions`), chat model id, context window and max output tokens from the vendor's page — all are explicit form fields, and a custom model needs both token limits (the form never guesses them; cost reads unknown for custom models). Create an empty demo folder outside any repository, seeded with nothing but a `README.txt` (content: `demo`), and place one inert marker file one directory above it, outside the folder, for the escape-denial case; the presenter never types its path. Confirm network to the endpoint, or run a loopback OpenAI-compatible server on `http://127.0.0.1:<port>`.
 - **Do not demo:** modules/catalog install, usage view ("unavailable"), fork or export unless the Session actions buttons are actually enabled, any plugin/MCP, any cloud sync, anything this runbook marks planned that the build still shows as unavailable.
 - **Expected UI:** none yet.
 - **Pass / Fail:** pass when every item above exists and the key is in a password manager, not on screen or in a file in the demo folder. Fail if any item is missing; fix before going on stage.
@@ -144,8 +144,8 @@ If a reply goes off-track, re-run prompt 2 (the most reliable step) rather than 
 
 ## 8. Path escape is denied
 
-- **Action:** send "read ../secret.txt".
-- **Expected UI:** the card reads "Denied" with "Blocked: the target is outside the admitted workspace." and code `WORKSPACE_ESCAPE`. No content of `secret.txt` appears.
+- **Action:** ask the agent, in words, to read a file that sits outside the demo folder; no path is typed, because the escape attempt is the test.
+- **Expected UI:** the card reads "Denied" with "Blocked: the target is outside the admitted workspace." and code `WORKSPACE_ESCAPE`. No content of that outside file appears.
 - **Pass / Fail:** pass when the card is "Denied" and the marker text never appears in the transcript, preview or logs. Fail if any part of the file is returned or an approval is offered that would allow it.
 - **If a port is unavailable:** on the demo build the denial copy is wired (`WORKSPACE_ESCAPE` in `tool-view.ts`) but renders only from engine events; with tools OFF there is no card. Say so. Do not fabricate the card.
 
