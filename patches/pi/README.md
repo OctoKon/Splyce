@@ -255,6 +255,12 @@ client without the seam is refused with `CredentialPreflightError`, so an SDK ch
 unguarded. Both `google-generative-ai.ts` and `google-vertex.ts` use it on the lease path only; the API-key path is
 unchanged. See [0016-google-leased-redirect-refusal.md](0016-google-leased-redirect-refusal.md) for evidence and limits.
 
+## 0020: Bedrock and Azure leased requests
+
+`0020-bedrock-azure-leased-requests.patch` records the six-file adapter change
+on the exact base and with the qualification limits in the
+[regression record](0020-bedrock-azure-leased-requests.md).
+
 ## Library maintenance
 
 - [Callback correlation](0013-oauth-callback-correlation.md) keeps unrelated callback requests from completing a pending login.
