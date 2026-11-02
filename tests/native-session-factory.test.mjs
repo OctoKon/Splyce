@@ -1790,10 +1790,35 @@ function composedHostSession(
               readFileSync(join(argumentsDir, name), "utf8"),
             )
           : [];
+      const records = f.store.list(f.input.workspaceId).records;
+      const action = records.find(
+        ({ kind, record }) =>
+          kind === "action" &&
+          record.capabilityId === "workspace.powershell" &&
+          record.argumentsArtifactId?.startsWith("native-tool-arguments:"),
+      )?.record;
       assert.ok(
-        files().some((text) => text.includes("Write-Output 'harmless'")),
-        "harmless command reached argument persistence",
+        action,
+        "harmless action references selected argument artifact",
       );
+      const artifact = records.find(
+        ({ kind, record }) =>
+          kind === "artifact" &&
+          record.artifactId === action.argumentsArtifactId,
+      )?.record;
+      assert.ok(artifact);
+      assert.equal(artifact.locationRef, action.argumentsArtifactId);
+      const bytes = readFileSync(
+        join(argumentsDir, `${artifact.locationRef.replace(":", "-")}.json`),
+      );
+      assert.equal(
+        bytes.toString("utf8"),
+        JSON.stringify({ command: "Write-Output 'harmless'" }),
+      );
+      const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      assert.equal(artifact.digest, digest);
+      assert.equal(action.argumentsDigest, digest);
+      assert.equal(artifact.byteLength, bytes.length);
       const priorToolFiles = readdirSync(argumentsDir)
         .filter((name) => name.startsWith("native-tool-arguments-"))
         .sort();
