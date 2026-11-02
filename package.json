@@ -50,7 +50,7 @@
     "test:policy-grants": "node scripts/run-store.mjs --case C2_policy_grants",
     "check:vendor-types": "npm ci --prefix vendor/pi --ignore-scripts && npm exec --prefix vendor/pi -- tsc --noEmit -p vendor/pi/tsconfig.json",
     "test:dirty-snapshot": "node scripts/run-store.mjs --case C5_dirty_snapshot",
-    "test:release-gate": "npm run test:contracts && npm run check:vendor-types && npm run test:native-openai && npm run test:store && npm run test:store-contract && npm run test:credentials && npm run test:crash-matrix && npm run test:receipts-cursor && npm run test:desktop-bridge && npm run test:grants-store && npm run test:policy-grants && npm run test:config-transition && npm run test:dirty-snapshot && npm run test:engine-frames && npm run test:native-entrypoints && npm run test:native-admission && npm run test:native-owned-session && npm run test:native-host && npm run test:native-host-factory && npm run test:native-control && npm run test:native-provider && npm run test:native-workspace && npm run test:native-setup && npm run test:revision-fence && npm run test:gui-fixtures && npm run test:engine-store && npm run test:bootstrap-build-mode && npm run test:desktop && npm run test:desktop-release-smoke && npm run build:desktop:e2e && npm run test:session-map && npm run test:desktop-embedded",
+    "test:release-gate": "npm run test:contracts && npm run test:jobs && npm run check:vendor-types && npm run test:native-openai && npm run test:store && npm run test:store-contract && npm run test:credentials && npm run test:crash-matrix && npm run test:receipts-cursor && npm run test:desktop-bridge && npm run test:grants-store && npm run test:policy-grants && npm run test:config-transition && npm run test:dirty-snapshot && npm run test:engine-frames && npm run test:native-entrypoints && npm run test:native-admission && npm run test:native-owned-session && npm run test:native-host && npm run test:native-host-factory && npm run test:native-control && npm run test:native-provider && npm run test:native-workspace && npm run test:native-setup && npm run test:revision-fence && npm run test:gui-fixtures && npm run test:engine-store && npm run test:bootstrap-build-mode && npm run test:desktop && npm run test:desktop-release-smoke && npm run build:desktop:e2e && npm run test:session-map && npm run test:desktop-embedded",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "lint:markdown": "markdownlint-cli2 \"**/*.md\" \".skills/**/*.md\" \".github/**/*.md\" \"#node_modules\"",
@@ -60,7 +60,8 @@
     "test:desktop-bridge": "node scripts/run-store.mjs --case C2_desktop_bridge",
     "test:config-transition": "node scripts/run-store.mjs --case C4_config_transition",
     "test:desktop": "npm run check --workspace=@splyce/desktop && npm run test --workspace=@splyce/desktop",
-    "test:native-openai": "npm run build:contracts && npm run build:pi && node --test tests/native-openai-chat.test.mjs tests/native-provider-sdk.test.mjs"
+    "test:native-openai": "npm run build:contracts && npm run build:pi && node --test tests/native-openai-chat.test.mjs tests/native-provider-sdk.test.mjs",
+    "test:jobs": "npm run build:contracts && node --test tests/jobs.test.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.5",
@@ -77,7 +78,7 @@
     "markdownlint-cli2": "0.24.0",
     "mocha": "file:patches/mocha/mocha-10.8.2.tgz",
     "prettier": "3.9.10",
-    "svelte": "5.57.2",
+    "svelte": "5.57.3",
     "svelte-check": "4.7.7",
     "typescript": "6.0.3",
     "vite": "8.3.5"

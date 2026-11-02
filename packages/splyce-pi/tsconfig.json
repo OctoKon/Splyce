@@ -3,7 +3,10 @@
     "target": "ES2024",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2024", "DOM"],
+    "lib": [
+      "ES2024",
+      "DOM"
+    ],
     "strict": true,
     "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true,
@@ -31,6 +34,7 @@
     "src/session-map.ts",
     "src/node-sqlite.d.ts",
     "src/policy-node.d.ts",
-    "src/node-child-process.d.ts"
+    "src/node-child-process.d.ts",
+    "src/jobs.ts"
   ]
 }

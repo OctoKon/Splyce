@@ -30,6 +30,10 @@
     "./provider-profiles": {
       "types": "./dist/provider-profiles.d.ts",
       "import": "./dist/provider-profiles.js"
+    },
+    "./jobs": {
+      "types": "./dist/jobs.d.ts",
+      "import": "./dist/jobs.js"
     }
   },
   "files": [
