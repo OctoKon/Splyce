@@ -613,7 +613,7 @@ describe("native profile and session setup", () => {
         handshakes++;
         (result as any).readiness.ports.provider = handshakes > 1;
         (result as any).readiness.ports.generation = handshakes > 1;
-        (result as any).readiness.ports.workspace = false;
+        (result as any).readiness.ports.workspace = true;
         (result as any).readiness.ports.modules = false;
       }
       return result;
@@ -635,7 +635,9 @@ describe("native profile and session setup", () => {
         ([cmd, args]) => cmd === "subscribe" && args.sessionId === "session_1",
       ),
     ).toBe(true);
-    expect(document.body.textContent).toContain("Workspace tools unavailable");
+    expect(document.body.textContent).not.toContain(
+      "Workspace tools unavailable",
+    );
     expect(button("Send").disabled).toBe(false);
     let acceptPrompt!: (result: unknown) => void;
     reply = async () =>
