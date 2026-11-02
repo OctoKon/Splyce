@@ -2,7 +2,19 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { createNativeHost } from "./native-host.mjs";
 import { NativeControl } from "./native-control.mjs";
+import { validateNativeSessionSetup } from "./native-session-setup.mjs";
 import { StoreError } from "../dist/store.js";
+import {
+  ModelsListError,
+  validateModelsListRequest,
+  validateModelsListResult,
+} from "../dist/model-data.js";
+import {
+  PAGE_READ_OPS,
+  PageReadError,
+  validatePageReadRequest,
+  validatePageReadResult,
+} from "../dist/page-data.js";
 import {
   CONTRACT_VERSION,
   PROTOCOL_VERSION,
@@ -10,6 +22,8 @@ import {
   FOUNDATION,
   TRANSPORT_LIMITS,
   validateHandshake,
+  validateCommand,
+  validatePermissionResult,
 } from "@splyce/pi/contracts";
 
 export const MAX_FRAME_BYTES = TRANSPORT_LIMITS.maxEncodedFrameBytes;
@@ -114,24 +128,30 @@ export async function runHost(
   createHost = createNativeHost,
 ) {
   let host;
+  let hostShutdown;
+  let closing = false;
   let stopped = false;
   let failure;
+  let inputEnded = false;
   let queued = 0;
   let writes = Promise.resolve();
   let operations = Promise.resolve();
   const lifetime = new AbortController();
   let native;
+  const subscriptions = new Map();
+  let removeEventListener = () => {};
   const fail = (error) => {
     failure ??= error;
     lifetime.abort();
     native?.shutdown();
     input.destroy?.();
   };
-  const write = (value) => {
+  const write = (value, maySend) => {
     const frame = encodeFrame(value);
     writes = writes.then(
       () =>
         new Promise((resolveWrite, rejectWrite) => {
+          if (maySend && !maySend()) return resolveWrite();
           const finish = (error) => {
             clearTimeout(timer);
             output.removeListener("close", closed);
@@ -159,9 +179,74 @@ export async function runHost(
     writes.catch(fail);
     return writes;
   };
+  function drain(sessionId) {
+    const subscription = subscriptions.get(sessionId);
+    if (!subscription || !subscription.active || subscription.draining) return;
+    subscription.draining = true;
+    void (async () => {
+      try {
+        do {
+          subscription.pending = false;
+          const batch = await host.drainSessionEvents(sessionId);
+          if (
+            !batch ||
+            !Array.isArray(batch.frames) ||
+            typeof batch.morePending !== "boolean"
+          )
+            throw new FrameError();
+          for (const event of batch.frames) {
+            if (
+              subscriptions.get(sessionId) !== subscription ||
+              !subscription.active
+            )
+              return;
+            await write({ event });
+          }
+          subscription.pending ||= batch.morePending;
+        } while (
+          subscription.pending &&
+          subscriptions.get(sessionId) === subscription &&
+          subscription.active
+        );
+      } catch (error) {
+        fail(error);
+      } finally {
+        subscription.draining = false;
+        if (
+          subscription.pending &&
+          subscriptions.get(sessionId) === subscription &&
+          subscription.active
+        )
+          drain(sessionId);
+      }
+    })();
+  }
+  const exact = (value, fields) =>
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === fields.length &&
+    fields.every((field) => Object.hasOwn(value, field));
+  const validId = (value) =>
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value) <= 128 &&
+    !/[\s\p{Cc}\p{Cf}\/\\]/u.test(value);
+  const denied = (id, code = "POLICY_DENIED") => ({
+    id,
+    ok: false,
+    error: {
+      code,
+      message: "Native command unavailable",
+      correlationId: id,
+      retryable: false,
+    },
+  });
   native = new NativeControl(write, fail);
   async function handle(request) {
     if (stopped || failure) return;
+    if (closing && request.method !== "shutdown")
+      return write(denied(request.id));
     let reply;
     let shutdown = false;
     if (host === undefined) {
@@ -174,9 +259,63 @@ export async function runHost(
       )
         throw new FrameError();
       host = createHost(request.params.appDataDir, native);
+      removeEventListener =
+        host.onSessionEvents?.((sessionId) => {
+          const subscription = subscriptions.get(sessionId);
+          if (subscription) {
+            subscription.pending = true;
+            drain(sessionId);
+          }
+        }) ?? (() => {});
       reply = { id: request.id, ok: true, value: { state: "initialized" } };
     } else if (request.method === "native.bootstrap") {
       throw new FrameError();
+    } else if (
+      [
+        "native.provider.prepare",
+        "native.provider.commit",
+        "native.provider.read",
+      ].includes(request.method)
+    ) {
+      try {
+        const method = {
+          "native.provider.prepare": "prepareProviderSetup",
+          "native.provider.commit": "commitProviderSetup",
+          "native.provider.read": "readProviderSetup",
+        }[request.method];
+        reply = {
+          id: request.id,
+          ok: true,
+          value: host[method](request.params),
+        };
+      } catch (error) {
+        const codes = [
+          "SETUP_INVALID",
+          "SETUP_UNAVAILABLE",
+          "SETUP_WORKSPACE_UNAVAILABLE",
+          "SETUP_DESCRIPTOR_UNAVAILABLE",
+          "SETUP_REQUEST_CONFLICT",
+          "SETUP_STALE_REVISION",
+          "SETUP_CREDENTIAL_UNAVAILABLE",
+          "SETUP_CREDENTIAL_RESERVATION_ORPHANED",
+          "SETUP_OUTCOME_UNKNOWN",
+          "SETUP_MODEL_METADATA_REQUIRED",
+          "ENTITY_STALE_REVISION",
+        ];
+        const code = codes.includes(error?.code)
+          ? error.code
+          : "SETUP_OUTCOME_UNKNOWN";
+        reply = {
+          id: request.id,
+          ok: false,
+          error: {
+            code,
+            message: "Provider setup unavailable",
+            correlationId: request.id,
+            retryable: false,
+          },
+        };
+      }
     } else if (request.method === "native.workspace.admit") {
       try {
         const workspace = host.admitWorkspace(request.params);
@@ -213,6 +352,17 @@ export async function runHost(
       request.method === "shutdown" &&
       Object.keys(request.params).length === 0
     ) {
+      closing = true;
+      hostShutdown = Promise.resolve().then(() =>
+        host.shutdown ? host.shutdown() : host.close(),
+      );
+      try {
+        await hostShutdown;
+      } catch (error) {
+        if (error?.code !== "SHELL_CLEANUP_UNCERTAIN") throw error;
+        hostShutdown = undefined;
+        return write(denied(request.id, "UNCERTAIN_EFFECT"));
+      }
       reply = { id: request.id, ok: true, value: { state: "stopped" } };
       shutdown = true;
     } else if (request.method === "send" && request.params.frame === "setup") {
@@ -242,6 +392,126 @@ export async function runHost(
             readiness: host.handshakeReadiness,
           },
         };
+      } else if (params.command === "models.list") {
+        try {
+          if (
+            !exact(params, ["frame", "command", "requestId", "payload"]) ||
+            !validId ||
+            params.payload?.requestId !== params.requestId
+          )
+            throw new ModelsListError("MODEL_CATALOG_INVALID");
+          const input = validateModelsListRequest(params.payload);
+          const value = validateModelsListResult(
+            await host.listModels(input, lifetime.signal),
+          );
+          reply = { id: request.id, ok: true, value };
+        } catch (error) {
+          reply = {
+            id: request.id,
+            ok: false,
+            error: {
+              code:
+                error instanceof ModelsListError
+                  ? error.code
+                  : "MODEL_CATALOG_UNAVAILABLE",
+              message: "Model catalog unavailable",
+              correlationId: validId ? params.requestId : request.id,
+              retryable: false,
+            },
+          };
+        }
+      } else if (PAGE_READ_OPS.includes(params.command)) {
+        try {
+          if (
+            !exact(params, ["frame", "command", "requestId", "payload"]) ||
+            !validId ||
+            params.payload?.requestId !== params.requestId
+          )
+            throw new PageReadError("PAGE_READ_INVALID");
+          const input = validatePageReadRequest(params.command, params.payload);
+          const value = validatePageReadResult(
+            params.command,
+            await host.readPage(params.command, input),
+          );
+          reply = { id: request.id, ok: true, value };
+        } catch (error) {
+          reply = {
+            id: request.id,
+            ok: false,
+            error: {
+              code:
+                error instanceof PageReadError
+                  ? error.code
+                  : "PAGE_READ_UNAVAILABLE",
+              message: "Page data unavailable",
+              correlationId: validId ? params.requestId : request.id,
+              retryable: false,
+            },
+          };
+        }
+      } else if (
+        Object.keys(params).length === 4 &&
+        ["frame", "command", "requestId", "payload"].every((key) =>
+          Object.hasOwn(params, key),
+        ) &&
+        [
+          "profile.select",
+          "session.start",
+          "session.resume",
+          "setup.read",
+          "permission.set",
+          "permission.read",
+        ].includes(params.command) &&
+        validId
+      ) {
+        try {
+          const input = validateNativeSessionSetup(
+            params.command,
+            params.payload,
+            params.requestId,
+          );
+          const method = {
+            "profile.select": "selectProfile",
+            "session.start": "startSession",
+            "session.resume": "resumeSession",
+            "setup.read": "readSetup",
+            "permission.set": "setPermission",
+            "permission.read": "readPermission",
+          }[params.command];
+          let value = await host[method](
+            input,
+            params.requestId,
+            lifetime.signal,
+          );
+          if (
+            params.command === "permission.set" ||
+            params.command === "permission.read"
+          )
+            value = validatePermissionResult(value, input);
+          reply = { id: request.id, ok: true, value };
+        } catch (error) {
+          const codes = [
+            "SETUP_INVALID",
+            "SETUP_UNAVAILABLE",
+            "SETUP_REQUEST_CONFLICT",
+            "STALE_REVISION",
+            "WORKSPACE_SUPERSEDED",
+            "CREDENTIAL_UNAVAILABLE",
+            "SETUP_OUTCOME_UNKNOWN",
+          ];
+          reply = {
+            id: request.id,
+            ok: false,
+            error: {
+              code: codes.includes(error?.code)
+                ? error.code
+                : "SETUP_UNAVAILABLE",
+              message: "Native setup unavailable",
+              correlationId: params.requestId,
+              retryable: false,
+            },
+          };
+        }
       } else {
         reply = {
           id: request.id,
@@ -254,39 +524,120 @@ export async function runHost(
           },
         };
       }
-    } else {
-      let code = "POLICY_DENIED";
-      if (request.method === "send") {
+    } else if (request.method === "subscribe") {
+      const { sessionId, afterSeq } = request.params;
+      if (
+        !exact(request.params, ["sessionId", "afterSeq"]) ||
+        !validId(sessionId) ||
+        !Number.isSafeInteger(afterSeq) ||
+        afterSeq < 0
+      ) {
+        reply = denied(request.id);
+      } else {
+        const subscription = { active: false, draining: false, pending: true };
+        subscriptions.set(sessionId, subscription);
         try {
-          await host.assertCurrent(request.params.scopeId, {
-            configRevision: request.params.expectedConfigRevision,
-            profileRevision: request.params.expectedProfileRevision,
-            policyRevision: request.params.expectedPolicyRevision,
-          });
-        } catch (error) {
-          if (error?.code === "STALE_REVISION") code = error.code;
-          else if (
-            ![
-              "NATIVE_INVALID_ID",
-              "NATIVE_CONFIG_UNAVAILABLE",
-              "NATIVE_PROFILE_UNAVAILABLE",
-              "NATIVE_PROFILE_STALE",
-            ].includes(error?.code)
+          const value = await host.subscribeSession(sessionId, afterSeq);
+          if (
+            !exact(value, ["sessionId", "scopeId", "afterSeq"]) ||
+            value.sessionId !== sessionId ||
+            !validId(value.scopeId) ||
+            value.afterSeq !== afterSeq
           )
-            throw error;
+            throw new FrameError();
+          await write({ id: request.id, ok: true, value });
+          subscription.active = true;
+          drain(sessionId);
+          return;
+        } catch {
+          subscriptions.delete(sessionId);
+          reply = denied(request.id);
         }
       }
-      reply = {
-        id: request.id,
-        ok: false,
-        error: {
-          code,
-          message:
-            "Generation unconfigured; native runnable ports are unavailable",
-          correlationId: request.id,
-          retryable: false,
-        },
-      };
+    } else if (request.method === "unsubscribe") {
+      const { sessionId } = request.params;
+      if (!exact(request.params, ["sessionId"]) || !validId(sessionId))
+        reply = denied(request.id);
+      else {
+        subscriptions.delete(sessionId);
+        try {
+          await host.unsubscribeSession(sessionId);
+          reply = { id: request.id, ok: true, value: { unsubscribed: true } };
+        } catch {
+          reply = denied(request.id);
+        }
+      }
+    } else if (request.method === "cancel") {
+      const { sessionId, reason } = request.params;
+      if (
+        !exact(request.params, ["sessionId", "reason"]) ||
+        !validId(sessionId) ||
+        (reason !== null &&
+          (typeof reason !== "string" || reason.length > 4096))
+      )
+        reply = denied(request.id);
+      else {
+        try {
+          const value = await host.cancelSession({ sessionId, reason });
+          if (!exact(value, ["canceled"]) || value.canceled !== true)
+            throw new FrameError();
+          reply = { id: request.id, ok: true, value };
+        } catch {
+          reply = denied(request.id);
+        }
+      }
+    } else if (request.method === "send") {
+      try {
+        const command = request.params;
+        if (!["session.prompt", "approval.respond"].includes(command.op))
+          throw new FrameError();
+        validateCommand(command, {
+          sessionId: command.sessionId,
+          scopeId: command.scopeId,
+          configRevision: command.expectedConfigRevision,
+          profileRevision: command.expectedProfileRevision,
+          policyRevision: command.expectedPolicyRevision,
+          lastDurableSeq: 0,
+          maxInlineBytes: TRANSPORT_LIMITS.maxEncodedFrameBytes,
+          resolveReference: (ref) =>
+            command.op === "approval.respond" &&
+            [
+              command.payload?.approvalRequestId,
+              command.payload?.runId,
+              command.payload?.actionId,
+            ].includes(ref),
+        });
+        await host.assertCurrent(command.scopeId, {
+          configRevision: command.expectedConfigRevision,
+          profileRevision: command.expectedProfileRevision,
+          policyRevision: command.expectedPolicyRevision,
+        });
+        const value =
+          command.op === "approval.respond"
+            ? await host.respondApproval(command)
+            : await host.preparePrompt(command, lifetime.signal);
+        if (
+          !exact(
+            value,
+            command.op === "approval.respond"
+              ? ["accepted"]
+              : ["accepted", "runId", "turnId"],
+          ) ||
+          value.accepted !== true ||
+          (command.op === "session.prompt" &&
+            (!validId(value.runId) || !validId(value.turnId)))
+        )
+          throw new FrameError();
+        reply = { id: request.id, ok: true, value };
+      } catch (error) {
+        if (inputEnded) throw error;
+        reply = denied(
+          request.id,
+          error?.code === "STALE_REVISION" ? "STALE_REVISION" : "POLICY_DENIED",
+        );
+      }
+    } else {
+      reply = denied(request.id);
     }
     await write(reply);
     if (shutdown) {
@@ -319,6 +670,7 @@ export async function runHost(
       if (!stopped && !failure) fail(error);
     }
     // EOF revokes pending native reads; late responses cannot outlive this host.
+    inputEnded = true;
     native.shutdown();
     await operations;
     try {
@@ -328,8 +680,13 @@ export async function runHost(
     }
     if (failure) throw failure;
   } finally {
+    removeEventListener();
+    subscriptions.clear();
     native.shutdown();
-    host?.close();
+    if (!hostShutdown) {
+      if (host?.shutdown) await host.shutdown();
+      else await host?.close();
+    }
   }
 }
 

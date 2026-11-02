@@ -14,6 +14,7 @@ import {
 	CredentialPreflightError,
 	redactEventWithLease,
 	redactWithLease,
+	refuseGoogleClientRedirects,
 	withLeasedSecret,
 } from "../splyce-credentials.ts";
 import type {
@@ -136,11 +137,8 @@ export const stream: StreamFunction<"google-vertex", GoogleVertexOptions> = (
 				() =>
 					credentials
 						? withLeasedSecret(credentials, (secret) =>
-								createClientWithApiKey(
-									model,
-									secret,
-									options?.headers,
-									options?.identity,
+								refuseGoogleClientRedirects(
+									createClientWithApiKey(model, secret, options?.headers, options?.identity),
 								).models.generateContentStream(params),
 							)
 						: client!.models.generateContentStream(params),

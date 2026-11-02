@@ -1,14 +1,149 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const readJson = async (path) =>
   JSON.parse(await readFile(resolve(root, path), "utf8"));
+
+test(
+  "built engine keeps native persistence ownership through session.start",
+  { timeout: 60_000 },
+  async (t) => {
+    execFileSync(process.execPath, ["scripts/build-engine.mjs"], {
+      cwd: root,
+      windowsHide: true,
+      stdio: "pipe",
+    });
+    const { encodeFrame, readFrames } =
+      await import("../packages/splyce-pi/src/engine-host.mjs");
+    const directory = mkdtempSync(join(tmpdir(), "splyce-bundle-owner-"));
+    const project = join(directory, "project");
+    mkdirSync(project);
+    const stat = lstatSync(project, { bigint: true });
+    const child = spawn(
+      process.execPath,
+      [resolve(root, "apps/desktop/src-tauri/resources/engine/host.mjs")],
+      {
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 30_000,
+      },
+    );
+    const closed = once(child, "close");
+    t.after(async () => {
+      if (child.exitCode === null) child.kill();
+      await closed;
+      rmSync(directory, { recursive: true, force: true });
+    });
+    let stderr = "";
+    child.stderr.on("data", (data) => {
+      stderr += data;
+    });
+    let id = 0;
+    const write = (method, params, requestId = `build-${++id}`) =>
+      child.stdin.write(encodeFrame({ id: requestId, method, params }));
+    const replies = readFrames(child.stdout)[Symbol.asyncIterator]();
+    const rpc = async (method, params, requestId) => {
+      write(method, params, requestId);
+      for (;;) {
+        const { value: frame, done } = await replies.next();
+        assert.equal(done, false, stderr);
+        if (frame.native) {
+          const call = frame.native;
+          assert.ok(
+            ["credential.status", "credential.redact"].includes(call.method),
+          );
+          child.stdin.write(
+            encodeFrame({
+              native: {
+                id: call.id,
+                ok: true,
+                value:
+                  call.method === "credential.status"
+                    ? { present: true }
+                    : { text: call.params.text, redactedCount: 0 },
+              },
+            }),
+          );
+          continue;
+        }
+        assert.equal(frame.ok, true, JSON.stringify(frame));
+        return frame.value;
+      }
+    };
+    await rpc(
+      "native.bootstrap",
+      { appDataDir: directory },
+      "native-bootstrap",
+    );
+    const workspace = await rpc("native.workspace.admit", {
+      canonicalPath: realpathSync.native(project),
+      volumeSerial: String(stat.dev),
+      fileId: String(stat.ino),
+    });
+    const metadata = {
+      requestId: "build-provider",
+      workspaceId: workspace.workspaceId,
+      providerConnectionId: "build-provider",
+      profileId: "build-profile",
+      apiFamily: "openai-completions",
+      endpoint: "https://example.test/v1",
+      locality: "hosted",
+      chat: {
+        modelId: "fixture-model",
+        model: { contextWindow: 8192, maxOutputTokens: 1024 },
+      },
+      accountScopeRef: "provider-default",
+      credentialKind: "new",
+      expectedConnectionRevision: null,
+      expectedProfileRevision: null,
+      expectedEndpointRevision: null,
+    };
+    const { credentialRef } = await rpc("native.provider.prepare", metadata);
+    await rpc("native.provider.commit", { metadata, credentialRef });
+    const { view } = await rpc("native.provider.read", {
+      metadata,
+      credentialRef,
+    });
+    const setup = (command, payload) =>
+      rpc("send", {
+        frame: "setup",
+        command,
+        requestId: payload.requestId,
+        payload,
+      });
+    const selected = await setup("profile.select", {
+      requestId: "build-select",
+      workspaceId: workspace.workspaceId,
+      profileId: view.profileId,
+      expectedProfileRevision: view.profileRevision,
+      expectedConfigRevision: view.configRevision,
+    });
+    const started = await setup("session.start", {
+      requestId: "build-start",
+      workspaceId: workspace.workspaceId,
+      profileId: view.profileId,
+      expectedConfigRevision: selected.configRevision,
+    });
+    assert.deepEqual(started.readiness, { state: "ready" });
+    await rpc("shutdown", {});
+    assert.equal((await closed)[0], 0, stderr);
+  },
+);
 
 test("embedded WebDriver is absent from the release build and capability", async () => {
   const manifest = "apps/desktop/src-tauri/Cargo.toml";

@@ -25,6 +25,41 @@ const apply = (state: SessionNavState, ...actions: SessionNavAction[]) =>
   actions.reduce(reduceSessionNav, state);
 const keys = (state: SessionNavState) => visibleNodes(state).map((n) => n.key);
 
+test("page snapshots load native anchors, preserve current leaves and remove absent selections", () => {
+  let state = apply(
+    createSessionNav(),
+    { type: "event", event: tree("s1", "b1", ["leaf"], 8) },
+    { type: "select", key: "s1/b1" },
+  );
+  state = reduceSessionNav(state, {
+    type: "snapshot",
+    sessions: [
+      {
+        sessionId: "s1",
+        branchAnchorId: "b1",
+        state: "idle",
+        createdAt: "",
+        updatedAt: "",
+      },
+      {
+        sessionId: "s2",
+        branchAnchorId: null,
+        state: "idle",
+        createdAt: "",
+        updatedAt: "",
+      },
+    ],
+  });
+  assert.equal(state.load, "ready");
+  assert.equal(state.selectedKey, "s1/b1");
+  assert.deepEqual(visibleNodes(state)[0].leaves, ["leaf"]);
+  assert.deepEqual(keys(state), ["s1/b1"]);
+  state = reduceSessionNav(state, { type: "snapshot", sessions: [] });
+  assert.equal(state.load, "empty");
+  assert.equal(state.selectedKey, null);
+  assert.equal(state.lostSelection, "s1/b1");
+});
+
 test("starts in a distinct loading state with nothing selected", () => {
   const s = createSessionNav();
   assert.equal(s.load, "loading");

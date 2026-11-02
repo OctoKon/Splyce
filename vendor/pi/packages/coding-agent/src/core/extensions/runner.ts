@@ -2,7 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import { type AgentMessage, type AgentTool, assertSplyceReady, isSplyceOwned } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
 	type ImageContent,
@@ -277,6 +277,14 @@ function snapshotEventHandlers(extensions: Extension[], event: ExtensionEvent["t
 	return extensions.map((ext) => ({ ext, handlers: ext.handlers.get(event)?.slice() ?? [] }));
 }
 
+const denyOwnedNotification = () => assertSplyceReady();
+
+function rethrowPersistenceError(error: unknown): void {
+	const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+	if (code === "PERSIST_REDACTION_UNAVAILABLE" || code === "PERSIST_ENTRY_TOO_LARGE")
+		throw Object.assign(new Error(code), { code });
+}
+
 function sameMessages(left: AgentMessage[], right: AgentMessage[]): boolean {
 	return left.length === right.length && left.every((message, index) => message === right[index]);
 }
@@ -316,6 +324,7 @@ export async function emitProjectTrustEvent(
 				}
 				return { result: handlerResult, errors };
 			} catch (error) {
+				rethrowPersistenceError(error);
 				errors.push({
 					extensionPath: ext.path,
 					event: event.type,
@@ -414,17 +423,28 @@ export class ExtensionRunner {
 		this.modelRegistry = modelRegistry;
 	}
 
-	bindCore(
+	async bindCore(
 		actions: ExtensionActions,
 		contextActions: ExtensionContextActions,
 		providerActions?: {
 			registerProvider?: (name: string, config: ProviderConfig) => void;
-			registerNativeProvider?: (provider: Provider) => void;
+			registerNativeProvider?: (provider: Provider) => Promise<void>;
 			unregisterProvider?: (name: string) => void;
 			registerVirtualModel?: (definition: VirtualModelDefinition) => void;
 			unregisterVirtualModel?: (provider: string, id: string) => void;
 		},
-	): void {
+	): Promise<void> {
+		this.assertActive();
+		if (isSplyceOwned(this) || isSplyceOwned(this.sessionManager)) {
+			// These synchronous notifications cannot propagate awaited persistence failures.
+			if (this.runtime.mcpServers.list().length > 0) assertSplyceReady();
+			for (const method of ["register", "unregister"] as const)
+				Object.defineProperty(this.runtime.mcpServers, method, {
+					value: denyOwnedNotification,
+					writable: false,
+					configurable: false,
+				});
+		}
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
@@ -476,6 +496,7 @@ export class ExtensionRunner {
 					this.modelRegistry.registerProvider(name, config);
 				}
 			} catch (err) {
+				rethrowPersistenceError(err);
 				this.emitError({
 					extensionPath,
 					event: "register_provider",
@@ -485,22 +506,16 @@ export class ExtensionRunner {
 			}
 		}
 		this.runtime.pendingProviderRegistrations = [];
-		for (const { provider, extensionPath } of this.runtime.pendingNativeProviderRegistrations) {
-			try {
-				if (providerActions?.registerNativeProvider) {
-					providerActions.registerNativeProvider(provider);
-				} else {
-					this.modelRegistry.registerProvider(provider);
-				}
-			} catch (err) {
-				this.emitError({
-					extensionPath,
-					event: "register_provider",
-					error: err instanceof Error ? err.message : String(err),
-					stack: err instanceof Error ? err.stack : undefined,
-				});
+		for (const { provider } of this.runtime.pendingNativeProviderRegistrations) {
+			this.assertActive();
+			if (providerActions?.registerNativeProvider) {
+				await providerActions.registerNativeProvider(provider);
+			} else {
+				await this.modelRegistry.registerProvider(provider);
 			}
+			this.assertActive();
 		}
+		this.assertActive();
 		this.runtime.pendingNativeProviderRegistrations = [];
 		const registerVirtualModel = (definition: VirtualModelDefinition) => {
 			if (providerActions?.registerVirtualModel) providerActions.registerVirtualModel(definition);
@@ -510,6 +525,7 @@ export class ExtensionRunner {
 			try {
 				registerVirtualModel(definition);
 			} catch (err) {
+				rethrowPersistenceError(err);
 				this.emitError({
 					extensionPath,
 					event: "register_virtual_model",
@@ -529,12 +545,14 @@ export class ExtensionRunner {
 			}
 			this.modelRegistry.registerProvider(name, config);
 		};
-		this.runtime.registerNativeProvider = (provider) => {
+		this.runtime.registerNativeProvider = async (provider) => {
+			this.assertActive();
 			if (providerActions?.registerNativeProvider) {
-				providerActions.registerNativeProvider(provider);
-				return;
+				await providerActions.registerNativeProvider(provider);
+			} else {
+				await this.modelRegistry.registerProvider(provider);
 			}
-			this.modelRegistry.registerProvider(provider);
+			this.assertActive();
 		};
 		this.runtime.unregisterProvider = (name) => {
 			if (providerActions?.unregisterProvider) {
@@ -587,6 +605,7 @@ export class ExtensionRunner {
 	}
 
 	private withUIPrompt<T>(kind: UIPromptKind, title: string | undefined, run: () => Promise<T>): Promise<T> {
+		if (isSplyceOwned(this) || isSplyceOwned(this.sessionManager)) assertSplyceReady();
 		const outerPrompt = this.uiPromptDepth++ === 0;
 		if (outerPrompt) {
 			this.activeUIPrompt = { kind, title };
@@ -611,6 +630,7 @@ export class ExtensionRunner {
 			return run().finally(finish);
 		} catch (err) {
 			finish();
+			rethrowPersistenceError(err);
 			throw err;
 		}
 	}
@@ -739,6 +759,7 @@ export class ExtensionRunner {
 		if (this.staleMessage) {
 			throw new Error(this.staleMessage);
 		}
+		this.runtime.assertActive();
 	}
 
 	onError(listener: ExtensionErrorListener): () => void {
@@ -1056,6 +1077,7 @@ export class ExtensionRunner {
 					if (handlerResult?.entries !== undefined) entries = handlerResult.entries;
 					if (handlerResult?.continue !== undefined) shouldContinue = handlerResult.continue;
 				} catch (err) {
+					rethrowPersistenceError(err);
 					this.emitError({
 						extensionPath: ext.path,
 						event: baseEvent.type,
@@ -1068,6 +1090,7 @@ export class ExtensionRunner {
 					context = await buildContext(entries);
 					valid = true;
 				} catch (err) {
+					rethrowPersistenceError(err);
 					valid = false;
 					this.emitError({
 						extensionPath: ext.path,
@@ -1109,6 +1132,7 @@ export class ExtensionRunner {
 						}
 					}
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1135,6 +1159,7 @@ export class ExtensionRunner {
 					const result = (await handler(event, ctx)) as CacheWarmingDecisionEventResult | undefined;
 					if (result?.action !== undefined) action = result.action;
 				} catch (err) {
+					rethrowPersistenceError(err);
 					this.emitError({
 						extensionPath: ext.path,
 						event: event.type,
@@ -1172,6 +1197,7 @@ export class ExtensionRunner {
 					currentMessage = handlerResult.message;
 					modified = true;
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1221,6 +1247,7 @@ export class ExtensionRunner {
 						modified = true;
 					}
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1281,6 +1308,7 @@ export class ExtensionRunner {
 					}
 					return handlerResult;
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1321,6 +1349,7 @@ export class ExtensionRunner {
 					if (!returned) continue;
 					currentMessages = restoreSystemMessages(currentMessages, visibleSnapshot, returned);
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1350,6 +1379,7 @@ export class ExtensionRunner {
 						});
 					}
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1381,6 +1411,7 @@ export class ExtensionRunner {
 						currentPayload = handlerResult;
 					}
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1409,6 +1440,7 @@ export class ExtensionRunner {
 					};
 					await handler(event, ctx);
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1461,6 +1493,7 @@ export class ExtensionRunner {
 						}
 					}
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1506,6 +1539,7 @@ export class ExtensionRunner {
 						themePaths.push(...result.themePaths.map((path) => ({ path, extensionPath: ext.path })));
 					}
 				} catch (err) {
+					rethrowPersistenceError(err);
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
@@ -1549,6 +1583,7 @@ export class ExtensionRunner {
 						currentImages = result.images ?? currentImages;
 					}
 				} catch (err) {
+					rethrowPersistenceError(err);
 					this.emitError({
 						extensionPath: ext.path,
 						event: "input",

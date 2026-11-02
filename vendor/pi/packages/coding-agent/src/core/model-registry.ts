@@ -207,15 +207,15 @@ export class ModelRegistry {
 		return this.runtime.isUsingOAuth(model.provider);
 	}
 
-	registerProvider(provider: Provider): void;
+	registerProvider(provider: Provider): Promise<void>;
 	registerProvider(providerName: string, config: ProviderConfigInput): void;
-	registerProvider(providerOrName: Provider | string, config?: ProviderConfigInput): void {
+	registerProvider(providerOrName: Provider | string, config?: ProviderConfigInput): void | Promise<void> {
 		if (typeof providerOrName === "string") {
 			if (!config) throw new Error("Provider config is required when registering by name");
 			this.runtime.registerProvider(providerOrName, config);
 			return;
 		}
-		this.runtime.registerNativeProvider(providerOrName);
+		return this.runtime.registerNativeProvider(providerOrName);
 	}
 
 	unregisterProvider(providerName: string): void {

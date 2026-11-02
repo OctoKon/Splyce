@@ -26,6 +26,8 @@ import {
 	assertSplyceToolCurrent,
 	getSplyceToolImplementation,
 	inheritSplyceLoopConfig,
+	inheritSplyceLoopRequest,
+	rethrowSplycePersistenceError,
 } from "./splyce-readiness.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
@@ -499,12 +501,14 @@ async function streamAssistantResponse(
 	assertSplyceReady(config);
 	assertSplyceLoopStream(config, streamFunction);
 	signal?.throwIfAborted();
-	const response = await streamFunction(config.model, llmContext, {
+	const requestOptions = {
 		...config,
 		apiKey: resolvedApiKey,
 		identity: mergeClientIdentity(DEFAULT_AGENT_IDENTITY, config.identity),
 		signal,
-	});
+	};
+	inheritSplyceLoopRequest(config, requestOptions);
+	const response = await streamFunction(config.model, llmContext, requestOptions);
 	// Record the requested level, whichever stream function answered.
 	const result = async () => Object.assign(await response.result(), { thinkingLevel: config.reasoning ?? "off" });
 
@@ -841,6 +845,7 @@ async function prepareToolCall(
 		validatedArgs = validateToolArguments(tool, preparedToolCall);
 	} catch (error) {
 		requireSplyceToolAdmission(tool).discard(toolCall.id, signal?.aborted ? "canceled" : "denied");
+		rethrowSplycePersistenceError(error);
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
@@ -907,6 +912,7 @@ async function prepareToolCall(
 		}
 		hooksCompleted = true;
 	} catch (error) {
+		rethrowSplycePersistenceError(error);
 		return {
 			kind: "immediate",
 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
@@ -1016,6 +1022,7 @@ async function executePreparedToolCall(
 				const durationMs = elapsed();
 				acceptingUpdates = false;
 				await Promise.all(updateEvents);
+				rethrowSplycePersistenceError(error);
 				return {
 					result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
 					isError: true,
@@ -1071,6 +1078,7 @@ async function finalizeExecutedToolCall(
 				isError = executed.isError || (afterResult.isError ?? isError);
 			}
 		} catch (error) {
+			rethrowSplycePersistenceError(error);
 			result = createErrorToolResult(error instanceof Error ? error.message : String(error));
 			isError = true;
 		}

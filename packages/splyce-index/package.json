@@ -1,0 +1,20 @@
+{
+  "name": "@splyce/index",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./worktrees": {
+      "types": "./dist/worktrees.d.ts",
+      "import": "./dist/worktrees.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "AGPL-3.0-only"
+}

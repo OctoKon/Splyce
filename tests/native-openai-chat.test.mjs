@@ -137,6 +137,59 @@ const textOf = (message) =>
     .filter((part) => part.type === "text")
     .map((part) => part.text)
     .join("");
+
+for (const [received, expected] of [
+  ["write<|channel|>commentary", "write"],
+  ["unknown<|channel|>commentary", "unknown<|channel|>commentary"],
+  ["write<|channel|>other", "write<|channel|>other"],
+]) {
+  test(`chat tool channel metadata preserves declared tool identity: ${received}`, async () => {
+    const chunks = chatEvents();
+    chunks[0].choices[0].delta = {
+      tool_calls: [
+        {
+          index: 0,
+          id: "write-call",
+          type: "function",
+          function: {
+            name: received,
+            arguments: '{"path":"notes.txt","content":"demo ok"}',
+          },
+        },
+      ],
+    };
+    chunks[1].choices[0].finish_reason = "tool_calls";
+    const f = fixture({ fetch: () => response(chunks) });
+    const result = await f.run({
+      context: {
+        ...context(),
+        tools: [
+          {
+            name: "write",
+            description: "Write a file",
+            parameters: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" },
+              },
+              required: ["path", "content"],
+              additionalProperties: false,
+            },
+          },
+        ],
+      },
+    });
+    assert.equal(result.stopReason, "toolUse");
+    const tool = result.content.find((part) => part.type === "toolCall");
+    assert.equal(tool.name, expected);
+    assert.deepEqual(tool.arguments, { path: "notes.txt", content: "demo ok" });
+    assert.equal(
+      f.state.events.find((e) => e.type === "toolcall_end").toolCall.name,
+      expected,
+    );
+  });
+}
 const noKey = (value) =>
   assert.equal(
     inspect(value, { depth: 20 }).includes(KEY),

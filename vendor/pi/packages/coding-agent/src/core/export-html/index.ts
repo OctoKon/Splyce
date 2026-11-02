@@ -6,7 +6,7 @@ import { getResolvedThemeColors, getThemeExportColors } from "../../modes/intera
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { SessionEntry } from "../session-manager.ts";
-import { SessionManager } from "../session-manager.ts";
+import { assertUnownedSessionExport, SessionManager } from "../session-manager.ts";
 
 /**
  * Interface for rendering custom tools to HTML.
@@ -240,6 +240,7 @@ export async function exportSessionToHtml(
 	state?: AgentState,
 	options?: ExportOptions | string,
 ): Promise<string> {
+	assertUnownedSessionExport(sm);
 	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
 
 	const sessionFile = sm.getSessionFile();

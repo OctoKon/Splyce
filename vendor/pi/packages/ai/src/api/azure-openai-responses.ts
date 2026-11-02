@@ -1,6 +1,7 @@
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
+import { assertCredentialOptions, createLeasedFetch, redactorOf } from "../splyce-credentials.ts";
 import type { Api, AssistantMessage, Model, SimpleStreamOptions, StreamFunction, TranscriptContext } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -22,6 +23,9 @@ import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 const AZURE_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "azure"]);
 // OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
+// Splyce TD-22: with a lease the SDK client only ever holds this placeholder. `createLeasedFetch` writes the
+// real key into the api-key header on every send, so this value never reaches the wire.
+const LEASED_API_KEY_PLACEHOLDER = "splyce-leased-placeholder";
 
 function formatAzureOpenAIError(error: unknown): string {
 	return formatProviderError(normalizeProviderError(error), "Azure OpenAI API error");
@@ -44,6 +48,8 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+	// Splyce: any active leased secret is replaced before an error message reaches the output or an observer.
+	const redact = redactorOf(options ?? {});
 
 	// Start async processing
 	(async () => {
@@ -68,8 +74,9 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 		};
 
 		try {
-			// Create Azure OpenAI client
-			const apiKey = options?.apiKey;
+			// Create Azure OpenAI client. Refuses `apiKey` + `credentials` before anything is leased or sent.
+			assertCredentialOptions(options ?? {});
+			const apiKey = options?.credentials ? LEASED_API_KEY_PLACEHOLDER : options?.apiKey;
 			if (!apiKey) {
 				throw new Error(`No API key for provider: ${model.provider}`);
 			}
@@ -119,7 +126,7 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 			stream.end();
 		} catch (error) {
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatAzureOpenAIError(error);
+			output.errorMessage = redact(formatAzureOpenAIError(error));
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -133,8 +140,10 @@ export const streamSimple: StreamFunction<"azure-openai-responses", SimpleStream
 	context: TranscriptContext,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
+	// Splyce TD-22: a lease needs no ambient key; explicit `apiKey` next to one is refused by `stream`
+	// before anything is leased or sent.
 	const apiKey = options?.apiKey;
-	if (!apiKey) {
+	if (!apiKey && !options?.credentials) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
 
@@ -164,7 +173,11 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 		apiKey,
 		apiVersion,
 		dangerouslyAllowBrowser: true,
-		fetch: options?.fetch,
+		// Splyce: with a lease every send re-leases the secret and overwrites the api-key header, so the
+		// placeholder the SDK signs requests with never reaches the wire (including on SDK retries).
+		fetch: options?.credentials
+			? createLeasedFetch(options.credentials, "api-key", options.fetch)
+			: options?.fetch,
 		defaultHeaders: headers,
 		baseURL: baseUrl,
 	});

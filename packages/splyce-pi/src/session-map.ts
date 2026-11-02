@@ -176,6 +176,71 @@ export class SessionMap {
     private readonly context: MapContext,
   ) {}
 
+  /** Derives the active anchor before the native Store commit, without publishing a binding. */
+  preview(key: SessionKey, pi: PiSessionView): AncestryNode {
+    function invalid(): never {
+      throw new SessionMapError(
+        "SESSION_FOREIGN",
+        "session identity is invalid or already bound elsewhere",
+      );
+    }
+    if (!key || typeof key !== "object" || Reflect.ownKeys(key).length !== 2)
+      invalid();
+    const captured: Record<string, string> = {};
+    const validId = (id: unknown): id is string =>
+      typeof id === "string" &&
+      id.isWellFormed() &&
+      id.length > 0 &&
+      new TextEncoder().encode(id).length <= 128 &&
+      !/[\s\p{Cc}\p{Cf}/\\]/u.test(id);
+    for (const field of ["scopeId", "sessionId"]) {
+      const descriptor = Object.getOwnPropertyDescriptor(key, field);
+      if (
+        !descriptor ||
+        !Object.hasOwn(descriptor, "value") ||
+        !validId(descriptor.value)
+      )
+        invalid();
+      captured[field] = descriptor.value;
+    }
+    if (
+      !pi ||
+      [
+        "getSessionId",
+        "getSessionFile",
+        "getHeader",
+        "getEntries",
+        "getLeafId",
+        "getBranch",
+      ].some(
+        (method) =>
+          typeof (pi as unknown as Record<string, unknown>)[method] !==
+          "function",
+      )
+    )
+      invalid();
+    const piSessionId = pi.getSessionId();
+    if (!validId(piSessionId)) invalid();
+    const nativeKey = {
+      scopeId: captured.scopeId!,
+      sessionId: captured.sessionId!,
+    };
+    const existing = this.byPi.get(piSessionId),
+      occupant = this.byKey.get(keyOf(nativeKey));
+    if (
+      (existing !== undefined || occupant !== undefined) &&
+      (existing === undefined || existing !== occupant)
+    )
+      invalid();
+    const bound: Bound = existing ?? { key: nativeKey, piSessionId, pi };
+    const active = this.chain(bound, bound.pi.getLeafId(), new Set()).chain[0];
+    if (active === undefined) throw new Error("ancestry chain is never empty");
+    return Object.freeze({
+      ...active,
+      anchor: Object.freeze({ ...active.anchor }),
+    });
+  }
+
   /** Binds a live Pi session to a native Splyce session (invariant 1). */
   bind(key: SessionKey, pi: PiSessionView): AncestryNode {
     const piSessionId = pi.getSessionId();
@@ -195,8 +260,17 @@ export class SessionMap {
       pi,
     };
     this.byPi.set(piSessionId, bound);
-    this.byKey.set(keyOf(key), bound);
-    return this.persist(bound);
+    this.byKey.set(keyOf(bound.key), bound);
+    try {
+      return this.persist(bound);
+    } catch (error) {
+      if (this.byPi.get(piSessionId) === bound) this.byPi.delete(piSessionId);
+      if (this.byKey.get(keyOf(bound.key)) === bound) {
+        this.byKey.delete(keyOf(bound.key));
+        this.channels.delete(keyOf(bound.key));
+      }
+      throw error;
+    }
   }
 
   /** The native key bound to a Pi session id. */

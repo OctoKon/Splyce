@@ -7,9 +7,25 @@
   },
   "type": "module",
   "exports": {
+    "./page-data": {
+      "types": "./dist/page-data.d.ts",
+      "import": "./dist/page-data.js"
+    },
+    "./recovery-applier": {
+      "types": "./dist/recovery-applier.d.ts",
+      "import": "./dist/recovery-applier.js"
+    },
+    "./recovery": {
+      "types": "./dist/recovery.d.ts",
+      "import": "./dist/recovery.js"
+    },
     "./contracts": {
       "types": "./dist/contracts.d.ts",
       "import": "./dist/contracts.js"
+    },
+    "./store": {
+      "types": "./dist/store.d.ts",
+      "import": "./dist/store.js"
     },
     "./session-map": {
       "types": "./dist/session-map.d.ts",
@@ -27,9 +43,33 @@
       "types": "./dist/provider-admission.d.ts",
       "import": "./dist/provider-admission.js"
     },
+    "./setup-metadata": {
+      "types": "./dist/setup-metadata.d.ts",
+      "import": "./dist/setup-metadata.js"
+    },
+    "./subagents": {
+      "types": "./dist/subagents.d.ts",
+      "import": "./dist/subagents.js"
+    },
     "./provider-profiles": {
       "types": "./dist/provider-profiles.d.ts",
       "import": "./dist/provider-profiles.js"
+    },
+    "./agent-context-tools": {
+      "types": "./dist/agent-context-tools.d.ts",
+      "import": "./dist/agent-context-tools.js"
+    },
+    "./tool-dispatch": {
+      "types": "./dist/tool-dispatch.d.ts",
+      "import": "./dist/tool-dispatch.js"
+    },
+    "./model-data": {
+      "types": "./dist/model-data.d.ts",
+      "import": "./dist/model-data.js"
+    },
+    "./jobs": {
+      "types": "./dist/jobs.d.ts",
+      "import": "./dist/jobs.js"
     }
   },
   "files": [

@@ -1,7 +1,12 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
-import { CURRENT_SESSION_VERSION, type SessionHeader, type SessionManager } from "./session-manager.ts";
+import {
+	assertUnownedSessionExport,
+	CURRENT_SESSION_VERSION,
+	type SessionHeader,
+	type SessionManager,
+} from "./session-manager.ts";
 
 type TrailingEntries = (parentId: string | null, timestamp: string) => readonly object[];
 
@@ -10,6 +15,7 @@ export function serializeSessionBranch(
 	sessionManager: SessionManager,
 	createTrailingEntries?: TrailingEntries,
 ): string {
+	assertUnownedSessionExport(sessionManager);
 	const timestamp = new Date().toISOString();
 	const header: SessionHeader = {
 		type: "session",
@@ -34,6 +40,7 @@ export function exportSessionToJsonl(
 	outputPath?: string,
 	createTrailingEntries?: TrailingEntries,
 ): string {
+	assertUnownedSessionExport(sessionManager);
 	const filePath = resolvePath(
 		outputPath ?? `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
 		process.cwd(),

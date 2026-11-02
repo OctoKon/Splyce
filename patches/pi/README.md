@@ -1,5 +1,11 @@
 # Pi native bootstrap patches
 
+The [declared tool channel metadata record](0015-declared-tool-channel-metadata.md)
+describes patch 0015 and its adapter regressions.
+
+The [owned native model runtime record](0012-native-model-runtime.md) describes
+patch 0012, its local composition evidence and pending SDK/session qualification.
+
 Donor: [earendil-works/pi](https://github.com/earendil-works/pi/tree/d5b3de22d0e24a3e9c38a9410d3329b099717283),
 commit `d5b3de22d0e24a3e9c38a9410d3329b099717283`.
 The audited `@earendil-works/pi-agent-core` and coding-agent packages are 1.4.0.
@@ -121,9 +127,8 @@ core patch to `packages/ai`, recorded here per [core fusion](../../research/docs
   `httpOptions.baseUrl`, `headers`, `retryOptions`, `apiVersion` or `baseUrlResourceScope` (the endpoint, extra headers or SDK-level
   retries that would reuse one lease). `packages/ai/test/splyce-credentials-wire.test.ts` runs the pinned Anthropic and Google SDKs
   for real against local HTTP servers: exactly the leased key on the wire, a redirect is not followed on the Anthropic path, and a
-  lease revoked after the first send stops the SDK retry. **Unresolved:** the pinned `@google/genai` calls the global fetch with its
-  own options and follows redirects, so a redirect from the admitted Google/Vertex endpoint would carry `x-goog-api-key` along;
-  those APIs therefore stay behind the native transport's final per-send check (TD-13) and this is recorded as a `todo` test.
+  lease revoked after the first send stops the SDK retry. The pinned `@google/genai` calls the global fetch with its own options
+  and would follow redirects, carrying `x-goog-api-key` along; 0019 closes that for leased Google/Vertex sends (#138).
 - **Routing keeps the lease the only credential.** `buildBaseOptions` forwards `credentials` to the adapters (it used to drop
   it); `compat.ts` no longer injects an ambient env key beside a lease; `Models.applyAuth` skips stored, environment and
   provider-derived auth entirely when a lease is given (so no key, header or base URL from auth resolution can be mixed in or
@@ -214,6 +219,47 @@ production factory, installed GUI readiness, provider admission, resource
 selection, credential lifecycle or executor containment is qualified. Trusted
 in-process code retains OS authority. Reapply against the exact owned source
 and rerun these regressions after donor or wrapper changes.
+
+## Awaited owned session persistence
+
+`0011-awaited-session-persistence.patch` applies to exact owned bootstrap base
+`0a700b32b0a0abe5c24194b61a854f9dd9bfe874` and records 17 vendor sources plus one
+extension-runner fixture through frozen WIP commit
+`c2ea6a6ad267c8631de178d3cd798f3f9e9f2961`. Native-owned
+SessionManager writes await a sealed same-owner sanitizer per complete entry
+before filesystem effects or state publication. SDK/session/extension callers
+await those commits; unqualified owned exports/imports deny. Unowned donor APIs
+remain available outside owned stages. See the
+[persistence record](0011-awaited-session-persistence.md) for the exact canonical
+archive replay, scoped behavioral receipts, encoded-entry limit and outstanding
+native/installed/release qualification. Review fixes reject same-chain sanitation
+reentry, refuse changed file baselines, and drain late custom/bash messages before
+settlement. They provide no cross-process atomic writer guarantee. The earlier
+97-case result and unqualified 56-case vendor fixture remain recorded; current
+15-case source and 8-case SDK component checks pass. The complete registered
+scripts pass 110/110 at the frozen source, with zero failures, skips or
+cancellations. The full vendor check also passes at the final source bytes, with
+no Biome fixes. This patch activates
+no provider or grant.
+
+The [native option admission record](0014-native-runtime-options.md) covers
+the original-options boundary and its registered-runtime regression.
+
+## 0019: Google and Vertex leased sends refuse redirects (TD-13, #138)
+
+`0019-google-leased-redirect-refusal.patch` applies from the Splyce root to `vendor/pi/` after 0004. The pinned
+`@google/genai` 2.21.0 client sends every request through `ApiClient.apiCall(url, requestInit, ...)`, which spreads
+`requestInit` into the global fetch and cannot be handed the leased fetch. `refuseGoogleClientRedirects` in
+`splyce-credentials.ts` wraps that seam on the one client built per leased attempt to force `redirect: "error"`; a
+client without the seam is refused with `CredentialPreflightError`, so an SDK change fails closed instead of sending
+unguarded. Both `google-generative-ai.ts` and `google-vertex.ts` use it on the lease path only; the API-key path is
+unchanged. See [0019-google-leased-redirect-refusal.md](0019-google-leased-redirect-refusal.md) for evidence and limits.
+
+## 0020: Bedrock and Azure leased requests
+
+`0020-bedrock-azure-leased-requests.patch` records the six-file adapter change
+on the exact base and with the qualification limits in the
+[regression record](0020-bedrock-azure-leased-requests.md).
 
 ## Library maintenance
 

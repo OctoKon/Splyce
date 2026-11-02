@@ -1,14 +1,17 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, tick, unmount } from "svelte";
-import Composer from "./Composer.svelte";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPayload } from "../stores/composer";
 import type { EngineConnectionState } from "../stores/engine";
+import Composer from "./Composer.svelte";
 
 type Props = {
   connection: EngineConnectionState;
   sessionId: string | null;
   stale?: boolean;
   generationReady?: boolean;
+  workspaceSelected?: boolean;
+  profileSelected?: boolean;
+  sessionReadiness?: "ready" | "unavailable";
   cancellable?: boolean;
   contextArtifactIds?: string[];
   send: (p: PromptPayload) => Promise<void>;
@@ -30,6 +33,9 @@ function setup(over: Partial<Props> = {}) {
     // Default the harness to an enabled composer; the fail-closed cases opt in
     // to generationReady: false explicitly.
     generationReady: true,
+    workspaceSelected: true,
+    profileSelected: true,
+    sessionReadiness: "ready",
     send,
     cancel,
     ...over,
@@ -68,6 +74,25 @@ describe("TD-71 composer", () => {
     expect(e.defaultPrevented).toBe(true);
     expect(c.send).toHaveBeenCalledExactlyOnceWith({ text: "hello" });
     expect(c.ta.value).toBe("");
+  });
+
+  it("preserves newer draft text when a delayed send succeeds", async () => {
+    let release!: () => void;
+    const send = vi.fn(
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    const c = setup({ send });
+    c.type("submitted task");
+    c.key({ key: "Enter" });
+    await tick();
+    expect(send).toHaveBeenCalledExactlyOnceWith({ text: "submitted task" });
+    c.type("newer task written while waiting");
+    expect(c.sendBtn().disabled).toBe(true);
+    release();
+    await tick();
+    await tick();
+    expect(c.ta.value).toBe("newer task written while waiting");
+    expect(send).toHaveBeenCalledOnce();
   });
 
   it("includes context artifact ids in the payload", async () => {
@@ -172,6 +197,17 @@ describe("TD-71 composer", () => {
     expect(c.sendBtn().disabled).toBe(true);
   });
 
+  it("blocks send without a selected project even when generation is ready", async () => {
+    const c = setup({ workspaceSelected: false });
+    c.type("hi");
+    c.key({ key: "Enter" });
+    c.sendBtn().click();
+    await tick();
+    expect(c.send).not.toHaveBeenCalled();
+    expect(c.status()).toBe("No project is selected. Choose a project first.");
+    expect(c.sendBtn().disabled).toBe(true);
+  });
+
   it("sends once a generation port is reported ready", async () => {
     const c = setup({ generationReady: true });
     c.type("hi");
@@ -239,6 +275,8 @@ describe("TD-71 composer", () => {
       "Composer",
     );
     expect(document.querySelector('label[for="composer-input"]')).toBeTruthy();
-    expect(c.ta.getAttribute("aria-describedby")).toBe("composer-status");
+    expect(c.ta.getAttribute("aria-describedby")).toBe(
+      "composer-status composer-hint",
+    );
   });
 });

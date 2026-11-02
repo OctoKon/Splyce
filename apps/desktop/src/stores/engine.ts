@@ -1,3 +1,16 @@
+import {
+  ModelsListError,
+  validateModelsListRequest,
+  validateModelsListResult,
+  type ModelsListResult,
+} from "@splyce/pi/model-data";
+import {
+  PageReadError,
+  type PageReadOp,
+  type PageReadResults,
+  validatePageReadRequest,
+  validatePageReadResult,
+} from "@splyce/pi/page-data";
 /**
  * TD-08: Desktop Engine Store and Native Bridge
  *
@@ -12,18 +25,18 @@
  * - Uses native @tauri-apps/api/core invoke with zero mock fallback.
  */
 
-import { Channel, invoke as invokeNative } from "@tauri-apps/api/core";
 import {
-  PROTOCOL_VERSION,
   type CommandOp,
   type CommandPayloads,
   type Handshake,
   type PortAvailability,
+  PROTOCOL_VERSION,
   type SplyceCommand,
   type SplyceEvent,
   validateHandshake,
   validatePortAvailability,
 } from "@splyce/pi/contracts";
+import { Channel, invoke as invokeNative } from "@tauri-apps/api/core";
 
 interface EngineLifecycleEvent {
   protocolVersion: number;
@@ -60,6 +73,16 @@ export interface EngineStore {
     payload: CommandPayloads[O],
     context: CommandContext,
   ) => Promise<unknown>;
+  readPage: <O extends PageReadOp>(
+    op: O,
+    requestId: string,
+    payload: { workspaceId: string; query?: string },
+  ) => Promise<PageReadResults[O]>;
+  listModels: (
+    workspaceId: string,
+    profileId: string,
+    requestId: string,
+  ) => Promise<ModelsListResult>;
   ackCursor: (sessionId: string, seq: number) => Promise<void>;
   getCursor: (sessionId: string) => number;
   resync: (context: CommandContext, fromSeq: number) => Promise<void>;
@@ -313,6 +336,117 @@ export async function invoke<O extends CommandOp>(
   });
 }
 
+export async function cancelSession(sessionId: string): Promise<void> {
+  const invokeTauri = await getTauriInvoke();
+  if (!invokeTauri) throw new Error("Native backend unavailable");
+  const result = await invokeTauri("cancel", { sessionId, reason: null });
+  if (
+    result === null ||
+    typeof result !== "object" ||
+    Array.isArray(result) ||
+    Object.keys(result).length !== 1 ||
+    (result as { canceled?: unknown }).canceled !== true
+  )
+    throw new Error("Cancellation unavailable");
+}
+
+/**
+ * Sessionless setup send. Mirrors the native `metadata` setup frame exactly:
+ * `send` with `{ op: command, payload: { frame, command, requestId, payload } }`.
+ */
+export async function sendSetup(
+  command: string,
+  requestId: string,
+  payload: object,
+): Promise<unknown> {
+  const invokeTauri = await getTauriInvoke();
+  if (!invokeTauri) {
+    throw new Error("TAURI_IPC_UNAVAILABLE: Native backend bridge not found");
+  }
+  return await invokeTauri("send", {
+    op: command,
+    payload: { frame: "setup", command, requestId, payload },
+  });
+}
+
+export async function readModels(
+  workspaceId: string,
+  profileId: string,
+  requestId: string,
+): Promise<ModelsListResult> {
+  const request = { requestId, workspaceId, profileId };
+  validateModelsListRequest(request);
+  let result: unknown;
+  try {
+    result = await sendSetup("models.list", requestId, request);
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? error.code
+        : undefined;
+    throw new ModelsListError(
+      code === "MODEL_CATALOG_INVALID" ||
+        code === "MODEL_CATALOG_DENIED" ||
+        code === "MODEL_CATALOG_TIMEOUT"
+        ? code
+        : "MODEL_CATALOG_UNAVAILABLE",
+    );
+  }
+  return validateModelsListResult(result);
+}
+
+export async function readPage<O extends PageReadOp>(
+  op: O,
+  requestId: string,
+  payload: { workspaceId: string; query?: string },
+): Promise<PageReadResults[O]> {
+  const request = { requestId, ...payload };
+  validatePageReadRequest(op, request);
+  let raw: unknown;
+  try {
+    raw = await sendSetup(op, requestId, request);
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? error.code
+        : undefined;
+    throw new PageReadError(
+      code === "PAGE_READ_INVALID" ? code : "PAGE_READ_UNAVAILABLE",
+    );
+  }
+  return validatePageReadResult(op, raw);
+}
+
+/** What the renderer keeps of an admitted workspace: never the path or selection ref. */
+export interface SelectedWorkspace {
+  readonly workspaceId: string;
+  readonly displayName: string;
+}
+
+/**
+ * Opens the native project chooser. `null` means the user cancelled. Only the
+ * workspace id and display name survive; anything malformed is rejected.
+ */
+export async function selectWorkspace(): Promise<SelectedWorkspace | null> {
+  const invokeTauri = await getTauriInvoke();
+  if (!invokeTauri) {
+    throw new Error("TAURI_IPC_UNAVAILABLE: Native backend bridge not found");
+  }
+  const raw = await invokeTauri("dialog_select_workspace");
+  if (raw === null) return null;
+  const workspace = (raw as { workspace?: unknown } | undefined)?.workspace as
+    { workspaceId?: unknown; displayName?: unknown } | undefined;
+  const { workspaceId, displayName } = workspace ?? {};
+  if (
+    typeof workspaceId !== "string" ||
+    workspaceId === "" ||
+    typeof displayName !== "string" ||
+    displayName.trim() === ""
+  )
+    throw new Error("Invalid workspace selection");
+  return { workspaceId, displayName };
+}
+
 /**
  * Acknowledge durable event sequence per session
  */
@@ -344,6 +478,8 @@ export const engine: EngineStore = {
   subscribe,
   onEvent,
   invoke,
+  readPage,
+  listModels: readModels,
   ackCursor,
   getCursor,
   resync,

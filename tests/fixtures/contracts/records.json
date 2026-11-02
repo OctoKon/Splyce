@@ -233,5 +233,17 @@
     "forkPointEntryId": "entry1",
     "firstChildEntryId": null,
     "activeLeafEntryId": "entry1"
+  },
+  "fileClaim": {
+    "schemaVersion": 1,
+    "recordId": "rec-claim",
+    "createdAt": "2026-10-26T00:00:00.000Z",
+    "scopeId": "w-demo",
+    "sourceIds": ["e1"],
+    "workspaceId": "w-demo",
+    "path": "src/main.ts",
+    "ownerChildId": "child1",
+    "revision": "A",
+    "releasedAt": null
   }
 }

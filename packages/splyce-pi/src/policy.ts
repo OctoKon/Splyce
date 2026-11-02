@@ -7,6 +7,7 @@ import {
   type JsonValue,
   type RecordByKind,
   type RunRecord,
+  type SplyceEventDraft,
 } from "./contracts.js";
 import {
   Store,
@@ -35,6 +36,11 @@ export interface CurrentPolicy {
   planMode: boolean;
 }
 
+// Version the complete immutable native ruleset; bump whenever those rules change.
+export const NATIVE_POLICY_REVISION = "1";
+export const currentNativePolicyRevision = (_workspaceId: string): string =>
+  NATIVE_POLICY_REVISION;
+
 /** Created by the native host after target and capability qualification. */
 export interface ActionPermit {
   toolCallId: string;
@@ -54,6 +60,45 @@ export interface ActionPermit {
   capability: GrantRecord["capability"];
   /** net.provider only: the qualified `scheme://host:port` origin. */
   origin?: string;
+  approvedBy?: "mode:auto" | "mode:bypass";
+}
+
+/**
+ * Optional durable events committed in the SAME transaction as the receipts:
+ * `intent` with the approved+running receipts, `outcome` with the outcome and
+ * completion receipts. A callback that throws loses only its event, never a receipt.
+ */
+export interface ExecuteEvents<T> {
+  /** Private executor observation; never derived from tool/model results. */
+  shellCleanup?: () => boolean;
+  intent?: (running: ActionRecord) => SplyceEventDraft;
+  outcome?: (done: {
+    /** The completion (or uncertain) action receipt committed with the event. */
+    action: ActionRecord;
+    uncertain: boolean;
+    /** Single private post-effect cleanup observation; absent when not required. */
+    cleanupComplete: boolean | undefined;
+    /** Absent when the effect threw (EFFECT_UNCERTAIN). */
+    result?: T;
+  }) => SplyceEventDraft | Promise<SplyceEventDraft>;
+}
+
+interface ShellBinding {
+  actionId: string;
+  sessionId: string;
+  workspaceId: string;
+  ownershipEpoch: number;
+}
+interface ShellControl {
+  hasShell(binding: ShellBinding): boolean;
+  proveShell(binding: ShellBinding): Promise<void>;
+  acknowledgeShell(binding: ShellBinding): Promise<void>;
+}
+interface ShellReceipt {
+  binding: ShellBinding;
+  runId: string;
+  record: RecordByKind["outcome"];
+  committed: boolean;
 }
 
 /** Native read of the admitted workspace directory's current identity. */
@@ -101,6 +146,8 @@ function canonical(value: unknown): string {
 export const actionArgumentsDigest = (args: unknown): string =>
   `sha256:${createHash("sha256").update(canonical(args)).digest("hex")}`;
 
+export { canonical as serializeActionArguments };
+
 function freezeJson(value: JsonValue): JsonValue {
   if (value && typeof value === "object") {
     for (const child of Object.values(value)) freezeJson(child);
@@ -120,17 +167,21 @@ export class NativePolicy {
   private readonly pending = new Map<string, string>();
   private readonly ready = new Map<string, string>();
   private readonly reservations = new Map<string, ActionRecord>();
+  private readonly shellReceipts = new Map<string, ShellReceipt>();
+  private readonly shellControl: ShellControl | undefined;
 
   constructor(
     store: Store,
     caller: CallerContext,
     current: () => CurrentPolicy,
     identity: WorkspaceIdentityPort,
+    shellControl?: ShellControl,
   ) {
     this.store = store;
     this.caller = Object.freeze({ ...caller });
     this.current = current;
     this.identity = identity;
+    this.shellControl = shellControl;
   }
 
   authorize(permit: ActionPermit): void {
@@ -326,9 +377,11 @@ export class NativePolicy {
     args: unknown,
     invoke: (admittedArgs: unknown) => Promise<T>,
     signal: AbortSignal | undefined,
+    events?: ExecuteEvents<T>,
   ): Promise<T> {
     this.check(toolCallId, toolName, signal);
     const permit = this.permits.get(toolCallId)!;
+    this.store.assertShellCleanup(permit.ownership.workspaceId);
     const serialized = canonical(args);
     const preparedDigest = this.ready.get(toolCallId);
     if (!preparedDigest) throw new AdmissionError("PREPARATION_REQUIRED");
@@ -366,6 +419,13 @@ export class NativePolicy {
         },
       },
     ];
+    let intentDrafts: SplyceEventDraft[] = [];
+    try {
+      const draft = events?.intent?.(receipts[1]!.record as ActionRecord);
+      if (draft) intentDrafts = [draft];
+    } catch {
+      // the intent event is best-effort; the receipts are not
+    }
     const fences = {
       expectedOwnershipEpoch: {
         workspaceId: permit.ownership.workspaceId,
@@ -385,8 +445,9 @@ export class NativePolicy {
           receipts,
           this.caller,
           fences,
+          intentDrafts,
         );
-      else this.store.commitEvents(receipts, [], this.caller, fences);
+      else this.store.commitEvents(receipts, intentDrafts, this.caller, fences);
     } catch (error) {
       if (
         error instanceof StoreError &&
@@ -399,14 +460,32 @@ export class NativePolicy {
     }
     // No asynchronous callback separates the final fences from executor handoff.
     this.check(toolCallId, toolName, signal);
-    let result: T;
+    let result: T | undefined;
+    let effectFailed = false;
     try {
       result = await invoke(admittedArgs);
     } catch {
-      this.commitOutcome(action, true);
-      throw new AdmissionError("EFFECT_UNCERTAIN");
+      effectFailed = true;
     }
-    this.commitOutcome(action, result.isError || signal?.aborted === true);
+    let cleanupComplete: boolean | undefined;
+    try {
+      cleanupComplete = events?.shellCleanup?.();
+    } catch {
+      cleanupComplete = false;
+    }
+    await this.commitOutcome(
+      action,
+      effectFailed ||
+        result === undefined ||
+        result.isError ||
+        signal?.aborted === true ||
+        cleanupComplete === false,
+      cleanupComplete,
+      events,
+      result,
+    );
+    if (effectFailed || result === undefined || cleanupComplete === false)
+      throw new AdmissionError("EFFECT_UNCERTAIN");
     return result;
   }
 
@@ -479,10 +558,55 @@ export class NativePolicy {
       argumentsDigest: permit.argumentsDigest,
       policyRevision: this.caller.policyRevision,
       ownershipEpoch: permit.ownership.epoch,
+      ...(permit.approvedBy ? { approvedBy: permit.approvedBy } : {}),
     };
   }
 
-  private commitOutcome(action: ActionRecord, uncertain: boolean): void {
+  /** Only this session's live registry and original private receipt can qualify cleanup. */
+  async reconcileShell(
+    workspaceId: string,
+    runId?: string,
+    epoch?: number,
+  ): Promise<void> {
+    for (const receipt of this.shellReceipts.values()) {
+      const { binding } = receipt;
+      if (binding.workspaceId !== workspaceId) continue;
+      if (!receipt.committed) {
+        if (receipt.runId !== runId || binding.ownershipEpoch !== epoch)
+          continue;
+        await this.shellControl!.proveShell(binding);
+        const owner = this.store.workspaceOwner(workspaceId);
+        if (
+          owner?.ownerSessionId !== binding.sessionId ||
+          owner.epoch !== epoch
+        )
+          throw new AdmissionError("OWNERSHIP_STALE_EPOCH");
+        const record = {
+          ...receipt.record,
+          recordId: randomUUID(),
+          createdAt: new Date().toISOString(),
+          cleanupState: "complete" as const,
+        };
+        this.store.appendBatch(
+          [{ kind: "outcome", record }],
+          this.caller,
+          undefined,
+          { workspaceId, epoch: binding.ownershipEpoch },
+        );
+        receipt.committed = true;
+      }
+      await this.shellControl!.acknowledgeShell(binding);
+      this.shellReceipts.delete(binding.actionId);
+    }
+  }
+
+  private async commitOutcome<T>(
+    action: ActionRecord,
+    uncertain: boolean,
+    cleanupComplete: boolean | undefined,
+    events?: ExecuteEvents<T>,
+    result?: T,
+  ): Promise<void> {
     const record: RecordByKind["outcome"] = {
       schemaVersion: CONTRACT_VERSION,
       recordId: randomUUID(),
@@ -493,22 +617,66 @@ export class NativePolicy {
       effectState: uncertain ? "uncertain" : "observed-success",
       observedAt: new Date().toISOString(),
       resultArtifactId: null,
-      cleanupState: uncertain ? "uncertain" : "not-required",
+      cleanupState:
+        cleanupComplete !== undefined
+          ? cleanupComplete
+            ? "complete"
+            : "uncertain"
+          : uncertain
+            ? "uncertain"
+            : "not-required",
       errorClass: uncertain ? "execution" : "none",
+      ...(action.approvedBy ? { approvedBy: action.approvedBy } : {}),
     };
-    this.store.appendBatch(
-      [
-        { kind: "outcome", record },
-        {
-          kind: "action",
-          record: {
-            ...action,
-            recordId: randomUUID(),
-            state: uncertain ? "uncertain" : "completed",
-          },
-        },
-      ],
-      this.caller,
-    );
+    const binding = {
+      actionId: action.actionId,
+      sessionId: this.caller.sessionId,
+      workspaceId: action.scopeId,
+      ownershipEpoch:
+        typeof action.ownershipEpoch === "number" ? action.ownershipEpoch : 0,
+    };
+    const tracked =
+      events?.shellCleanup && this.shellControl?.hasShell(binding)
+        ? { binding, runId: action.runId, record, committed: false }
+        : undefined;
+    if (tracked) this.shellReceipts.set(action.actionId, tracked);
+    const completion: ActionRecord = {
+      ...action,
+      recordId: randomUUID(),
+      state: uncertain ? "uncertain" : "completed",
+    };
+    const batch = [
+      { kind: "outcome" as const, record },
+      { kind: "action" as const, record: completion },
+    ];
+    let drafts: SplyceEventDraft[] = [];
+    if (events?.outcome) {
+      try {
+        drafts = [
+          await events.outcome({
+            action: completion,
+            uncertain,
+            cleanupComplete,
+            ...(result === undefined ? {} : { result }),
+          }),
+        ];
+      } catch {
+        // the outcome event is best-effort; the receipts are not
+      }
+    }
+    if (drafts.length === 0) this.store.appendBatch(batch, this.caller);
+    else {
+      try {
+        this.store.commitEvents(batch, drafts, this.caller);
+      } catch {
+        // an invalid event must never cost the receipts of an effect that already ran
+        this.store.appendBatch(batch, this.caller);
+      }
+    }
+    if (tracked && record.cleanupState === "complete") {
+      tracked.committed = true;
+      await this.shellControl!.acknowledgeShell(tracked.binding);
+      this.shellReceipts.delete(action.actionId);
+    }
   }
 }

@@ -26,7 +26,6 @@ import {
 	type DeferredCancelOptions,
 	type DeferredFetchOptions,
 	type DeferredHandle,
-	getOpenCodeSessionHeaders,
 	type ImageApi,
 	type ImageModel,
 	type ImagesContext,
@@ -192,7 +191,6 @@ export class ModelRuntime implements Models {
 		storedProviders: new Set(),
 		auth: new Map(),
 	};
-	private availabilityRefreshSeq = 0;
 	private availabilityErrorSeq = 0;
 	private readonly providerAvailabilitySeq = new Map<string, number>();
 	private availabilityError: string | undefined;
@@ -353,55 +351,7 @@ export class ModelRuntime implements Models {
 		};
 	}
 
-	private async runAvailabilityRefresh(seq: number, errorSeq: number, signal: AbortSignal): Promise<void> {
-		const providers = this.models.getProviders();
-		const [available, checks, credentials] = await Promise.all([
-			this.models.getAvailable(undefined, { signal }),
-			Promise.all(
-				providers.map(
-					async (provider): Promise<[string, AuthCheck | undefined]> => [
-						provider.id,
-						await this.models.checkAuth(provider.id, { signal }),
-					],
-				),
-			),
-			this.credentials.list({ signal }),
-		]);
-		if (seq !== this.availabilityRefreshSeq) return;
-		const auth = new Map(checks);
-		const configuredProviders = new Set(
-			checks
-				.filter((entry): entry is [string, AuthCheck] => entry[1] !== undefined)
-				.map(([providerId]) => providerId),
-		);
-		this.snapshot = {
-			all: [...this.models.getModels()],
-			available: [...available],
-			configuredProviders,
-			storedProviders: new Set(credentials.map((entry) => entry.providerId)),
-			auth,
-		};
-		if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
-	}
-
-	private queueAvailabilityRefresh(signal?: AbortSignal): Promise<void> {
-		const seq = ++this.availabilityRefreshSeq;
-		for (const [providerId, providerSeq] of this.providerAvailabilitySeq) {
-			this.providerAvailabilitySeq.set(providerId, providerSeq + 1);
-		}
-		const errorSeq = ++this.availabilityErrorSeq;
-		const effectiveSignal = operationSignal(signal);
-		return this.runAvailabilityRefresh(seq, errorSeq, effectiveSignal).catch((error) => {
-			if (errorSeq === this.availabilityErrorSeq && !effectiveSignal.aborted) {
-				this.availabilityError = error instanceof Error ? error.message : String(error);
-			}
-			throw error;
-		});
-	}
-
 	private async refreshProviderAvailability(providerId: string, signal: AbortSignal): Promise<void> {
-		// Invalidate any full availability pass that started before this credential change.
-		++this.availabilityRefreshSeq;
 		const providerSeq = (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1;
 		this.providerAvailabilitySeq.set(providerId, providerSeq);
 		const errorSeq = ++this.availabilityErrorSeq;
@@ -499,27 +449,56 @@ export class ModelRuntime implements Models {
 	}
 
 	async checkAuth(providerId: string, options?: AuthOperationOptions): Promise<AuthCheck | undefined> {
-		assertSplyceReady();
-		return this.models.checkAuth(providerId, options);
+		const provider = this.requireNativeProvider(providerId);
+		const signal = operationSignal(options?.signal);
+		signal.throwIfAborted();
+		const seq = (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1;
+		this.providerAvailabilitySeq.set(providerId, seq);
+		const pendingAuth = new Map(this.snapshot.auth);
+		const pendingConfigured = new Set(this.snapshot.configuredProviders);
+		pendingAuth.delete(providerId);
+		pendingConfigured.delete(providerId);
+		this.snapshot = { ...this.snapshot, auth: pendingAuth, configuredProviders: pendingConfigured };
+		this.updateModelSnapshot();
+		// Availability is metadata only. Native request admission alone may lease a secret.
+		const check = await provider.auth.apiKey!.check!({
+			ctx: { env: async () => undefined, fileExists: async () => false },
+			signal,
+		});
+		this.requireNativeProvider(providerId, provider);
+		signal.throwIfAborted();
+		if (check && check.type !== "api_key") throw new ModelsError("auth", "Invalid native auth status");
+		const result: AuthCheck | undefined = check ? { type: "api_key", source: check.source } : undefined;
+		if (this.providerAvailabilitySeq.get(providerId) !== seq) return result;
+		const auth = new Map(this.snapshot.auth);
+		const configuredProviders = new Set(this.snapshot.configuredProviders);
+		if (check) {
+			auth.set(providerId, result);
+			configuredProviders.add(providerId);
+		} else {
+			auth.delete(providerId);
+			configuredProviders.delete(providerId);
+		}
+		this.snapshot = { ...this.snapshot, auth, configuredProviders };
+		this.updateModelSnapshot();
+		return auth.get(providerId);
+	}
+
+	private requireNativeProvider(providerId: string, expected?: Provider): Provider {
+		assertSameSplyceOwner(this, this, "model-runtime");
+		const provider = this.nativeExtensionProviders.get(providerId);
+		if (!provider || (expected && provider !== expected) || !provider.auth.apiKey?.check || provider.auth.oauth)
+			assertSplyceReady();
+		return provider!;
 	}
 
 	async getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]> {
-		assertSplyceReady();
-		if (providerId) {
-			const errorSeq = ++this.availabilityErrorSeq;
-			try {
-				const available = await this.models.getAvailable(providerId, options);
-				if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
-				return available;
-			} catch (error) {
-				if (errorSeq === this.availabilityErrorSeq && !options?.signal?.aborted) {
-					this.availabilityError = error instanceof Error ? error.message : String(error);
-				}
-				throw error;
-			}
-		}
-		await this.queueAvailabilityRefresh(options?.signal);
-		return this.snapshot.available;
+		assertSameSplyceOwner(this, this, "model-runtime");
+		const providerIds = providerId ? [providerId] : [...this.nativeExtensionProviders.keys()];
+		await Promise.all(providerIds.map((id) => this.checkAuth(id, options)));
+		assertSameSplyceOwner(this, this, "model-runtime");
+		options?.signal?.throwIfAborted();
+		return this.snapshot.available.filter((model) => !providerId || model.provider === providerId);
 	}
 
 	getAvailableSnapshot(): readonly Model<Api>[] {
@@ -688,42 +667,43 @@ export class ModelRuntime implements Models {
 		model: TModel;
 		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 	}> {
-		assertSplyceReady(this);
-		assertSplyceReady();
-		const provider = this.models.getProvider(model.provider);
-		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
-		const resolution = await this.getAuth(model, {
-			apiKey: options?.apiKey,
-			env: options?.env,
-			signal: options?.signal,
-		});
-		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
-
-		const { transformHeaders, ...rawProviderOptions } = options ?? {};
-		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
-		const requestModel: TModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
-		const sessionId =
-			"sessionId" in providerOptions && typeof providerOptions.sessionId === "string"
-				? providerOptions.sessionId
-				: undefined;
-		let headers = mergeHeaders(
-			mergeHeaders(getOpenCodeSessionHeaders(requestModel, sessionId), resolution.auth.headers),
-			providerOptions.headers,
-		);
-		if (transformHeaders) headers = await transformHeaders(headers ?? {});
-		const env =
-			resolution.env || providerOptions.env
-				? { ...(resolution.env ?? {}), ...(providerOptions.env ?? {}) }
-				: undefined;
+		const provider = this.requireNativeProvider(model.provider);
+		const selected = provider.getModels().find((candidate) => candidate.id === model.id);
+		if (
+			!selected ||
+			selected.provider !== provider.id ||
+			selected.api !== model.api ||
+			selected.baseUrl !== model.baseUrl ||
+			model.headers !== undefined
+		)
+			throw new ModelsError("provider", "Model does not match the registered native provider");
+		let signal: AbortSignal | undefined;
+		if (options !== undefined) {
+			if (options === null || typeof options !== "object")
+				throw new ModelsError("auth", "Native request overrides are unavailable");
+			const prototype = Object.getPrototypeOf(options);
+			if (
+				(prototype !== null && prototype !== Object.prototype) ||
+				Reflect.ownKeys(options).some((key) => key !== "signal")
+			)
+				throw new ModelsError("auth", "Native request overrides are unavailable");
+			const descriptor = Object.getOwnPropertyDescriptor(options, "signal");
+			if (descriptor && !Object.hasOwn(descriptor, "value"))
+				throw new ModelsError("auth", "Native request overrides are unavailable");
+			signal = descriptor?.value;
+			if (signal !== undefined && !(signal instanceof AbortSignal))
+				throw new ModelsError("auth", "Native request overrides are unavailable");
+		}
+		// Capture only validated data before awaiting; never invoke caller option getters.
+		const providerOptions = { signal } as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
+		const requestModel = structuredClone(selected) as TModel;
+		if (!(await this.checkAuth(provider.id, { signal: providerOptions.signal })))
+			throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
+		this.requireNativeProvider(provider.id, provider);
 		return {
 			provider,
 			model: requestModel,
-			options: {
-				...providerOptions,
-				apiKey: providerOptions.apiKey ?? resolution.auth.apiKey,
-				headers,
-				env,
-			} as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>,
+			options: providerOptions,
 		};
 	}
 
@@ -739,6 +719,8 @@ export class ModelRuntime implements Models {
 				model,
 				options as (StreamOptions & ModelsRequestTransforms) | undefined,
 			);
+			this.requireNativeProvider(model.provider, prepared.provider);
+			prepared.options.signal?.throwIfAborted();
 			return prepared.provider.stream(prepared.model, transcript, prepared.options as ApiStreamOptions<TApi>);
 		});
 	}
@@ -775,6 +757,8 @@ export class ModelRuntime implements Models {
 		return lazyStream(model, async () => {
 			assertChatModel(model);
 			const prepared = await this.prepareRequest(model, options);
+			this.requireNativeProvider(model.provider, prepared.provider);
+			prepared.options.signal?.throwIfAborted();
 			return prepared.provider.streamSimple(prepared.model, transcript, prepared.options as SimpleStreamOptions);
 		});
 	}
@@ -877,62 +861,24 @@ export class ModelRuntime implements Models {
 	}
 
 	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
-		assertSplyceReady(this);
-		assertSplyceReady();
-		this.config = await ModelConfig.load(this.modelsPath);
-		this.configureRadiusProviders();
-		if (options.providers) {
-			for (const providerId of new Set(options.providers)) this.recomposeProvider(providerId);
-			this.updateModelSnapshot();
-		} else {
-			this.rebuildProviders();
-		}
-		const refreshOptions = {
-			...options,
-			allowNetwork: options.allowNetwork ?? this.modelNetworkEnabled,
-		};
-		// Published pi-ai builds before ModelsStore returned void and accepted a provider ID.
-		// The fallback keeps source-mode CLI tests working without rebuilding workspace dependencies.
-		const result = ((await this.models.refresh(refreshOptions)) as ModelsRefreshResult | undefined) ?? {
-			aborted: refreshOptions.signal?.aborted ?? false,
-			errors: new Map(),
-		};
-		const errors = new Map(result.errors);
-		this.updateModelSnapshot();
-		if (options.providers) {
-			await Promise.all(
-				[...new Set(options.providers)].map(async (providerId) => {
-					try {
-						await this.refreshProviderAvailability(providerId, operationSignal(options.signal));
-					} catch (error) {
-						if (!options.signal?.aborted) {
-							errors.set(providerId, error instanceof Error ? error : new Error(String(error)));
-						}
-					}
-				}),
-			);
-		} else {
-			try {
-				await this.queueAvailabilityRefresh(options.signal);
-			} catch {
-				// Availability errors are recorded by the latest pass; refreshed models remain usable.
-			}
-		}
-		return { aborted: result.aborted || (options.signal?.aborted ?? false), errors };
+		assertSameSplyceOwner(this, this, "model-runtime");
+		if (options.allowNetwork) assertSplyceReady();
+		const providerIds = options.providers ?? [...this.nativeExtensionProviders.keys()];
+		await Promise.all([...new Set(providerIds)].map((id) => this.checkAuth(id, { signal: options.signal })));
+		assertSameSplyceOwner(this, this, "model-runtime");
+		options.signal?.throwIfAborted();
+		return { aborted: false, errors: new Map() };
 	}
 
-	registerNativeProvider(provider: Provider): void {
+	registerNativeProvider(provider: Provider): Promise<void> {
+		assertSameSplyceOwner(this, this, "model-runtime");
 		if (!provider.id.trim()) throw new Error("Provider id must not be empty.");
+		if (!provider.auth.apiKey?.check || provider.auth.oauth) assertSplyceReady();
 		this.extensionProviders.delete(provider.id);
 		this.nativeExtensionProviders.set(provider.id, provider);
 		this.recomposeProvider(provider.id);
 		this.updateModelSnapshot();
-		this.markProvisionallyConfigured(
-			provider.id,
-			configuredRequestAuthStatus(this.config.getProvider(provider.id), undefined),
-			provider.auth.oauth && !provider.auth.apiKey ? "oauth" : "api_key",
-		);
-		void this.refresh({ allowNetwork: false });
+		return this.refresh({ allowNetwork: false, providers: [provider.id] }).then(() => {});
 	}
 
 	/**
@@ -959,6 +905,7 @@ export class ModelRuntime implements Models {
 	}
 
 	registerProvider(providerId: string, config: ProviderConfigInput): void {
+		assertSplyceReady();
 		// Validate the incoming registration on its own, like the legacy registry:
 		// a broken re-registration must throw without touching the stored config.
 		validateExtensionProvider(providerId, this.builtins.get(providerId), this.config.getProvider(providerId), config);
@@ -982,6 +929,7 @@ export class ModelRuntime implements Models {
 	}
 
 	unregisterProvider(providerId: string): void {
+		assertSplyceReady();
 		this.extensionProviders.delete(providerId);
 		this.nativeExtensionProviders.delete(providerId);
 		this.recomposeProvider(providerId);
@@ -995,6 +943,7 @@ export class ModelRuntime implements Models {
 	 * Throws when the id belongs to a physical model of that provider.
 	 */
 	registerVirtualModel(definition: VirtualModelDefinition): void {
+		assertSplyceReady();
 		const { provider: providerId, id } = definition;
 		if (!providerId.trim() || !id.trim()) throw new Error("Virtual model provider and id must not be empty.");
 		const existing = this.models.getModel(providerId, id);
@@ -1016,6 +965,7 @@ export class ModelRuntime implements Models {
 	}
 
 	unregisterVirtualModel(providerId: string, id: string): void {
+		assertSplyceReady();
 		const models = this.virtualModels.get(providerId);
 		if (!models?.delete(id)) return;
 		if (models.size === 0) this.virtualModels.delete(providerId);

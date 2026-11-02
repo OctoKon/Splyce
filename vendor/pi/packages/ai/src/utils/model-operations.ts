@@ -18,6 +18,8 @@ import { ModelsError } from "./models-error.ts";
 /** Only adapters bound to native credentials may bypass ordinary provider auth. */
 export const CREDENTIAL_APIS: ReadonlySet<string> = new Set([
 	"anthropic-messages",
+	"azure-openai-responses",
+	"bedrock-converse-stream",
 	"google-generative-ai",
 	"google-vertex",
 	"openai-completions",

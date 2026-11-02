@@ -1,0 +1,694 @@
+diff --git a/vendor/pi/packages/ai/src/api/azure-openai-responses.ts b/vendor/pi/packages/ai/src/api/azure-openai-responses.ts
+index 24e73fd0562fa8321f432415487ceb2417caaafa..c6cdf3b770a0a187db15823fed50a37c0a5ca3da 100644
+--- a/vendor/pi/packages/ai/src/api/azure-openai-responses.ts
++++ b/vendor/pi/packages/ai/src/api/azure-openai-responses.ts
+@@ -1,6 +1,7 @@
+ import { AzureOpenAI } from "openai";
+ import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+ import { clampThinkingLevel } from "../models.ts";
++import { assertCredentialOptions, createLeasedFetch, redactorOf } from "../splyce-credentials.ts";
+ import type { Api, AssistantMessage, Model, SimpleStreamOptions, StreamFunction, TranscriptContext } from "../types.ts";
+ import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
+ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+@@ -22,6 +23,9 @@ import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
+ const AZURE_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "azure"]);
+ // OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
+ const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
++// Splyce TD-22: with a lease the SDK client only ever holds this placeholder. `createLeasedFetch` writes the
++// real key into the api-key header on every send, so this value never reaches the wire.
++const LEASED_API_KEY_PLACEHOLDER = "splyce-leased-placeholder";
+ 
+ function formatAzureOpenAIError(error: unknown): string {
+ 	return formatProviderError(normalizeProviderError(error), "Azure OpenAI API error");
+@@ -44,6 +48,8 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
+ ): AssistantMessageEventStream => {
+ 	const stream = new AssistantMessageEventStream();
+ 	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
++	// Splyce: any active leased secret is replaced before an error message reaches the output or an observer.
++	const redact = redactorOf(options ?? {});
+ 
+ 	// Start async processing
+ 	(async () => {
+@@ -68,8 +74,9 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
+ 		};
+ 
+ 		try {
+-			// Create Azure OpenAI client
+-			const apiKey = options?.apiKey;
++			// Create Azure OpenAI client. Refuses `apiKey` + `credentials` before anything is leased or sent.
++			assertCredentialOptions(options ?? {});
++			const apiKey = options?.credentials ? LEASED_API_KEY_PLACEHOLDER : options?.apiKey;
+ 			if (!apiKey) {
+ 				throw new Error(`No API key for provider: ${model.provider}`);
+ 			}
+@@ -119,7 +126,7 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
+ 			stream.end();
+ 		} catch (error) {
+ 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+-			output.errorMessage = formatAzureOpenAIError(error);
++			output.errorMessage = redact(formatAzureOpenAIError(error));
+ 			stream.push({ type: "error", reason: output.stopReason, error: output });
+ 			stream.end();
+ 		}
+@@ -133,8 +140,10 @@ export const streamSimple: StreamFunction<"azure-openai-responses", SimpleStream
+ 	context: TranscriptContext,
+ 	options?: SimpleStreamOptions,
+ ): AssistantMessageEventStream => {
++	// Splyce TD-22: a lease needs no ambient key; explicit `apiKey` next to one is refused by `stream`
++	// before anything is leased or sent.
+ 	const apiKey = options?.apiKey;
+-	if (!apiKey) {
++	if (!apiKey && !options?.credentials) {
+ 		throw new Error(`No API key for provider: ${model.provider}`);
+ 	}
+ 
+@@ -164,7 +173,11 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
+ 		apiKey,
+ 		apiVersion,
+ 		dangerouslyAllowBrowser: true,
+-		fetch: options?.fetch,
++		// Splyce: with a lease every send re-leases the secret and overwrites the api-key header, so the
++		// placeholder the SDK signs requests with never reaches the wire (including on SDK retries).
++		fetch: options?.credentials
++			? createLeasedFetch(options.credentials, "api-key", options.fetch)
++			: options?.fetch,
+ 		defaultHeaders: headers,
+ 		baseURL: baseUrl,
+ 	});
+diff --git a/vendor/pi/packages/ai/src/api/bedrock-converse-stream.ts b/vendor/pi/packages/ai/src/api/bedrock-converse-stream.ts
+index 7a7740f06e75e44e5d34c5587c377b0a3ef05801..a7c9301590111fde2fcdcf057c936ce7edf222dc 100644
+--- a/vendor/pi/packages/ai/src/api/bedrock-converse-stream.ts
++++ b/vendor/pi/packages/ai/src/api/bedrock-converse-stream.ts
+@@ -27,6 +27,7 @@ import type { BuildMiddleware, DeserializeMiddleware, DocumentType, HttpResponse
+ import { HttpProxyAgent } from "http-proxy-agent";
+ import { HttpsProxyAgent } from "https-proxy-agent";
+ import { calculateCost } from "../models.ts";
++import { assertCredentialOptions, redactorOf, withLeasedSecret } from "../splyce-credentials.ts";
+ import type {
+ 	Api,
+ 	AssistantMessage,
+@@ -158,17 +159,35 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
+ 		};
+ 
+ 		const openBlocks: OpenBlocks = new Map();
++		// Splyce: any active leased secret is replaced before an error message reaches the output or an observer.
++		const redact = redactorOf(options);
+ 
+ 		// A profile explicitly configured through pi's auth flow (the `profile`
+ 		// option or scoped `AWS_PROFILE` on the stored credential's env) must win
+ 		// over ambient AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY. The SDK default
+ 		// chain already prefers a configured profile over env keys, but only when
+ 		// `credentials` is not set on the client config. See #6957.
+-		const optionsProfile = options.profile || options.env?.AWS_PROFILE;
++		// Splyce TD-22: a lease is the only identity ΓÇö profile, env keys, bearer tokens and skip-auth
++		// dummies are ambient sources and are not configured alongside it.
++		const leasedCredentials = options.credentials;
++		const optionsProfile = leasedCredentials ? undefined : options.profile || options.env?.AWS_PROFILE;
+ 		const config: BedrockRuntimeClientConfig = {
+-			profile: optionsProfile || getProviderEnvValue("AWS_PROFILE", options.env),
++			profile: leasedCredentials
++				? undefined
++				: optionsProfile || getProviderEnvValue("AWS_PROFILE", options.env),
+ 			customUserAgent: bedrockUserAgent(options.identity),
+ 		};
++		if (leasedCredentials) {
++			// The secret never sits in client options: the provider leases it on invocation. @aws-sdk/core wraps
++			// this provider in @smithy/core memoizeIdentityProvider, so a resolved identity that carries no
++			// expiration is reused for the life of the client: retries inside one send share the first lease and a
++			// mid-send revocation is not re-checked. A lease authorises exactly one physical send, so the SDK's own
++			// retry policy is off for this client; a new BedrockRuntimeClient is built for every stream() call, so
++			// the next send leases again and a revoked or denied lease fails there. The secret is the platform's
++			// access-key identity as JSON (see parseLeasedBedrockCredentials).
++			config.maxAttempts = 1;
++			config.credentials = async () => withLeasedSecret(leasedCredentials, parseLeasedBedrockCredentials);
++		}
+ 		const configuredRegion = getConfiguredBedrockRegion(options);
+ 		const hasAmbientConfiguredProfile = Boolean(getProviderEnvValue("AWS_PROFILE"));
+ 		const endpointRegion = getStandardBedrockEndpointRegion(model.baseUrl);
+@@ -185,13 +204,15 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
+ 			config.endpoint = model.baseUrl;
+ 		}
+ 
+-		// Resolve bearer token for Bedrock API key auth.
+-		const skipAuth = getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";
+-		const bearerToken =
+-			options.bearerToken ||
+-			options.apiKey ||
+-			getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) ||
+-			undefined;
++		// Resolve bearer token for Bedrock API key auth. A lease disables every ambient auth source here.
++		const skipAuth =
++			!leasedCredentials && getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";
++		const bearerToken = leasedCredentials
++			? undefined
++			: options.bearerToken ||
++				options.apiKey ||
++				getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) ||
++				undefined;
+ 		const useBearerToken = bearerToken !== undefined && !skipAuth;
+ 
+ 		// in Node.js/Bun environment only
+@@ -219,7 +240,7 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
+ 			}
+ 
+ 			const credentials = getConfiguredBedrockCredentials(options.env);
+-			if (!skipAuth && credentials && !optionsProfile) {
++			if (!leasedCredentials && !skipAuth && credentials && !optionsProfile) {
+ 				config.credentials = credentials;
+ 			}
+ 
+@@ -253,6 +274,12 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
+ 		let responseRequestId: string | undefined;
+ 
+ 		try {
++			// Refuse a second identity source before any client is built or any request is signed; the catch
++			// below redacts the message, so a lease can never leak through the failure.
++			assertCredentialOptions(options);
++			if (options.credentials && options.bearerToken !== undefined) {
++				throw new Error("credentials and bearerToken are mutually exclusive");
++			}
+ 			const supportsStrictMode = model.compat?.supportsStrictMode ?? false;
+ 			const client = new BedrockRuntimeClient(config);
+ 			let observedRawResponse = false;
+@@ -354,7 +381,7 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
+ 		} catch (error) {
+ 			flushOpenBlocks(openBlocks, output);
+ 			output.stopReason = options.signal?.aborted ? "aborted" : "error";
+-			output.errorMessage = formatBedrockError(error);
++			output.errorMessage = redact(formatBedrockError(error));
+ 			if (output.stopReason === "error") {
+ 				appendBedrockFailureDiagnostic(output, error, responseRequestId);
+ 			}
+@@ -1214,6 +1241,45 @@ function getConfiguredBedrockRegion(options: BedrockOptions): string | undefined
+ 	);
+ }
+ 
++/**
++ * Splyce TD-22: the leased secret for Bedrock is the platform's access-key identity as JSON ΓÇö
++ * `{"accessKeyId","secretAccessKey","sessionToken"?}`. Anything else fails closed before signing, and
++ * the messages below never echo the secret itself.
++ */
++function parseLeasedBedrockCredentials(secret: string): LeasedBedrockAccessKeys {
++	let parsed: unknown;
++	try {
++		parsed = JSON.parse(secret);
++	} catch {
++		throw new Error("Bedrock credential lease is not valid JSON");
++	}
++	const record = parsed as {
++		accessKeyId?: unknown;
++		secretAccessKey?: unknown;
++		sessionToken?: unknown;
++	};
++	if (typeof record?.accessKeyId !== "string" || record.accessKeyId.length === 0) {
++		throw new Error("Bedrock credential lease has no accessKeyId");
++	}
++	if (typeof record.secretAccessKey !== "string" || record.secretAccessKey.length === 0) {
++		throw new Error("Bedrock credential lease has no secretAccessKey");
++	}
++	if (record.sessionToken !== undefined && typeof record.sessionToken !== "string") {
++		throw new Error("Bedrock credential lease sessionToken is not a string");
++	}
++	return {
++		accessKeyId: record.accessKeyId,
++		secretAccessKey: record.secretAccessKey,
++		...(record.sessionToken ? { sessionToken: record.sessionToken } : {}),
++	};
++}
++
++type LeasedBedrockAccessKeys = {
++	accessKeyId: string;
++	secretAccessKey: string;
++	sessionToken?: string;
++};
++
+ function getConfiguredBedrockCredentials(env?: ProviderEnv): BedrockRuntimeClientConfig["credentials"] | undefined {
+ 	const accessKeyId = getProviderEnvValue("AWS_ACCESS_KEY_ID", env);
+ 	const secretAccessKey = getProviderEnvValue("AWS_SECRET_ACCESS_KEY", env);
+diff --git a/vendor/pi/packages/ai/src/types.ts b/vendor/pi/packages/ai/src/types.ts
+index e9b43c274a8d3b8f21ecc459b081e03b75a7af17..db05f4c0c641747b972e1d4d014dbcf6336b0f7e 100644
+--- a/vendor/pi/packages/ai/src/types.ts
++++ b/vendor/pi/packages/ai/src/types.ts
+@@ -221,7 +221,8 @@ export interface ProviderRequestOptions<TModel = Model<Api>> {
+ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
+ 	/**
+ 	 * Splyce: leased credential from the native admission layer. Mutually exclusive with `apiKey`; when set, no
+-	 * environment or fallback credential is used. Supported by the Anthropic, Google and Vertex adapters first.
++	 * environment or fallback credential is used. Supported by the Anthropic, Google, Vertex, Bedrock and Azure
++	 * adapters (see `CREDENTIAL_APIS`).
+ 	 */
+ 	credentials?: SplyceCredentials;
+ 	/**
+diff --git a/vendor/pi/packages/ai/src/utils/model-operations.ts b/vendor/pi/packages/ai/src/utils/model-operations.ts
+index 665f935491e1f29f4e7267c9e419e4c3b16a7f30..6a6abb2eba84e8050fabf4fd252e3a01db672841 100644
+--- a/vendor/pi/packages/ai/src/utils/model-operations.ts
++++ b/vendor/pi/packages/ai/src/utils/model-operations.ts
+@@ -18,6 +18,8 @@ import { ModelsError } from "./models-error.ts";
+ /** Only adapters bound to native credentials may bypass ordinary provider auth. */
+ export const CREDENTIAL_APIS: ReadonlySet<string> = new Set([
+ 	"anthropic-messages",
++	"azure-openai-responses",
++	"bedrock-converse-stream",
+ 	"google-generative-ai",
+ 	"google-vertex",
+ 	"openai-completions",
+diff --git a/vendor/pi/packages/ai/test/splyce-bedrock-lease-retry.test.ts b/vendor/pi/packages/ai/test/splyce-bedrock-lease-retry.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6a00f6af30960a55feb66690c9eefe36956b8602
+--- /dev/null
++++ b/vendor/pi/packages/ai/test/splyce-bedrock-lease-retry.test.ts
+@@ -0,0 +1,130 @@
++// TD-22 / C4: a leased Bedrock send must make exactly one physical request.
++//
++// The leased identity is memoized per client (@aws-sdk/core wraps the provider in
++// @smithy/core memoizeIdentityProvider, which never re-invokes a provider whose identity carries no
++// expiration), so a retry inside one send reuses the first lease. That is only acceptable if the leased
++// path never lets the SDK send a second request on its own: a mid-send revocation must not be followed by
++// an unauthorized send, and a revoked lease must not be skipped by a transport-level retry either.
++//
++// The fixtures in splyce-credentials-bedrock-azure.test.ts replace the SDK client, so they cannot count
++// physical requests. This runs the real @aws-sdk/client-bedrock-runtime against a loopback HTTP endpoint.
++import { createServer } from "node:http";
++import { afterEach, describe, expect, it } from "vitest";
++
++import type { BedrockOptions } from "../src/api/bedrock-converse-stream.ts";
++import { stream } from "../src/compat.ts";
++import { getBuiltinModel } from "../src/providers/all.ts";
++import type { SplyceCredentials } from "../src/splyce-credentials.ts";
++import type { Context } from "../src/types.ts";
++
++const SECRET = "lease-secret-0123456789abcdef";
++const LEASED_KEY_JSON = JSON.stringify({
++	accessKeyId: "AKIALEASED",
++	secretAccessKey: SECRET,
++	sessionToken: "leased-session-token",
++});
++
++const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
++
++/**
++ * Bedrock runtime defaults to a NodeHttp2Handler, which cannot talk to a plain loopback HTTP/1 server, and
++ * an unset region would make the SDK resolve credentials from the ambient chain. Both are pinned here so a
++ * request that never leaves the process fails the request count instead of silently passing it.
++ */
++const env = {
++	AWS_ACCESS_KEY_ID: "AKIACONTROL",
++	AWS_SECRET_ACCESS_KEY: "control-secret-access-key",
++	AWS_REGION: "us-east-1",
++	AWS_BEDROCK_FORCE_HTTP1: "1",
++};
++
++type Recorder = { requests: string[]; leaseUses: number };
++
++/**
++ * A loopback Bedrock endpoint that always answers with a retryable status, so the SDK's own retry policy is
++ * the only thing that could produce a second physical request. The lease revokes itself the moment the first
++ * identity is handed out, which is exactly the mid-send revocation the lease contract must survive.
++ */
++async function recordingEndpoint(): Promise<{
++	baseUrl: string;
++	recorder: Recorder;
++	close: () => Promise<void>;
++}> {
++	const recorder: Recorder = { requests: [], leaseUses: 0 };
++	const server = createServer((request, response) => {
++		recorder.requests.push(`${request.method} ${request.url}`);
++		request.resume();
++		response.writeHead(503, { "content-type": "application/json" });
++		response.end(JSON.stringify({ message: "throttled by the recording endpoint" }));
++	});
++	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
++	const address = server.address();
++	if (address === null || typeof address === "string")
++		throw new Error("loopback endpoint has no port");
++	return {
++		baseUrl: `http://127.0.0.1:${address.port}`,
++		recorder,
++		close: () =>
++			new Promise<void>((resolve) => {
++				server.closeAllConnections();
++				server.close(() => resolve());
++			}),
++	};
++}
++
++function leasedCredentials(recorder: Recorder): SplyceCredentials {
++	let revoked = false;
++	return {
++		lease: {
++			use: async (consume) => {
++				if (revoked) throw new Error("Bedrock credential lease was revoked");
++				recorder.leaseUses += 1;
++				const identity = await consume(LEASED_KEY_JSON);
++				revoked = true;
++				return identity;
++			},
++		},
++		redact: (text) => text.split(SECRET).join("[redacted]"),
++	};
++}
++
++const bedrockModel = () => getBuiltinModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
++
++let cleanup: (() => Promise<void>) | undefined;
++afterEach(async () => {
++	await cleanup?.();
++	cleanup = undefined;
++});
++
++describe("TD-22 bedrock: a leased send does not retry past its lease", () => {
++	it("control: an unleased send really retries the loopback endpoint", async () => {
++		const { baseUrl, recorder, close } = await recordingEndpoint();
++		cleanup = close;
++
++		await stream({ ...bedrockModel(), baseUrl }, context, {
++			cacheRetention: "none",
++			env,
++		} satisfies BedrockOptions).result();
++
++		// Without a lease the SDK's own retry policy must be observable, otherwise the leased assertion
++		// below could pass because no request reached the endpoint at all.
++		expect(recorder.requests.length).toBeGreaterThanOrEqual(2);
++	}, 60_000);
++
++	it("makes one physical request when a retryable response follows the lease's first use", async () => {
++		const { baseUrl, recorder, close } = await recordingEndpoint();
++		cleanup = close;
++
++		const result = await stream({ ...bedrockModel(), baseUrl }, context, {
++			cacheRetention: "none",
++			env,
++			credentials: leasedCredentials(recorder),
++		} satisfies BedrockOptions).result();
++
++		// A 503 is retryable: an unmediated SDK retry would be a second physical send after the lease died.
++		expect(recorder.requests).toHaveLength(1);
++		expect(recorder.leaseUses).toBe(1);
++		// The single attempt still fails closed with a typed error result rather than hanging.
++		expect(result.stopReason).toBe("error");
++	}, 60_000);
++});
+diff --git a/vendor/pi/packages/ai/test/splyce-credentials-bedrock-azure.test.ts b/vendor/pi/packages/ai/test/splyce-credentials-bedrock-azure.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f11b3ab873e18427affe05d72e48d5c45e6c0d0d
+--- /dev/null
++++ b/vendor/pi/packages/ai/test/splyce-credentials-bedrock-azure.test.ts
+@@ -0,0 +1,297 @@
++// TD-22 / C4: the Bedrock and Azure adapters honour a leased credential the way the Anthropic, Google and Vertex
++// bindings already do (splyce-credentials.test.ts, splyce-credentials-routing.test.ts): the gate admits their APIs,
++// the secret comes from the lease per send instead of sitting in client options (Bedrock leases a fresh identity
++// for each send and reuses it for that send's retries; Azure reads the lease per fetch), every ambient
++// source loses to the lease, malformed leases fail closed, and no secret reaches an error message.
++// The AWS SDK boundary is replaced as in bedrock-credentials.test.ts; Azure runs its real SDK against a recording fetch.
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++
++const SECRET = "lease-secret-0123456789abcdef";
++const LEASED_KEY_JSON = JSON.stringify({
++	accessKeyId: "AKIALEASED",
++	secretAccessKey: SECRET,
++	sessionToken: "leased-session-token",
++});
++
++const bedrockMock = vi.hoisted(() => ({
++	constructorCalls: [] as Array<Record<string, unknown>>,
++	rejectWith: undefined as Error | undefined,
++}));
++
++vi.mock("@aws-sdk/client-bedrock-runtime", () => {
++	class BedrockRuntimeServiceException extends Error {}
++
++	class BedrockRuntimeClient {
++		constructor(config: Record<string, unknown>) {
++			bedrockMock.constructorCalls.push(config);
++		}
++
++		send(): Promise<never> {
++			return Promise.reject(bedrockMock.rejectWith ?? new Error("mock send"));
++		}
++	}
++
++	class ConverseStreamCommand {
++		readonly input: unknown;
++
++		constructor(input: unknown) {
++			this.input = input;
++		}
++	}
++
++	return {
++		BedrockRuntimeClient,
++		BedrockRuntimeServiceException,
++		ConverseStreamCommand,
++		StopReason: {
++			END_TURN: "end_turn",
++			STOP_SEQUENCE: "stop_sequence",
++			MAX_TOKENS: "max_tokens",
++			MODEL_CONTEXT_WINDOW_EXCEEDED: "model_context_window_exceeded",
++			TOOL_USE: "tool_use",
++		},
++		CachePointType: { DEFAULT: "default" },
++		CacheTTL: { ONE_HOUR: "ONE_HOUR" },
++		ConversationRole: { ASSISTANT: "assistant", USER: "user" },
++		ImageFormat: { JPEG: "jpeg", PNG: "png", GIF: "gif", WEBP: "webp" },
++		ToolResultStatus: { ERROR: "error", SUCCESS: "success" },
++	};
++});
++
++import type { BedrockOptions } from "../src/api/bedrock-converse-stream.ts";
++import { getModel, stream, streamSimple } from "../src/compat.ts";
++import { getBuiltinModel } from "../src/providers/all.ts";
++import type { SplyceCredentials } from "../src/splyce-credentials.ts";
++import type { Context } from "../src/types.ts";
++
++const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
++
++const leaseOf = (secret: string, onUse?: () => void): SplyceCredentials => ({
++	lease: {
++		use: async (consume) => {
++			onUse?.();
++			return consume(secret);
++		},
++	},
++	redact: (text) => text.split(secret).join("[redacted]"),
++});
++
++type AwsKeys = { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
++const provider = (config: Record<string, unknown>) => config.credentials as () => Promise<AwsKeys>;
++
++/** The Bedrock lease secret is the access-key identity as JSON; redaction targets the value inside it. */
++const bedrockLease = (onUse?: () => void, json = LEASED_KEY_JSON): SplyceCredentials => ({
++	lease: {
++		use: async (consume) => {
++			onUse?.();
++			return consume(json);
++		},
++	},
++	redact: (text) => text.split(SECRET).join("[redacted]"),
++});
++
++/** A recording fetch that answers 401 with `message` in the body, like an upstream rejecting a key. */
++const record401 =
++	(message: string, into: Headers[]) =>
++	async (_input: unknown, init?: RequestInit): Promise<Response> => {
++		into.push(new Headers(init?.headers));
++		return new Response(JSON.stringify({ error: { message } }), {
++			status: 401,
++			headers: { "content-type": "application/json" },
++		});
++	};
++
++describe("TD-22 bedrock: a lease is the only identity", () => {
++	const bedrockModel = () => getBuiltinModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
++
++	beforeEach(() => {
++		bedrockMock.constructorCalls.length = 0;
++		bedrockMock.rejectWith = undefined;
++	});
++
++	afterEach(() => {
++		vi.unstubAllEnvs();
++	});
++
++	async function captureConfig(options: BedrockOptions = {}): Promise<Record<string, unknown>> {
++		bedrockMock.constructorCalls.length = 0;
++		await stream(bedrockModel(), context, { cacheRetention: "none", ...options }).result();
++		expect(bedrockMock.constructorCalls).toHaveLength(1);
++		return bedrockMock.constructorCalls[0];
++	}
++
++	it("admits the api through compat instead of refusing the lease", async () => {
++		const result = await stream(bedrockModel(), context, {
++			cacheRetention: "none",
++			credentials: bedrockLease(),
++		}).result();
++		// Reaching the (mocked) send at all proves the gate did not throw "not supported".
++		expect(result.stopReason).toBe("error");
++		expect(result.errorMessage).toBe("mock send");
++	});
++
++	it("leases on first use, and every send builds a client that leases again", async () => {
++		let uses = 0;
++		const credentials = bedrockLease(() => uses++);
++		const config = await captureConfig({ credentials });
++		expect(typeof config.credentials).toBe("function");
++		expect(uses).toBe(0); // building the client leases nothing
++		expect(await provider(config)()).toEqual({
++			accessKeyId: "AKIALEASED",
++			secretAccessKey: SECRET,
++			sessionToken: "leased-session-token",
++		});
++		expect(uses).toBe(1);
++		// A resolved identity with no expiration is memoized inside the client, so a retry in this send reuses
++		// this lease; what makes a revoked lease fail is that the next send builds a new client to lease from.
++		await stream(bedrockModel(), context, { cacheRetention: "none", credentials }).result();
++		expect(bedrockMock.constructorCalls).toHaveLength(2);
++		expect(uses).toBe(1); // the second client has leased nothing until it signs
++		const second = bedrockMock.constructorCalls[1] as Record<string, unknown> | undefined;
++		expect(second).toBeDefined();
++		await provider(second ?? {})();
++		expect(uses).toBe(2);
++	});
++
++	it("fails the attempt when the lease is revoked", async () => {
++		const revoked: SplyceCredentials = {
++			lease: {
++				use: async () => {
++					throw new Error("CREDENTIAL_REVOKED");
++				},
++			},
++			redact: (text) => text,
++		};
++		const config = await captureConfig({ credentials: revoked });
++		await expect(provider(config)()).rejects.toThrow("CREDENTIAL_REVOKED");
++	});
++
++	it("loses to no ambient source: env keys, profile, bearer token and skip-auth are ignored", async () => {
++		vi.stubEnv("AWS_ACCESS_KEY_ID", "AKIAAMBIENT");
++		vi.stubEnv("AWS_SECRET_ACCESS_KEY", "ambient-secret");
++		vi.stubEnv("AWS_PROFILE", "ambient-profile");
++		vi.stubEnv("AWS_BEARER_TOKEN_BEDROCK", "ambient-bearer");
++		vi.stubEnv("AWS_BEDROCK_SKIP_AUTH", "1");
++
++		const config = await captureConfig({ credentials: bedrockLease() });
++
++		expect(config.profile).toBeUndefined();
++		expect(config.token).toBeUndefined();
++		expect(typeof config.credentials).toBe("function");
++		expect(await provider(config)()).toEqual({
++			accessKeyId: "AKIALEASED",
++			secretAccessKey: SECRET,
++			sessionToken: "leased-session-token",
++		});
++		expect(JSON.stringify(config)).not.toContain("ambient-");
++		expect(JSON.stringify(config)).not.toContain("AKIAAMBIENT");
++	});
++
++	it("fails closed on a malformed lease without echoing the secret", async () => {
++		const truncated = `{"accessKeyId": "${SECRET}"`; // deliberately not closed JSON
++		const bad = await captureConfig({ credentials: bedrockLease(undefined, truncated) });
++		const jsonFailure = (await provider(bad)().catch((error: unknown) => error)) as Error;
++		expect(jsonFailure.message).toBe("Bedrock credential lease is not valid JSON");
++		expect(jsonFailure.message).not.toContain(SECRET);
++
++		const partial = await captureConfig({
++			credentials: bedrockLease(undefined, JSON.stringify({ accessKeyId: "AKIAONLY" })),
++		});
++		await expect(provider(partial)()).rejects.toThrow(
++			"Bedrock credential lease has no secretAccessKey",
++		);
++	});
++
++	it("redacts the leased secret from a provider failure", async () => {
++		bedrockMock.rejectWith = new Error(`upstream refused key ${SECRET}`);
++		const result = await stream(bedrockModel(), context, {
++			cacheRetention: "none",
++			credentials: bedrockLease(),
++		}).result();
++		expect(result.stopReason).toBe("error");
++		expect(result.errorMessage).toContain("[redacted]");
++		expect(result.errorMessage).not.toContain(SECRET);
++	});
++
++	it("refuses apiKey next to a lease before a client exists", async () => {
++		const result = await stream(bedrockModel(), context, {
++			cacheRetention: "none",
++			credentials: bedrockLease(),
++			apiKey: "explicit-key",
++		}).result();
++		expect(result.errorMessage).toMatch(/mutually exclusive/);
++		expect(bedrockMock.constructorCalls).toHaveLength(0);
++	});
++});
++
++describe("TD-22 azure: a lease is the only identity", () => {
++	const azureModel = () => getModel("azure", "gpt-4o-mini");
++
++	beforeEach(() => {
++		// The simple-options bridge only forwards the shared field list, so the endpoint comes from the
++		// scoped env channel (the same way production configures Azure through provider env).
++		vi.stubEnv("AZURE_OPENAI_BASE_URL", "https://my-resource.openai.azure.com");
++	});
++
++	afterEach(() => {
++		vi.unstubAllEnvs();
++	});
++
++	it("admits the api through compat instead of refusing the lease", async () => {
++		const sent: Headers[] = [];
++		const result = await streamSimple(azureModel(), context, {
++			credentials: leaseOf(SECRET),
++			fetch: record401("upstream rejected request", sent),
++			maxRetries: 0,
++		}).result();
++		// Reaching the wire at all proves the gate did not throw "not supported".
++		expect(sent).toHaveLength(1);
++		expect(result.stopReason).toBe("error");
++	});
++
++	it("leases the api-key on every send: never the placeholder and never an ambient key", async () => {
++		vi.stubEnv("AZURE_OPENAI_API_KEY", "ambient-azure-key");
++		vi.stubEnv("OPENAI_API_KEY", "ambient-openai-key");
++		const sent: Headers[] = [];
++
++		const result = await streamSimple(azureModel(), context, {
++			credentials: leaseOf(SECRET),
++			fetch: record401("upstream rejected request", sent),
++			maxRetries: 0,
++		}).result();
++
++		expect(result.stopReason).toBe("error");
++		expect(sent.length).toBeGreaterThan(0);
++		for (const headers of sent) {
++			const values = [...headers.values()].join(" ");
++			expect(headers.get("api-key")).toBe(SECRET);
++			expect(headers.get("x-api-key")).toBeNull();
++			expect(values).not.toContain("splyce-leased-placeholder");
++			expect(values).not.toContain("ambient-");
++		}
++	});
++
++	it("redacts the leased secret from a provider error", async () => {
++		const sent: Headers[] = [];
++		const result = await streamSimple(azureModel(), context, {
++			credentials: leaseOf(SECRET),
++			fetch: record401(`bad key ${SECRET}`, sent),
++			maxRetries: 0,
++		}).result();
++		expect(result.stopReason).toBe("error");
++		expect(result.errorMessage).toContain("[redacted]");
++		expect(result.errorMessage).not.toContain(SECRET);
++	});
++
++	it("refuses apiKey next to a lease before anything is leased or sent", async () => {
++		const sent: Headers[] = [];
++		const result = await streamSimple(azureModel(), context, {
++			credentials: leaseOf(SECRET),
++			apiKey: "explicit-key",
++			fetch: record401("must not be sent", sent),
++			maxRetries: 0,
++		}).result();
++		expect(result.errorMessage).toMatch(/mutually exclusive/);
++		expect(sent).toHaveLength(0);
++	});
++});
+\ No newline at end of file

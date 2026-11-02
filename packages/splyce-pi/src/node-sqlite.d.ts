@@ -34,6 +34,11 @@ declare module "node:sqlite" {
 
 // Minimal ambient typings for `node:fs` — only the surface store.ts uses.
 declare module "node:fs" {
+  export function lstatSync(
+    path: string,
+    options: { throwIfNoEntry: false },
+  ): { isSymbolicLink(): boolean } | undefined;
+  export function statSync(path: string): { nlink: number };
   export function copyFileSync(src: string, dest: string): void;
   export function existsSync(path: string): boolean;
   export function readFileSync(path: string, encoding: string): string;

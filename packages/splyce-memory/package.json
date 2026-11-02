@@ -1,0 +1,20 @@
+{
+  "name": "@splyce/memory",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@splyce/pi": "file:../splyce-pi",
+    "@splyce/retrieval": "file:../splyce-retrieval"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/memory.d.ts",
+      "import": "./dist/memory.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "AGPL-3.0-only"
+}

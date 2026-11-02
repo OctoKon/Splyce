@@ -1,4 +1,6 @@
 mod credentials;
+#[cfg(windows)]
+mod inventory;
 pub mod ipc;
 pub mod process;
 mod workspace;

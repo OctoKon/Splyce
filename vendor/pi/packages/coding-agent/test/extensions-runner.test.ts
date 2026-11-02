@@ -80,12 +80,12 @@ describe("ExtensionRunner", () => {
 	};
 
 	const extensionActions: ExtensionActions = {
-		sendMessage: () => {},
-		sendUserMessage: () => {},
-		appendEntry: () => {},
-		setSessionName: () => {},
+		sendMessage: async () => {},
+		sendUserMessage: async () => {},
+		appendEntry: async () => {},
+		setSessionName: async () => {},
 		getSessionName: () => undefined,
-		setLabel: () => {},
+		setLabel: async () => {},
 		getActiveTools: () => [],
 		getAllTools: () => [],
 		getSettings: () => ({}),
@@ -94,7 +94,7 @@ describe("ExtensionRunner", () => {
 		getCommands: () => [],
 		setModel: async () => false,
 		getThinkingLevel: () => "off",
-		setThinkingLevel: () => {},
+		setThinkingLevel: async () => {},
 	};
 
 	const extensionContextActions: ExtensionContextActions = {

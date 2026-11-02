@@ -33,14 +33,20 @@ async function fixture(t, options = {}) {
     resolveReference: () => true,
   };
   const args = { model: "fixture-model", stream: true, messages: [] };
-  const semantic = {
-    schema: "splyce-provider-request-v1",
-    apiFamily: "openai-completions",
-    endpointRef: "endpoint",
-    model: "fixture-model",
-    context: { messages: [], tools: [] },
-    options: {},
-  };
+  const semantic = options.catalog
+    ? {
+        schema: "splyce-models-request-v1",
+        providerConnectionId: "connection",
+        endpointRef: "endpoint",
+      }
+    : {
+        schema: "splyce-provider-request-v1",
+        apiFamily: "openai-completions",
+        endpointRef: "endpoint",
+        model: "fixture-model",
+        context: { messages: [], tools: [] },
+        options: {},
+      };
   const controller = new AbortController();
   let connection = {
     ...records.providerConnection,
@@ -75,6 +81,15 @@ async function fixture(t, options = {}) {
       if (options.redirect) {
         res.writeHead(302, { location: "/elsewhere" });
         res.end();
+      } else if (options.catalog) {
+        res.writeHead(200, {
+          "content-type": options.contentType ?? "application/json",
+        });
+        if (options.finish) options.finish(res);
+        else
+          res.end(
+            options.catalogPayload ?? '{"data":[{"id":"fixture-model"}]}',
+          );
       } else {
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.write("data: fixture\n\n");
@@ -84,7 +99,7 @@ async function fixture(t, options = {}) {
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const url = `http://127.0.0.1:${server.address().port}/chat/completions`;
+  const url = `http://127.0.0.1:${server.address().port}/${options.catalog ? "models" : "chat/completions"}`;
   const observeIdentity = () => {
     const stat = statSync(dir, { bigint: true });
     assert.ok(stat.isDirectory());
@@ -182,6 +197,9 @@ async function fixture(t, options = {}) {
   const binding = {
     permit,
     args: semantic,
+    ...(options.catalog
+      ? { requestKind: "models", catalogTimeoutMs: options.catalogTimeoutMs }
+      : {}),
     request: {
       providerConnectionId: "connection",
       connectionRevision: "revision1",
@@ -671,4 +689,178 @@ test("a Store-minted grant for another origin cannot reach credentials or the se
   assert.equal(f.received, 0);
   assert.equal(f.frames.length, 0);
   assert.equal(failure?.code, "GRANT_MISMATCH");
+});
+
+test("catalog GET uses the native lease, complete body, receipts, and redacts reflected credentials", async (t) => {
+  const seen = [];
+  const escaped = [...secret]
+    .map(
+      (character) =>
+        `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    )
+    .join("");
+  const f = await fixture(t, {
+    catalog: true,
+    catalogPayload: JSON.stringify({
+      data: [{ id: secret, title: `model ${secret}` }],
+      [secret]: "echo",
+    }).replaceAll(secret, escaped),
+    received: (req) =>
+      seen.push({
+        method: req.method,
+        url: req.url,
+        accept: req.headers.accept,
+      }),
+  });
+  const value = await f.owner.withCatalog(f.scope);
+  assert.deepEqual(seen, [
+    { method: "GET", url: "/models", accept: "application/json" },
+  ]);
+  assert.deepEqual(f.bodies, [""]);
+  assert.deepEqual(value, {
+    data: [{ id: "[REDACTED]", title: "model [REDACTED]" }],
+    "[REDACTED]": "echo",
+  });
+  assert.deepEqual(f.history[0].slice(-3), [
+    ["action", "proposed"],
+    ["action", "approved"],
+    ["action", "running"],
+  ]);
+  assert.equal(
+    f.store.list("w-demo").records.find((r) => r.kind === "outcome").record
+      .effectState,
+    "observed-success",
+  );
+  assert.deepEqual(f.frames, [
+    "credential.scope.open",
+    "credential.read",
+    "credential.scope.close",
+  ]);
+  await assert.rejects(f.owner.withCatalog(f.scope));
+});
+
+test("catalog scope cannot be used through the adapter port", async (t) => {
+  const f = await fixture(t, { catalog: true });
+  await assert.rejects(f.owner.port.withRequest(f.scope, async () => {}));
+  assert.equal(f.received, 0);
+  assert.deepEqual(f.frames, []);
+  assert.deepEqual(await f.owner.withCatalog(f.scope), {
+    data: [{ id: "fixture-model" }],
+  });
+});
+
+test("catalog scope binds semantic request, selected connection, and admitted models URL", async (t) => {
+  const f = await fixture(t, { catalog: true, deferScope: true });
+  for (const patch of [
+    { args: { ...f.semantic, endpointRef: "other" } },
+    { args: { ...f.semantic, providerConnectionId: "other" } },
+    { args: { ...f.semantic, extra: "unreviewed" } },
+    { admittedUrl: f.url.replace("/models", "/chat/completions") },
+    { catalogTimeoutMs: 10_001 },
+  ])
+    assert.throws(() => f.owner.createScope({ ...f.binding, ...patch }));
+  assert.equal(f.received, 0);
+  assert.deepEqual(f.frames, []);
+});
+
+for (const [name, options] of [
+  ["redirect", { redirect: true }],
+  ["wrong media type", { contentType: "text/plain" }],
+  ["malformed JSON", { catalogPayload: "{" }],
+  [
+    "chunked oversized body",
+    {
+      finish: (res) => {
+        res.write("x".repeat(600_000));
+        res.end("x".repeat(600_000));
+      },
+    },
+  ],
+])
+  test(`catalog ${name} fails with one send and uncertain outcome`, async (t) => {
+    const f = await fixture(t, { catalog: true, ...options });
+    await assert.rejects(
+      f.owner.withCatalog(f.scope),
+      (error) => !String(error).includes(secret),
+    );
+    assert.equal(f.received, 1);
+    assert.equal(f.frames.at(-1), "credential.scope.close");
+    assert.equal(
+      f.store.list("w-demo").records.find((r) => r.kind === "outcome").record
+        .effectState,
+      "uncertain",
+    );
+  });
+
+test("catalog total deadline aborts a server that withholds headers", async (t) => {
+  let closed;
+  const disconnected = new Promise((resolve) => (closed = resolve));
+  const f = await fixture(t, {
+    catalog: true,
+    catalogTimeoutMs: 40,
+    withholdHeaders: true,
+    received: (_req, res) => res.once("close", closed),
+  });
+  await assert.rejects(f.owner.withCatalog(f.scope), {
+    code: "MODEL_CATALOG_TIMEOUT",
+  });
+  await disconnected;
+  assert.equal(f.received, 1);
+  assert.equal(f.frames.at(-1), "credential.scope.close");
+});
+
+test("catalog total deadline also aborts an incomplete response body", async (t) => {
+  const f = await fixture(t, {
+    catalog: true,
+    catalogTimeoutMs: 40,
+    finish: (res) => res.write('{"data":['),
+  });
+  await assert.rejects(f.owner.withCatalog(f.scope), {
+    code: "MODEL_CATALOG_TIMEOUT",
+  });
+  assert.equal(f.received, 1);
+  assert.equal(f.frames.at(-1), "credential.scope.close");
+  assert.equal(
+    f.store.list("w-demo").records.find((r) => r.kind === "outcome").record
+      .effectState,
+    "uncertain",
+  );
+});
+
+test("catalog cancellation during body consumption aborts and records uncertainty", async (t) => {
+  let started;
+  const partial = new Promise((resolve) => (started = resolve));
+  const f = await fixture(t, {
+    catalog: true,
+    finish: (res) => {
+      res.write('{"data":[');
+      started();
+    },
+  });
+  const operation = f.owner.withCatalog(f.scope);
+  const rejected = assert.rejects(operation);
+  await partial;
+  f.controller.abort();
+  await rejected;
+  assert.equal(f.received, 1);
+  assert.equal(f.frames.at(-1), "credential.scope.close");
+  assert.equal(
+    f.store.list("w-demo").records.find((r) => r.kind === "outcome").record
+      .effectState,
+    "uncertain",
+  );
+});
+
+test("catalog grant denial has no credential read or physical request", async (t) => {
+  const f = await fixture(t, {
+    catalog: true,
+    deferScope: true,
+    grantOrigin: "https://other.invalid:443",
+  });
+  await assert.rejects(
+    async () => f.owner.withCatalog(f.owner.createScope(f.binding)),
+    { code: "GRANT_MISMATCH" },
+  );
+  assert.equal(f.received, 0);
+  assert.deepEqual(f.frames, []);
 });

@@ -34,10 +34,16 @@ export interface NativeProviderSemanticRequest {
   readonly endpointRef: string;
   readonly model: string;
   readonly context: {
+    readonly systemPrompt?: string;
     readonly messages: readonly JsonValue[];
     readonly tools: readonly JsonValue[];
   };
   readonly options: Readonly<Record<string, JsonValue>>;
+}
+export interface NativeModelsSemanticRequest {
+  readonly schema: "splyce-models-request-v1";
+  readonly providerConnectionId: string;
+  readonly endpointRef: string;
 }
 export interface NativeProviderEvent {
   readonly type: string;
@@ -55,9 +61,24 @@ function freeze<T>(value: T): T {
   }
   return value;
 }
+function redactJson(value: unknown, redact: (text: string) => string): unknown {
+  if (typeof value === "string") return redact(value);
+  if (Array.isArray(value))
+    return value.map((item) => redactJson(item, redact));
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        redact(key),
+        redactJson(item, redact),
+      ]),
+    );
+  return value;
+}
 export interface NativeProviderBinding {
   readonly permit: ActionPermit;
-  readonly args: NativeProviderSemanticRequest;
+  readonly args: NativeProviderSemanticRequest | NativeModelsSemanticRequest;
+  readonly requestKind?: "models";
+  readonly catalogTimeoutMs?: number;
   readonly parentToolCallId?: string;
   readonly request: CredentialRequest;
   readonly connection: ProviderConnectionRecord;
@@ -74,6 +95,7 @@ export interface NativeProviderBinding {
 type State = NativeProviderBinding & {
   handle?: CredentialHandle;
   sent: boolean;
+  catalogTimedOut: boolean;
   terminal: "pending" | "done" | "failed";
 };
 function denied(): never {
@@ -114,6 +136,7 @@ export class NativeProviderRequests {
   createScope(binding: NativeProviderBinding): NativeProviderScope {
     const url = new URL(binding.admittedUrl);
     const local = ["127.0.0.1", "[::1]"].includes(url.hostname);
+    const catalog = binding.requestKind === "models";
     if (
       url.href !== binding.admittedUrl ||
       url.username ||
@@ -126,7 +149,14 @@ export class NativeProviderRequests {
       ) ||
       !["openai-completions", "openai-responses"].includes(binding.api) ||
       binding.connection.apiFamily !== binding.api ||
-      !binding.modelId ||
+      (binding.requestKind !== undefined && !catalog) ||
+      (!catalog && !binding.modelId) ||
+      (catalog && !url.pathname.endsWith("/models")) ||
+      (catalog &&
+        binding.catalogTimeoutMs !== undefined &&
+        (!Number.isSafeInteger(binding.catalogTimeoutMs) ||
+          binding.catalogTimeoutMs < 1 ||
+          binding.catalogTimeoutMs > 10_000)) ||
       !Number.isSafeInteger(binding.maxRequestBytes) ||
       binding.maxRequestBytes < 1 ||
       !Number.isSafeInteger(binding.headersTimeoutMs) ||
@@ -144,18 +174,26 @@ export class NativeProviderRequests {
       ...binding,
       args: freeze(structuredClone(binding.args)),
       sent: false,
+      catalogTimedOut: false,
       terminal: "pending",
       permit: structuredClone(binding.permit),
       connection: structuredClone(binding.connection),
       request: Object.freeze({ ...binding.request }),
     };
     if (
-      state.args.schema !== "splyce-provider-request-v1" ||
-      state.args.apiFamily !== state.api ||
-      state.args.endpointRef !== state.request.endpointRef ||
-      state.args.model !== state.modelId ||
-      !Array.isArray(state.args.context.messages) ||
-      !Array.isArray(state.args.context.tools) ||
+      (catalog
+        ? state.args.schema !== "splyce-models-request-v1" ||
+          state.args.providerConnectionId !==
+            state.connection.providerConnectionId ||
+          state.args.endpointRef !== state.request.endpointRef ||
+          Object.keys(state.args).sort().join() !==
+            "endpointRef,providerConnectionId,schema"
+        : state.args.schema !== "splyce-provider-request-v1" ||
+          state.args.apiFamily !== state.api ||
+          state.args.endpointRef !== state.request.endpointRef ||
+          state.args.model !== state.modelId ||
+          !Array.isArray(state.args.context.messages) ||
+          !Array.isArray(state.args.context.tools)) ||
       actionArgumentsDigest(state.args) !== state.permit.argumentsDigest
     )
       denied();
@@ -167,14 +205,37 @@ export class NativeProviderRequests {
   /** Native factory only: this exact frozen object also supplies the adapter input. */
   semantic(scope: NativeProviderScope): NativeProviderSemanticRequest {
     const state = this.#scopes.get(scope) ?? this.#active.get(scope);
-    if (!state) denied();
+    if (!state || state.args.schema !== "splyce-provider-request-v1") denied();
     return state.args;
+  }
+
+  /** Native owner only: bounded catalog read using the same policy and credential lease. */
+  async withCatalog(scope: NativeProviderScope): Promise<unknown> {
+    const state = this.#scopes.get(scope);
+    if (!state || state.requestKind !== "models") denied();
+    try {
+      return await this.#withRequest(
+        scope,
+        async (request) => {
+          const response = await request.fetch(state.admittedUrl, {
+            method: "GET",
+          });
+          const json = await response.text();
+          return redactJson(JSON.parse(json) as unknown, request.redact);
+        },
+        true,
+      );
+    } catch (error) {
+      if (state.catalogTimedOut)
+        throw new AdmissionError("MODEL_CATALOG_TIMEOUT");
+      throw error;
+    }
   }
 
   /** Native factory's existing actual-adapter onEvent bridge; never adapter-facing. */
   observe(scope: NativeProviderScope, event: NativeProviderEvent): void {
     const state = this.#active.get(scope);
-    if (!state || !state.sent) denied();
+    if (!state || !state.sent || state.requestKind === "models") denied();
     this.#check(state);
     if (event.type === "error") state.terminal = "failed";
     if (event.type === "done") {
@@ -223,9 +284,10 @@ export class NativeProviderRequests {
     consume: (
       request: import("./provider-admission.js").NativeProviderRequest,
     ) => Promise<T>,
+    catalog = false,
   ): Promise<T> {
     const state = this.#scopes.get(scope);
-    if (!state) denied();
+    if (!state || (state.requestKind === "models") !== catalog) denied();
     this.#scopes.delete(scope);
     const { permit, request } = state;
     const signal = request.signal ?? new AbortController().signal;
@@ -239,6 +301,7 @@ export class NativeProviderRequests {
     let bodySettled = false;
     let pending: Promise<unknown> | undefined;
     let transportPending: Promise<Response> | undefined;
+    let catalogTimer: ReturnType<typeof setTimeout> | undefined;
     let sent = false;
     let live = true;
     this.#policy.reserve(permit.toolCallId, permit.toolName, signal);
@@ -296,60 +359,87 @@ export class NativeProviderRequests {
                       if (
                         !live ||
                         sent ||
-                        typeof requestBody !== "string" ||
-                        method !== "POST"
+                        (state.requestKind === "models"
+                          ? method !== "GET" || requestBody !== undefined
+                          : typeof requestBody !== "string" ||
+                            method !== "POST")
                       )
                         denied();
                       if (
                         url !== state.admittedUrl ||
-                        new TextEncoder().encode(requestBody).byteLength >
-                          state.maxRequestBytes
+                        (state.requestKind !== "models" &&
+                          new TextEncoder().encode(requestBody as string)
+                            .byteLength > state.maxRequestBytes)
                       )
                         denied();
-                      const body = JSON.parse(requestBody) as Record<
-                        string,
-                        unknown
-                      >;
-                      if (
-                        !body ||
-                        body.model !== state.modelId ||
-                        body.stream !== true
-                      )
-                        denied();
+                      if (state.requestKind !== "models") {
+                        const body = JSON.parse(
+                          requestBody as string,
+                        ) as Record<string, unknown>;
+                        if (
+                          !body ||
+                          body.model !== state.modelId ||
+                          body.stream !== true
+                        )
+                          denied();
+                      }
                       // Only the reviewed options cross the physical transport boundary.
                       const headers = new Headers({
-                        "content-type": "application/json",
-                        accept: "text/event-stream",
+                        accept:
+                          state.requestKind === "models"
+                            ? "application/json"
+                            : "text/event-stream",
                         authorization: `Bearer ${apiKey}`,
                       });
+                      if (state.requestKind !== "models")
+                        headers.set("content-type", "application/json");
                       this.#check(state);
                       sent = true;
                       state.sent = true;
                       const headersTimer = setTimeout(
-                        () => transportController.abort(),
-                        state.headersTimeoutMs,
+                        () => {
+                          if (state.requestKind === "models")
+                            state.catalogTimedOut = true;
+                          transportController.abort();
+                        },
+                        state.requestKind === "models"
+                          ? (state.catalogTimeoutMs ?? 10_000)
+                          : state.headersTimeoutMs,
                       );
+                      if (state.requestKind === "models")
+                        catalogTimer = headersTimer;
                       let response: Response;
                       try {
                         response = await globalThis.fetch(state.admittedUrl, {
-                          method: "POST",
-                          body: requestBody,
+                          method:
+                            state.requestKind === "models" ? "GET" : "POST",
+                          body:
+                            state.requestKind === "models"
+                              ? null
+                              : (requestBody as string),
                           headers,
                           signal: transportSignal,
                           redirect: "error",
                         });
                       } finally {
-                        clearTimeout(headersTimer);
+                        if (state.requestKind !== "models")
+                          clearTimeout(headersTimer);
                       }
                       if (response.status >= 300 && response.status < 400) {
                         await response.body?.cancel();
                         denied();
                       }
+                      const mediaType = response.headers
+                        .get("content-type")
+                        ?.split(";", 1)[0]
+                        ?.trim()
+                        .toLowerCase();
                       if (
-                        !response.headers
-                          .get("content-type")
-                          ?.toLowerCase()
-                          .startsWith("text/event-stream")
+                        mediaType !==
+                          (state.requestKind === "models"
+                            ? "application/json"
+                            : "text/event-stream") ||
+                        (state.requestKind === "models" && !response.ok)
                       ) {
                         await response.body?.cancel();
                         denied();
@@ -359,14 +449,29 @@ export class NativeProviderRequests {
                       cleanupResponse = async () => {
                         await reader.cancel();
                       };
+                      let responseBytes = 0;
                       const stream = new ReadableStream<Uint8Array>({
                         async pull(controller) {
                           try {
                             const next = await reader.read();
                             if (next.done) {
                               bodySettled = true;
+                              if (state.requestKind === "models") {
+                                if (catalogTimer) clearTimeout(catalogTimer);
+                                state.terminal = "done";
+                              }
                               controller.close();
-                            } else controller.enqueue(next.value);
+                            } else {
+                              responseBytes += next.value.byteLength;
+                              if (
+                                state.requestKind === "models" &&
+                                responseBytes > 1_048_576
+                              ) {
+                                await reader.cancel();
+                                denied();
+                              }
+                              controller.enqueue(next.value);
+                            }
                           } catch (e) {
                             controller.error(e);
                           }
@@ -442,6 +547,7 @@ export class NativeProviderRequests {
           } finally {
             live = false;
             transportController.abort();
+            if (catalogTimer) clearTimeout(catalogTimer);
             lease?.revoke();
             this.#reads.delete(request);
             this.#active.delete(scope);

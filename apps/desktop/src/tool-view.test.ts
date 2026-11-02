@@ -107,6 +107,14 @@ describe("tool activity view", () => {
     expect(denied.copy).not.toContain("C:\\Users");
     expect(denied.copy).not.toContain(".ssh");
 
+    const shell = toolErrorCopy(
+      "SHELL_START_FAILED: ENOENT C:\\private\\shell.exe",
+    );
+    expect(shell.code).toBe("SHELL_START_FAILED");
+    expect(shell.copy).toBe(
+      "The shell could not start. Check the system shell installation.",
+    );
+
     const unknown = toolErrorCopy("SOMETHING_NEW: token=sk-live-secret123");
     expect(unknown.code).toBe("SOMETHING_NEW");
     expect(unknown.copy).not.toContain("sk-live-secret123");

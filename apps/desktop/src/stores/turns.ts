@@ -60,6 +60,7 @@ export type TurnBlock =
 
 export interface TurnView {
   runId: string;
+  userPrompt?: string;
   turnId?: string;
   status: TurnStatus;
   text: string;
@@ -390,6 +391,9 @@ export function reduceTurns(
       return updateRun(next, payload.runId, (turn) => ({
         ...turn,
         turnId: turn.turnId ?? payload.turnId,
+        ...(payload.userPrompt !== undefined
+          ? { userPrompt: payload.userPrompt }
+          : {}),
       }));
     }
 
@@ -1138,16 +1142,17 @@ export function createTurnStreamTransport(
     follow(sessionId: string, scopeId: string) {
       followed.set(sessionId, scopeId);
       selectedSessionId ??= sessionId;
+      emit(channelFor(scopeId, sessionId));
     },
     unfollow(sessionId: string) {
       const key = keyOf(sessionId);
       const channel = key ? channels.get(key) : undefined;
-      if (channel) clearQueue(channel);
-      if (key) channels.delete(key);
+      // Keep applied transcript blocks: replay cannot restore transient replies.
+      if (channel) applyPending(channel);
       followed.delete(sessionId);
       if (selectedSessionId === sessionId) {
         selectedSessionId = undefined;
-        options.onState?.(options.state ?? fallbackState);
+        options.onState?.(createTurnsState());
       }
     },
     rejectedCount: () => rejected,

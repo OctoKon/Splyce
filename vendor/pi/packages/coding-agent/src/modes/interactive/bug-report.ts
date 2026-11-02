@@ -16,6 +16,7 @@ import { clearCrashLog, readCrashLog } from "../../core/crash-log.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { getRadiusGatewayUrl, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
 import { serializeSessionBranch } from "../../core/session-export.ts";
+import { assertUnownedSessionExport } from "../../core/session-manager.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
@@ -48,6 +49,7 @@ const TRANSCRIPT_NOTE =
 
 /** Run the `/bug` flow: consent, optional summary, then upload or export. */
 export async function reportBug(context: BugReportContext, initialHint?: string): Promise<void> {
+	assertUnownedSessionExport(context.session.sessionManager);
 	const options = await promptForOptions(context, initialHint);
 	if (!options) {
 		context.showStatus("Bug report cancelled");

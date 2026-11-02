@@ -168,16 +168,8 @@ export async function createAgentSessionServices(
 		}
 	}
 	extensionsResult.runtime.pendingProviderRegistrations = [];
-	for (const { provider, extensionPath } of extensionsResult.runtime.pendingNativeProviderRegistrations) {
-		try {
-			modelRuntime.registerNativeProvider(provider);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			diagnostics.push({
-				type: "error",
-				message: `Extension "${extensionPath}" error: ${message}`,
-			});
-		}
+	for (const { provider } of extensionsResult.runtime.pendingNativeProviderRegistrations) {
+		await modelRuntime.registerNativeProvider(provider);
 	}
 	extensionsResult.runtime.pendingNativeProviderRegistrations = [];
 	for (const { definition, extensionPath } of extensionsResult.runtime.pendingVirtualModelRegistrations) {

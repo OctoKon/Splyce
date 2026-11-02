@@ -103,6 +103,219 @@ const setup = () => {
   return { dir, store, pi, map: new SessionMap(store, context) };
 };
 
+test("preview derives an empty real Pi anchor without Store, binding or channel publication", () => {
+  const { dir, store, pi: existing, map } = setup();
+  try {
+    map.bind(k1, existing);
+    const channel = map.follow(k1, 0).channel;
+    const channelState = channel.bridge.status();
+    const pi = SessionManager.inMemory(dir);
+    const key = { scopeId: "w-demo", sessionId: pi.getSessionId() };
+    const before = store.cursor();
+    const preview = map.preview(key, pi);
+    assert.deepEqual(preview, {
+      ...key,
+      piSessionId: pi.getSessionId(),
+      anchor: {
+        branchAnchorId: `anchor-${pi.getSessionId()}`,
+        piSessionId: pi.getSessionId(),
+        parentAnchorId: null,
+        forkPointEntryId: null,
+        firstChildEntryId: null,
+        activeLeafEntryId: null,
+      },
+    });
+    assert.deepEqual(map.preview(key, pi), preview);
+    assert.equal(Object.isFrozen(preview), true);
+    assert.equal(Object.isFrozen(preview.anchor), true);
+    assert.equal(
+      Reflect.set(preview.anchor, "activeLeafEntryId", "changed"),
+      false,
+    );
+    assert.equal(store.cursor(), before);
+    assert.equal(records(store, key.sessionId, "branchAnchor").length, 0);
+    assert.throws(
+      () => map.resolve(pi.getSessionId()),
+      code("SESSION_UNKNOWN"),
+    );
+    assert.throws(
+      () => map.ancestry(pi.getSessionId()),
+      code("SESSION_UNKNOWN"),
+    );
+    assert.throws(() => map.follow(key, 0), code("SESSION_UNKNOWN"));
+    assert.equal(map.follow(k1, 0).channel, channel);
+    assert.deepEqual(channel.bridge.status(), channelState);
+    assert.deepEqual(map.resolve(existing.getSessionId()), k1);
+    assert.deepEqual(pi.getEntries(), []);
+    assert.equal(pi.getSessionFile(), undefined);
+  } finally {
+    store.close();
+  }
+});
+
+test("a real fork preview can be committed before bind without duplicate anchors", () => {
+  const { dir, store, pi: parent, map } = setup();
+  try {
+    const parentAnchor = map.bind(k1, parent);
+    const child = SessionManager.forkFrom(
+      parent.getSessionFile()!,
+      dir,
+      join(dir, "pi"),
+    );
+    const key = { scopeId: "w-demo", sessionId: child.getSessionId() };
+    const before = store.cursor();
+    const preview = map.preview(key, child);
+    assert.equal(preview.piSessionId, child.getSessionId());
+    assert.equal(preview.anchor.forkPointEntryId, parent.getLeafId());
+    assert.equal(
+      preview.anchor.parentAnchorId,
+      parentAnchor.anchor.branchAnchorId,
+    );
+    assert.equal(preview.anchor.firstChildEntryId, null);
+    assert.equal(preview.anchor.activeLeafEntryId, child.getLeafId());
+    assert.equal(store.cursor(), before);
+    assert.throws(
+      () => map.resolve(child.getSessionId()),
+      code("SESSION_UNKNOWN"),
+    );
+    const committed = store.append(
+      {
+        kind: "branchAnchor",
+        record: {
+          schemaVersion: 1,
+          recordId: `${preview.anchor.branchAnchorId}.1`,
+          createdAt: "2026-10-28T00:00:00.000Z",
+          scopeId: key.scopeId,
+          sourceIds: [],
+          ...preview.anchor,
+        },
+      },
+      { ...context, sessionId: key.sessionId },
+    );
+    assert.equal(store.cursor(), committed.seq);
+    assert.deepEqual(map.bind(key, child), preview);
+    assert.equal(
+      store.cursor(),
+      committed.seq,
+      "bind must reuse the exact precommitted anchor",
+    );
+    assert.equal(records(store, key.sessionId, "branchAnchor").length, 1);
+    assert.deepEqual(map.bind(key, child), preview);
+    assert.deepEqual(map.preview(key, child), preview);
+    assert.equal(store.cursor(), committed.seq);
+    assert.deepEqual(map.resolve(child.getSessionId()), key);
+  } finally {
+    store.close();
+  }
+});
+
+test("preview rejects malformed or foreign keys without changing existing bindings", () => {
+  const { dir, store, pi, map } = setup();
+  try {
+    for (const key of [
+      null,
+      {},
+      { ...k1, extra: "field" },
+      { ...k1, scopeId: "" },
+      { ...k1, sessionId: "bad/id" },
+      { ...k1, sessionId: "bad\u200b" },
+      { ...k1, sessionId: "\ud800" },
+    ])
+      assert.throws(
+        () => map.preview(key as never, pi),
+        code("SESSION_FOREIGN"),
+      );
+    let reads = 0;
+    const accessor = { ...k1 };
+    Object.defineProperty(accessor, "sessionId", {
+      enumerable: true,
+      get() {
+        reads++;
+        return k1.sessionId;
+      },
+    });
+    assert.throws(() => map.preview(accessor, pi), code("SESSION_FOREIGN"));
+    assert.equal(reads, 0);
+    assert.equal(store.cursor(), 0);
+    assert.throws(
+      () => map.resolve(pi.getSessionId()),
+      code("SESSION_UNKNOWN"),
+    );
+    const bound = map.bind(k1, pi);
+    const channel = map.follow(k1, 0).channel;
+    const before = store.cursor();
+    const other = SessionManager.inMemory(dir);
+    assert.throws(() => map.preview(k2, pi), code("SESSION_FOREIGN"));
+    assert.throws(
+      () => map.preview({ ...k1, scopeId: "w-other" }, pi),
+      code("SESSION_FOREIGN"),
+    );
+    assert.throws(() => map.preview(k1, other), code("SESSION_FOREIGN"));
+    assert.deepEqual(map.preview(k1, pi), bound);
+    assert.equal(store.cursor(), before);
+    assert.deepEqual(map.resolve(pi.getSessionId()), k1);
+    assert.equal(map.follow(k1, 0).channel, channel);
+    assert.throws(
+      () => map.resolve(other.getSessionId()),
+      code("SESSION_UNKNOWN"),
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("a failed first bind rolls back its maps and a later retry recovers", () => {
+  const { store, pi, map } = setup();
+  try {
+    store.db.exec(
+      "CREATE TRIGGER fail_anchor BEFORE INSERT ON records WHEN NEW.kind = 'branchAnchor' BEGIN SELECT RAISE(ABORT, 'anchor fixture refusal'); END;",
+    );
+    assert.throws(() => map.bind(k1, pi), /anchor fixture refusal/);
+    assert.equal(store.cursor(), 0);
+    assert.throws(
+      () => map.resolve(pi.getSessionId()),
+      code("SESSION_UNKNOWN"),
+    );
+    assert.throws(
+      () => map.ancestry(pi.getSessionId()),
+      code("SESSION_UNKNOWN"),
+    );
+    assert.throws(() => map.follow(k1, 0), code("SESSION_UNKNOWN"));
+    store.db.exec("DROP TRIGGER fail_anchor;");
+    const bound = map.bind(k1, pi);
+    assert.deepEqual(map.resolve(pi.getSessionId()), k1);
+    assert.equal(store.cursor(), 1);
+    assert.deepEqual(map.bind(k1, pi), bound);
+    assert.equal(store.cursor(), 1);
+    assert.equal(map.follow(k1, 0).channel.sessionId, k1.sessionId);
+  } finally {
+    store.close();
+  }
+});
+
+test("a failed matching rebind preserves its existing binding and channel", () => {
+  const { store, pi, map } = setup();
+  try {
+    map.bind(k1, pi);
+    const channel = map.follow(k1, 0).channel;
+    const before = store.cursor();
+    converse(pi, "later conversation");
+    store.db.exec(
+      "CREATE TRIGGER fail_anchor BEFORE INSERT ON records WHEN NEW.kind = 'branchAnchor' BEGIN SELECT RAISE(ABORT, 'anchor fixture refusal'); END;",
+    );
+    assert.throws(() => map.bind(k1, pi), /anchor fixture refusal/);
+    assert.equal(store.cursor(), before);
+    assert.deepEqual(map.resolve(pi.getSessionId()), k1);
+    assert.equal(map.follow(k1, 0).channel, channel);
+    store.db.exec("DROP TRIGGER fail_anchor;");
+    assert.equal(map.bind(k1, pi).anchor.activeLeafEntryId, pi.getLeafId());
+    assert.equal(store.cursor(), before + 1);
+    assert.equal(map.follow(k1, 0).channel, channel);
+  } finally {
+    store.close();
+  }
+});
+
 test("unknown and foreign sessions are rejected; same-pair rebind is idempotent", () => {
   const { dir, store, pi, map } = setup();
   const other = SessionManager.create(dir, join(dir, "pi"));

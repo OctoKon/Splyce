@@ -1,0 +1,19 @@
+{
+  "name": "@splyce/retrieval",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@splyce/pi": "file:../splyce-pi"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/retrieval.d.ts",
+      "import": "./dist/retrieval.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "AGPL-3.0-only"
+}

@@ -203,6 +203,14 @@ export type SplyceEngineEvent =
       status: "success" | "error" | "uncertain";
       outcomeRef?: string;
       error?: string;
+      /** Workspace tools only; `preview` is redacted and capped at 2048 chars, `bytes` is the raw size. */
+      summary?: {
+        exitCode?: number | null;
+        durationMs: number;
+        bytes: number;
+        truncated: boolean;
+        preview: string;
+      };
     }
   | {
       kind: "turn.completed";

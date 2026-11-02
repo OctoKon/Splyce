@@ -43,6 +43,8 @@ await build({
   platform: "node",
   format: "esm",
   target: "node24",
+  // Source aliases would duplicate Pi's private ownership maps alongside dist.
+  tsconfigRaw: { compilerOptions: {} },
   banner: {
     js: 'import { createRequire as __splyceCreateRequire } from "node:module";const require = __splyceCreateRequire(import.meta.url);',
   },

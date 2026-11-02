@@ -332,7 +332,7 @@ fn read_frame(reader: &mut impl Read) -> Result<(Value, usize), EngineError> {
 pub use windows::{EngineChild, EngineEvents};
 
 #[cfg(windows)]
-mod windows {
+pub(crate) mod windows {
     use super::*;
     use std::collections::VecDeque;
     use std::ffi::{OsStr, c_void};
@@ -351,6 +351,61 @@ mod windows {
     use windows_sys::Win32::System::JobObjects::*;
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::*;
+
+    pub(crate) mod shell {
+        include!("process/shell.rs");
+    }
+
+    fn system_root() -> Result<PathBuf, EngineError> {
+        use std::os::windows::ffi::OsStringExt;
+        let mut system_root = vec![0u16; 32768];
+        // SAFETY: the writable UTF-16 buffer has the stated capacity.
+        let count = unsafe {
+            windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW(
+                system_root.as_mut_ptr(),
+                system_root.len() as u32,
+            )
+        } as usize;
+        if count == 0 || count >= system_root.len() {
+            return Err(invalid_manifest());
+        }
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(
+            &system_root[..count],
+        )))
+    }
+
+    pub(crate) fn create_job() -> Result<OwnedHandle, EngineError> {
+        // SAFETY: CreateJobObjectW creates a new unnamed job without borrowed arguments.
+        let job = own(unsafe { CreateJobObjectW(null(), null()) })?;
+        // SAFETY: zero is the documented initial state for these Win32 POD structures.
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: job and limits are valid and the size matches the selected information class.
+        unsafe {
+            checked(SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of_val(&limits) as u32,
+            ))?;
+        }
+        Ok(job)
+    }
+
+    fn active_count(job: &OwnedHandle) -> Result<u32, EngineError> {
+        // SAFETY: zero initializes the job accounting output and the query uses its exact size.
+        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+        unsafe {
+            checked(QueryInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                size_of_val(&accounting) as u32,
+                null_mut(),
+            ))?;
+        }
+        Ok(accounting.ActiveProcesses)
+    }
 
     fn wide(value: &OsStr) -> Result<Vec<u16>, EngineError> {
         let mut result: Vec<u16> = value.encode_wide().collect();
@@ -598,6 +653,10 @@ mod windows {
     #[derive(Deserialize)]
     #[serde(tag = "method", deny_unknown_fields)]
     enum NativeOperation {
+        #[serde(rename = "inventory.capture")]
+        Inventory { id: String, params: InventoryParams },
+        #[serde(rename = "credential.status")]
+        Status { id: String, params: StatusParams },
         #[serde(rename = "credential.redact")]
         Redact { id: String, params: RedactParams },
         #[serde(rename = "credential.scope.open")]
@@ -610,6 +669,14 @@ mod windows {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct InventoryParams {
+        canonical_path: String,
+        volume_serial: String,
+        file_id: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct CloseScope {
         scope_id: String,
     }
@@ -618,6 +685,30 @@ mod windows {
     #[serde(deny_unknown_fields)]
     struct RedactParams {
         text: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StatusParams {
+        target: String,
+    }
+
+    fn redaction_frame_fits(frame: &Value) -> bool {
+        struct Count(usize);
+        impl Write for Count {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_add(bytes.len())
+                    .filter(|length| *length <= MAX_FRAME_BYTES - 4)
+                    .ok_or_else(|| std::io::Error::other("Native input exceeds frame limit"))?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        serde_json::to_writer(&mut Count(0), frame).is_ok()
     }
 
     fn opaque_id(value: &str) -> bool {
@@ -638,16 +729,70 @@ mod windows {
             .as_object()
             .filter(|object| object.len() == 1)
             .ok_or_else(invalid)?;
+        let redaction_input_fits =
+            frame["native"]["method"] != "credential.redact" || redaction_frame_fits(&frame);
         let operation: NativeOperation =
             serde_json::from_value(object.get("native").ok_or_else(invalid)?.clone())
                 .map_err(|_| invalid())?;
-        scopes.retain(|_, (_, deadline, consumed)| *consumed || Instant::now() < *deadline);
+        if !matches!(&operation, NativeOperation::Status { .. }) {
+            scopes.retain(|_, (_, deadline, consumed)| *consumed || Instant::now() < *deadline);
+        }
         let (id, result) = match operation {
+            NativeOperation::Inventory { id, params } => {
+                if !opaque_id(&id) {
+                    return Err(invalid());
+                }
+                let identity = params
+                    .volume_serial
+                    .parse::<u32>()
+                    .ok()
+                    .zip(params.file_id.parse::<u64>().ok());
+                let result = identity.and_then(|(volume_serial, file_id)| {
+                    crate::inventory::capture(
+                        Path::new(&params.canonical_path),
+                        crate::workspace::DirectoryIdentity {
+                            volume_serial,
+                            file_id,
+                        },
+                    )
+                    .ok()
+                });
+                let unavailable = || serde_json::json!({"native":{"id":id,"ok":false,"error":{"code":"INVENTORY_UNAVAILABLE"}}});
+                let value = match result {
+                    Some(manifest) => {
+                        serde_json::json!({"native":{"id":id,"ok":true,"value":{"manifest":manifest}}})
+                    }
+                    None => unavailable(),
+                };
+                return encode_frame(&value).or_else(|_| encode_frame(&unavailable()));
+            }
+            NativeOperation::Status { id, params } => {
+                if !opaque_id(&id) {
+                    return Err(invalid());
+                }
+                let reference = CredentialRef::parse(&params.target).map_err(|_| invalid())?;
+                let value = match read_owned(&reference) {
+                    Ok(secret) => {
+                        drop(secret);
+                        serde_json::json!({"native":{"id":id,"ok":true,"value":{"present":true}}})
+                    }
+                    Err(CredentialError::NotFound) => {
+                        serde_json::json!({"native":{"id":id,"ok":true,"value":{"present":false}}})
+                    }
+                    Err(_) => {
+                        serde_json::json!({"native":{"id":id,"ok":false,"error":{"code":"CREDENTIAL_UNAVAILABLE"}}})
+                    }
+                };
+                return encode_frame(&value);
+            }
             NativeOperation::Redact { id, params } => {
                 if !opaque_id(&id) {
                     return Err(invalid());
                 }
                 let unavailable = || serde_json::json!({"native":{"id":id,"ok":false,"error":{"code":"PERSIST_REDACTION_UNAVAILABLE"}}});
+                if !redaction_input_fits {
+                    return encode_frame(&unavailable());
+                }
                 let value = match crate::credentials::redact_owned(&params.text) {
                     Ok((text, count)) => {
                         serde_json::json!({"native":{"id":id,"ok":true,"value":{"text":text,"redactedCount":count}}})
@@ -851,6 +996,7 @@ mod windows {
         events: EngineEvents,
         failed: Arc<AtomicBool>,
         workers: Vec<JoinHandle<()>>,
+        shell_cleanup_failed: Arc<AtomicBool>,
         stopped: bool,
         _verified_files: Vec<File>,
     }
@@ -866,19 +1012,9 @@ mod windows {
             let executable = launch_path(&root.join("node.exe"))?;
             let cwd = launch_path(&root)?;
             let mut command = wide(OsStr::new("node.exe host.mjs"))?;
-            let mut system_root = vec![0u16; 32768];
-            // SAFETY: the writable UTF-16 buffer has the stated capacity.
-            let count = unsafe {
-                windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW(
-                    system_root.as_mut_ptr(),
-                    system_root.len() as u32,
-                )
-            } as usize;
-            if count == 0 || count >= system_root.len() {
-                return Err(invalid_manifest());
-            }
+            let system_root = system_root()?;
             let mut environment: Vec<u16> = "SystemRoot=".encode_utf16().collect();
-            environment.extend_from_slice(&system_root[..count]);
+            environment.extend(system_root.as_os_str().encode_wide());
             environment.push(0);
             environment.push(0);
             let (stdin_read, stdin_write) = pipe(false)?;
@@ -897,20 +1033,7 @@ mod windows {
                 stdout_write.as_raw_handle(),
                 stderr.as_raw_handle(),
             ];
-            // SAFETY: CreateJobObjectW creates a new unnamed job without borrowed arguments.
-            let job = own(unsafe { CreateJobObjectW(null(), null()) })?;
-            // SAFETY: zero is the documented initial state for these Win32 POD structures.
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            // SAFETY: job and limits are valid and the size matches the selected information class.
-            unsafe {
-                checked(SetInformationJobObject(
-                    job.as_raw_handle(),
-                    JobObjectExtendedLimitInformation,
-                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                    size_of_val(&limits) as u32,
-                ))?;
-            }
+            let job = create_job()?;
             let jobs = [job.as_raw_handle()];
             let attributes = Attributes::new(&inherited, &jobs)?;
             // SAFETY: startup and process information are initialized according to Win32.
@@ -981,6 +1104,8 @@ mod windows {
             let failed = Arc::new(AtomicBool::new(false));
             let reader_failed = failed.clone();
             let native_writes = writes.clone();
+            let mut shells = shell::Registry::new(job.try_clone().map_err(io_error)?);
+            let shell_cleanup_failed = shells.cleanup_failed.clone();
             let reader = std::thread::Builder::new()
                 .name("splyce-engine-read".into())
                 .spawn(move || {
@@ -989,7 +1114,15 @@ mod windows {
                     loop {
                         match read_frame(&mut output) {
                             Ok((frame, _)) if frame.get("native").is_some() => {
-                                let result = native_reply(frame, &mut scopes).and_then(|frame| {
+                                let result = if frame["native"]["method"]
+                                    .as_str()
+                                    .is_some_and(|method| method.starts_with("shell."))
+                                {
+                                    shells.reply(frame)
+                                } else {
+                                    native_reply(frame, &mut scopes)
+                                }
+                                .and_then(|frame| {
                                     write_bounded(
                                         &native_writes,
                                         frame,
@@ -1136,6 +1269,7 @@ mod windows {
                 events,
                 failed,
                 workers: vec![reader, writer],
+                shell_cleanup_failed,
                 stopped: false,
                 _verified_files: verified_files,
             };
@@ -1268,19 +1402,7 @@ mod windows {
                 }
             }
             loop {
-                // SAFETY: zero initializes the job accounting output and the query uses its exact size.
-                let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
-                unsafe {
-                    checked(QueryInformationJobObject(
-                        self.job.as_raw_handle(),
-                        JobObjectBasicAccountingInformation,
-                        (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
-                        size_of_val(&accounting) as u32,
-                        null_mut(),
-                    ))?;
-                }
-                if accounting.ActiveProcesses == 0
-                    && self.workers.iter().all(JoinHandle::is_finished)
+                if active_count(&self.job)? == 0 && self.workers.iter().all(JoinHandle::is_finished)
                 {
                     break;
                 }
@@ -1299,6 +1421,12 @@ mod windows {
                         "Engine transport cleanup failed",
                     ));
                 }
+            }
+            if self.shell_cleanup_failed.load(Ordering::Acquire) {
+                return Err(EngineError::new(
+                    "ENGINE_CLEANUP",
+                    "Shell cleanup could not be confirmed",
+                ));
             }
             self.stopped = true;
             Ok(())
@@ -1329,7 +1457,101 @@ mod windows {
         }
 
         #[test]
+        fn native_inventory_joined_node_transport() {
+            use std::process::{Command, Stdio};
+            let workspace = std::env::temp_dir().join(format!(
+                "splyce-joined-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let data = workspace.with_extension("data");
+            fs::create_dir(&workspace).unwrap();
+            fs::create_dir(&data).unwrap();
+            fs::write(workspace.join("ordinary.txt"), b"ordinary").unwrap();
+            fs::write(workspace.join(".env"), b"secret fixture").unwrap();
+            let qualified = crate::workspace::qualify_directory(&workspace).unwrap();
+            let identity = qualified.identity();
+            drop(qualified);
+            let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(3)
+                .unwrap();
+            let node = repo.join("apps/desktop/src-tauri/resources/engine/node.exe");
+            let fixture = repo.join("tests/fixtures/native-inventory-peer.mjs");
+            let mut child = Command::new(node)
+                .arg(fixture)
+                .arg(&workspace)
+                .arg(&data)
+                .arg(identity.volume_serial.to_string())
+                .arg(identity.file_id.to_string())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut stdout = child.stdout.take().unwrap();
+            let (send, receive) = mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    if send.send(read_frame(&mut stdout).map(|x| x.0)).is_err() {
+                        break;
+                    }
+                }
+            });
+            let result = (|| -> Result<(), String> {
+                let frame = receive
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                if frame["native"]["method"] != "inventory.capture" {
+                    return Err("unexpected request".into());
+                }
+                let reply = native_reply(frame, &mut std::collections::HashMap::new())
+                    .map_err(|e| e.to_string())?;
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(&reply)
+                    .map_err(|e| e.to_string())?;
+                let result = receive
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                if result != json!({"ok":true}) {
+                    return Err("fixture assertion failed".into());
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                        return if status.success() {
+                            Ok(())
+                        } else {
+                            Err("node failed".into())
+                        };
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("node timeout".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })();
+            if result.is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            reader.join().unwrap();
+            fs::remove_dir_all(&workspace).unwrap();
+            fs::remove_dir_all(&data).unwrap();
+            result.unwrap();
+        }
+
+        #[test]
         fn private_credentials_require_live_exact_single_use_scope() {
+            let _inventory = crate::credentials::fixture_guard();
             let reference =
                 crate::credentials::write_generated("private-transport-fixture").unwrap();
             struct Cleanup(crate::credentials::CredentialRef);
@@ -1384,6 +1606,99 @@ mod windows {
         }
 
         #[test]
+        fn private_credential_status_reports_presence_without_scope_authority() {
+            let _inventory = crate::credentials::fixture_guard();
+            let reference = crate::credentials::write_generated("private-status-fixture").unwrap();
+            struct Cleanup(crate::credentials::CredentialRef);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    assert!(matches!(
+                        crate::credentials::delete_owned(&self.0),
+                        Ok(()) | Err(crate::credentials::CredentialError::NotFound)
+                    ));
+                }
+            }
+            let cleanup = Cleanup(reference);
+            let target = cleanup.0.as_str();
+            let mut scopes = std::collections::HashMap::new();
+            native_reply(call("credential.scope.open", scope(target)), &mut scopes).unwrap();
+            scopes.get_mut("scope1").unwrap().1 = Instant::now();
+            let assert_registry =
+                |scopes: &std::collections::HashMap<String, (CredentialScope, Instant, bool)>| {
+                    assert_eq!(scopes.len(), 1);
+                    let (binding, deadline, consumed) = &scopes["scope1"];
+                    assert_eq!(binding.target, target);
+                    assert!(*deadline <= Instant::now());
+                    assert!(!consumed);
+                };
+            assert_eq!(
+                reply(
+                    native_reply(
+                        call("credential.status", json!({"target":target})),
+                        &mut scopes
+                    )
+                    .unwrap()
+                ),
+                json!({"native":{"id":"native1","ok":true,"value":{"present":true}}})
+            );
+            assert_registry(&scopes);
+            for params in [
+                json!({}),
+                json!({"target":null}),
+                json!({"target":"Splyce/credentials/v1/invalid"}),
+                json!({"target":"other-credential:v1:invalid"}),
+                json!({"target":target.to_uppercase()}),
+                json!({"target":target,"scopeId":"scope1"}),
+            ] {
+                assert!(native_reply(call("credential.status", params), &mut scopes).is_err());
+                assert_registry(&scopes);
+            }
+            use windows_sys::Win32::Security::Credentials::{
+                CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredWriteW,
+            };
+            let mut native_target: Vec<u16> = format!(
+                "Splyce/credentials/v1/{}",
+                target.strip_prefix("splyce-credential:v1:").unwrap()
+            )
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+            let mut invalid_bytes = [0xff_u8];
+            let corrupt = CREDENTIALW {
+                Type: CRED_TYPE_GENERIC,
+                TargetName: native_target.as_mut_ptr(),
+                CredentialBlobSize: invalid_bytes.len() as u32,
+                CredentialBlob: invalid_bytes.as_mut_ptr(),
+                Persist: CRED_PERSIST_LOCAL_MACHINE,
+                ..Default::default()
+            };
+            assert_ne!(unsafe { CredWriteW(&corrupt, 0) }, 0);
+            assert_eq!(
+                reply(
+                    native_reply(
+                        call("credential.status", json!({"target":target})),
+                        &mut scopes
+                    )
+                    .unwrap()
+                ),
+                json!({"native":{"id":"native1","ok":false,"error":{"code":"CREDENTIAL_UNAVAILABLE"}}})
+            );
+            assert_registry(&scopes);
+            crate::credentials::delete_owned(&cleanup.0).unwrap();
+            assert_eq!(
+                reply(
+                    native_reply(
+                        call("credential.status", json!({"target":target})),
+                        &mut scopes
+                    )
+                    .unwrap()
+                ),
+                json!({"native":{"id":"native1","ok":true,"value":{"present":false}}})
+            );
+            assert_registry(&scopes);
+        }
+
+        #[test]
         fn secret_frame_reserves_complete_worst_case_encoding_before_copy() {
             let maximum = crate::credentials::MAX_SECRET_BYTES;
             for fragment in ["\"", "\\", "\u{e9}", "\"\\\u{e9}"] {
@@ -1418,6 +1733,7 @@ mod windows {
 
         #[test]
         fn persistence_redaction_has_an_exact_separate_private_shape() {
+            let _inventory = crate::credentials::fixture_guard();
             let reference = crate::credentials::write_generated("redaction-private-lane").unwrap();
             struct Cleanup(crate::credentials::CredentialRef);
             impl Drop for Cleanup {
@@ -1450,12 +1766,15 @@ mod windows {
             ] {
                 assert!(native_reply(call("credential.redact", params), &mut scopes).is_err());
             }
-            let copies = MAX_FRAME_BYTES / "redaction-private-lane".len() + 1;
-            let text = "redaction-private-lane".repeat(copies);
-            assert!(text.len() > MAX_FRAME_BYTES);
-            let value = reply(
-                native_reply(call("credential.redact", json!({"text":text})), &mut scopes).unwrap(),
-            );
+            let marker = "redaction-private-lane";
+            let overhead = encode_frame(&call("credential.redact", json!({"text":""})))
+                .unwrap()
+                .len();
+            let copies = (MAX_FRAME_BYTES - overhead) / marker.len();
+            let frame = call("credential.redact", json!({"text":marker.repeat(copies)}));
+            assert!(redaction_frame_fits(&frame));
+            assert!(encode_frame(&frame).unwrap().len() <= MAX_FRAME_BYTES);
+            let value = reply(native_reply(frame, &mut scopes).unwrap());
             assert_eq!(
                 value,
                 json!({"native":{"id":"native1","ok":true,"value":{
@@ -1468,9 +1787,23 @@ mod windows {
                     .unwrap()
                     .contains("redaction-private-lane")
             );
+            let oversized = marker.repeat(MAX_FRAME_BYTES / marker.len() + 1);
+            assert!(oversized.len() > MAX_FRAME_BYTES);
+            assert!(!redaction_frame_fits(&call(
+                "credential.redact",
+                json!({"text":oversized})
+            )));
+            let _growth_cleanup = Cleanup(crate::credentials::write_generated("grow-key").unwrap());
+            let expansion = "grow-key".repeat(MAX_FRAME_BYTES / "[REDACTED:credential]".len() + 1);
+            assert!(redaction_frame_fits(&call(
+                "credential.redact",
+                json!({"text":expansion})
+            )));
             for text in [
+                oversized,
                 "x".repeat(crate::credentials::MAX_REDACTION_TEXT_BYTES + 1),
                 "redaction-private-lane".repeat(MAX_FRAME_BYTES / 21),
+                expansion,
             ] {
                 let value = reply(
                     native_reply(call("credential.redact", json!({"text":text})), &mut scopes)
@@ -1484,7 +1817,58 @@ mod windows {
         }
 
         #[test]
+        fn redaction_input_counts_encoded_frame_bytes_including_header() {
+            let overhead = serde_json::to_vec(&call("credential.redact", json!({"text":""})))
+                .unwrap()
+                .len();
+            let length = MAX_FRAME_BYTES - 4 - overhead;
+            let boundary = call("credential.redact", json!({"text":"n".repeat(length)}));
+            assert!(redaction_frame_fits(&boundary));
+            assert_eq!(encode_frame(&boundary).unwrap().len(), MAX_FRAME_BYTES);
+            let oversized = call("credential.redact", json!({"text":"n".repeat(length + 1)}));
+            assert!(!redaction_frame_fits(&oversized));
+            assert!(encode_frame(&oversized).is_err());
+            let escaped = call("credential.redact", json!({"text":"\0".repeat(length / 3)}));
+            assert!(!redaction_frame_fits(&escaped));
+            assert!(encode_frame(&escaped).is_err());
+        }
+
+        #[test]
+        fn redaction_rejects_oversized_input_even_when_owned_key_would_shrink_output() {
+            let _inventory = crate::credentials::fixture_guard();
+            let secret = "shrink-boundary-".to_owned()
+                + &"x".repeat(crate::credentials::MAX_SECRET_BYTES - "shrink-boundary-".len());
+            let reference = crate::credentials::write_generated(&secret).unwrap();
+            struct Cleanup(crate::credentials::CredentialRef);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    crate::credentials::delete_owned(&self.0).unwrap();
+                }
+            }
+            let _cleanup = Cleanup(reference);
+            let text = secret.repeat(MAX_FRAME_BYTES / secret.len() + 1);
+            assert!(text.len() > MAX_FRAME_BYTES);
+            let (redacted, count) = crate::credentials::redact_owned(&text).unwrap();
+            assert!(
+                count > 0 && redacted.len() < MAX_FRAME_BYTES / 2,
+                "fixture must actually shrink below the output cap"
+            );
+            let value = reply(
+                native_reply(
+                    call("credential.redact", json!({"text":text})),
+                    &mut std::collections::HashMap::new(),
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                value["native"]["error"]["code"],
+                "PERSIST_REDACTION_UNAVAILABLE"
+            );
+        }
+
+        #[test]
         fn private_schema_and_absent_reference_fail_closed() {
+            let _inventory = crate::credentials::fixture_guard();
             let target = format!("splyce-credential:v1:{}", "0".repeat(64));
             let params = scope(&target);
             let mut scopes = std::collections::HashMap::new();

@@ -14,6 +14,7 @@ import { ConfigAuthority } from "../packages/splyce-pi/dist/config.js";
 import { createProviderProfiles } from "../packages/splyce-pi/dist/provider-profiles.js";
 import { Store } from "../packages/splyce-pi/dist/store.js";
 import { validateEvent } from "../packages/splyce-pi/dist/contracts.js";
+import { NATIVE_POLICY_REVISION } from "../packages/splyce-pi/dist/policy.js";
 
 const fixtures = JSON.parse(
   readFileSync(
@@ -25,7 +26,7 @@ const caller = {
   sessionId: "s1",
   configRevision: "cfg-0",
   profileRevision: "cfg-0",
-  policyRevision: "cfg-0",
+  policyRevision: NATIVE_POLICY_REVISION,
   resolveReference: () => true,
 };
 function fixture(t) {
@@ -67,7 +68,7 @@ test("private native factory opens persistent Store with every runnable port clo
   assert.deepEqual(host.current("w-demo"), {
     configRevision: "cfg-0",
     profileRevision: "cfg-0",
-    policyRevision: "cfg-0",
+    policyRevision: NATIVE_POLICY_REVISION,
     grantIds: [],
     planMode: true,
   });
@@ -123,7 +124,7 @@ function selectedProfile(writer) {
           providerConnectionId:
             fixtures.providerConnection.providerConnectionId,
           connectionRevision: "c1",
-          modelId: "fixture-model",
+          modelId: "fixture-chat-model",
         },
       ],
       egressPolicyRefs: [],
@@ -160,7 +161,7 @@ test("current uses the exact applied immutable profile with its selected config 
   assert.deepEqual(queued, {
     configRevision: "cfg-1",
     profileRevision: "p1",
-    policyRevision: "cfg-0",
+    policyRevision: NATIVE_POLICY_REVISION,
     grantIds: [],
     planMode: true,
   });
@@ -174,7 +175,7 @@ test("current uses the exact applied immutable profile with its selected config 
           providerConnectionId:
             fixtures.providerConnection.providerConnectionId,
           connectionRevision: "c1",
-          modelId: "fixture-model",
+          modelId: "fixture-chat-model",
         },
       ],
       egressPolicyRefs: [],

@@ -27,6 +27,57 @@ interface Binding {
 	role: SplyceRole;
 }
 const bindings = new WeakMap<object, Binding>();
+export type SplycePersistenceSanitizer = (serialized: string, signal?: AbortSignal) => Promise<string>;
+const persistence = new WeakMap<object, { owner: Owner; sanitize: SplycePersistenceSanitizer }>();
+
+function persistenceUnavailable(
+	code: "PERSIST_REDACTION_UNAVAILABLE" | "PERSIST_ENTRY_TOO_LARGE" = "PERSIST_REDACTION_UNAVAILABLE",
+): never {
+	throw Object.assign(new Error(code), { code });
+}
+
+/** Persistence refusal must not become an ordinary model/tool fallback response. */
+export function rethrowSplycePersistenceError(error: unknown): void {
+	const descriptor = error && typeof error === "object" ? Object.getOwnPropertyDescriptor(error, "code") : undefined;
+	const code = descriptor && "value" in descriptor ? descriptor.value : undefined;
+	if (code === "PERSIST_REDACTION_UNAVAILABLE" || code === "PERSIST_ENTRY_TOO_LARGE") persistenceUnavailable(code);
+}
+
+/** A disposed identity stays owned: it must never fall back to donor synchronous writes. */
+export function isSplyceOwned(subject: object): boolean {
+	return bindings.has(subject);
+}
+
+export function assertSplycePersistence(subject: object): void {
+	try {
+		const binding = current(subject);
+		if (binding.role !== "session-manager" || persistence.get(subject)?.owner !== binding.owner)
+			persistenceUnavailable();
+	} catch {
+		persistenceUnavailable();
+	}
+}
+
+/** The native closure owns the existing redaction lane; Pi never obtains matcher secrets. */
+export async function sanitizeSplycePersistence(
+	subject: object,
+	serialized: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	try {
+		assertSplycePersistence(subject);
+		signal?.throwIfAborted();
+		if (typeof serialized !== "string") persistenceUnavailable();
+		const sanitized = await persistence.get(subject)!.sanitize(serialized, signal);
+		signal?.throwIfAborted();
+		assertSplycePersistence(subject);
+		if (typeof sanitized !== "string") persistenceUnavailable();
+		return sanitized;
+	} catch (error) {
+		rethrowSplycePersistenceError(error);
+		return persistenceUnavailable();
+	}
+}
 const callbackKeys = [
 	"convertToLlm",
 	"transformContext",
@@ -70,6 +121,8 @@ const loopCallbackKeys = [
 	"getFollowUpMessages",
 ];
 const loopCallbacks = new WeakMap<object, Record<string, unknown>>();
+const loopAgents = new WeakMap<object, Agent>();
+const loopRequests = new WeakMap<object, Map<PropertyKey, unknown>>();
 const streams = new WeakMap<object, StreamFn>();
 const toolImplementations = new WeakMap<object, AgentTool["execute"]>();
 const derivations: Partial<Record<SplyceRole, readonly SplyceRole[]>> = {
@@ -121,11 +174,22 @@ function bind(owner: Owner, subject: object, role: SplyceRole): void {
 /** Private native composition entrypoint; deliberately absent from the package index. */
 export function createSplyceOwner(checkCurrent: () => void): {
 	bind: (subject: object, role: SplyceRole) => void;
+	bindPersistence: (subject: object, sanitizer: SplycePersistenceSanitizer) => void;
 	dispose: () => void;
 } {
 	const owner: Owner = { checkCurrent, disposed: false };
 	return {
 		bind: (subject, role) => bind(owner, subject, role),
+		bindPersistence: (subject, sanitize) => {
+			try {
+				if (typeof sanitize !== "function" || persistence.has(subject)) persistenceUnavailable();
+				bind(owner, subject, "session-manager");
+				persistence.set(subject, { owner, sanitize });
+				assertSplycePersistence(subject);
+			} catch {
+				persistenceUnavailable();
+			}
+		},
 		dispose: () => {
 			owner.disposed = true;
 		},
@@ -159,10 +223,36 @@ export function inheritSplyceLoopConfig(parent: object, child: object): void {
 	if ((binding.role !== "agent" && binding.role !== "loop-config") || !stream) unavailable();
 	bind(binding.owner, child, "loop-config");
 	streams.set(child, stream);
+	const agent = binding.role === "agent" ? (parent as Agent) : loopAgents.get(parent);
+	if (!agent) unavailable();
+	loopAgents.set(child, agent);
 	loopCallbacks.set(
 		child,
 		Object.fromEntries(loopCallbackKeys.map((key) => [key, (child as Record<string, unknown>)[key]])),
 	);
+}
+
+/** Only the actual loop can preserve the identity of its final provider request. */
+export function inheritSplyceLoopRequest(parent: object, child: object): void {
+	inheritSplyceLoopConfig(parent, child);
+	loopRequests.set(child, new Map(Reflect.ownKeys(child).map((key) => [key, Reflect.get(child, key)])));
+}
+
+/** Comparison only: callers cannot mint a request or attach authority to a copy. */
+export function isSplyceLoopRequest(agent: Agent, request: object): boolean {
+	if (!loopRequests.has(request) || loopAgents.get(request) !== agent) return false;
+	const snapshot = loopRequests.get(request)!;
+	const keys = Reflect.ownKeys(request);
+	const unchanged =
+		keys.length === snapshot.size &&
+		keys.every((key) => {
+			const descriptor = Object.getOwnPropertyDescriptor(request, key);
+			return descriptor && "value" in descriptor && snapshot.has(key) && descriptor.value === snapshot.get(key);
+		});
+	if (!unchanged) return false;
+	assertSameSplyceOwner(agent, request, "loop-config");
+	getSplyceAgentCallbacks(agent);
+	return true;
 }
 
 export function assertSplyceLoopStream(config: object, stream: StreamFn): void {

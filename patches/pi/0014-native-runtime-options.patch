@@ -1,0 +1,102 @@
+diff --git a/vendor/pi/packages/coding-agent/src/core/model-runtime.ts b/vendor/pi/packages/coding-agent/src/core/model-runtime.ts
+index a78826a..a49e121 100644
+--- a/vendor/pi/packages/coding-agent/src/core/model-runtime.ts
++++ b/vendor/pi/packages/coding-agent/src/core/model-runtime.ts
+@@ -191,7 +191,6 @@ export class ModelRuntime implements Models {
+ 		storedProviders: new Set(),
+ 		auth: new Map(),
+ 	};
+-	private availabilityRefreshSeq = 0;
+ 	private availabilityErrorSeq = 0;
+ 	private readonly providerAvailabilitySeq = new Map<string, number>();
+ 	private availabilityError: string | undefined;
+@@ -352,55 +351,7 @@ export class ModelRuntime implements Models {
+ 		};
+ 	}
+ 
+-	private async runAvailabilityRefresh(seq: number, errorSeq: number, signal: AbortSignal): Promise<void> {
+-		const providers = this.models.getProviders();
+-		const [available, checks, credentials] = await Promise.all([
+-			this.models.getAvailable(undefined, { signal }),
+-			Promise.all(
+-				providers.map(
+-					async (provider): Promise<[string, AuthCheck | undefined]> => [
+-						provider.id,
+-						await this.models.checkAuth(provider.id, { signal }),
+-					],
+-				),
+-			),
+-			this.credentials.list({ signal }),
+-		]);
+-		if (seq !== this.availabilityRefreshSeq) return;
+-		const auth = new Map(checks);
+-		const configuredProviders = new Set(
+-			checks
+-				.filter((entry): entry is [string, AuthCheck] => entry[1] !== undefined)
+-				.map(([providerId]) => providerId),
+-		);
+-		this.snapshot = {
+-			all: [...this.models.getModels()],
+-			available: [...available],
+-			configuredProviders,
+-			storedProviders: new Set(credentials.map((entry) => entry.providerId)),
+-			auth,
+-		};
+-		if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
+-	}
+-
+-	private queueAvailabilityRefresh(signal?: AbortSignal): Promise<void> {
+-		const seq = ++this.availabilityRefreshSeq;
+-		for (const [providerId, providerSeq] of this.providerAvailabilitySeq) {
+-			this.providerAvailabilitySeq.set(providerId, providerSeq + 1);
+-		}
+-		const errorSeq = ++this.availabilityErrorSeq;
+-		const effectiveSignal = operationSignal(signal);
+-		return this.runAvailabilityRefresh(seq, errorSeq, effectiveSignal).catch((error) => {
+-			if (errorSeq === this.availabilityErrorSeq && !effectiveSignal.aborted) {
+-				this.availabilityError = error instanceof Error ? error.message : String(error);
+-			}
+-			throw error;
+-		});
+-	}
+-
+ 	private async refreshProviderAvailability(providerId: string, signal: AbortSignal): Promise<void> {
+-		// Invalidate any full availability pass that started before this credential change.
+-		++this.availabilityRefreshSeq;
+ 		const providerSeq = (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1;
+ 		this.providerAvailabilitySeq.set(providerId, providerSeq);
+ 		const errorSeq = ++this.availabilityErrorSeq;
+@@ -726,15 +677,26 @@ export class ModelRuntime implements Models {
+ 			model.headers !== undefined
+ 		)
+ 			throw new ModelsError("provider", "Model does not match the registered native provider");
+-		// Capture before awaiting so caller mutation cannot add credentials or redirect the endpoint.
+-		const providerOptions = { ...options } as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
+-		const requestModel = structuredClone(selected) as TModel;
+-		for (const name of [
+-			"apiKey", "credentials", "env", "headers", "transformHeaders", "fetch", "baseUrl", "baseURL", "client", "transport",
+-		]) {
+-			if ((providerOptions as Record<string, unknown>)[name] !== undefined)
++		let signal: AbortSignal | undefined;
++		if (options !== undefined) {
++			if (options === null || typeof options !== "object")
++				throw new ModelsError("auth", "Native request overrides are unavailable");
++			const prototype = Object.getPrototypeOf(options);
++			if (
++				(prototype !== null && prototype !== Object.prototype) ||
++				Reflect.ownKeys(options).some((key) => key !== "signal")
++			)
++				throw new ModelsError("auth", "Native request overrides are unavailable");
++			const descriptor = Object.getOwnPropertyDescriptor(options, "signal");
++			if (descriptor && !Object.hasOwn(descriptor, "value"))
++				throw new ModelsError("auth", "Native request overrides are unavailable");
++			signal = descriptor?.value;
++			if (signal !== undefined && !(signal instanceof AbortSignal))
+ 				throw new ModelsError("auth", "Native request overrides are unavailable");
+ 		}
++		// Capture only validated data before awaiting; never invoke caller option getters.
++		const providerOptions = { signal } as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
++		const requestModel = structuredClone(selected) as TModel;
+ 		if (!(await this.checkAuth(provider.id, { signal: providerOptions.signal })))
+ 			throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
+ 		this.requireNativeProvider(provider.id, provider);

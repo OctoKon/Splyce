@@ -1,0 +1,28 @@
+diff --git a/vendor/pi/packages/ai/src/api/openai-completions.ts b/vendor/pi/packages/ai/src/api/openai-completions.ts
+index f13382c..0083b06 100644
+--- a/vendor/pi/packages/ai/src/api/openai-completions.ts
++++ b/vendor/pi/packages/ai/src/api/openai-completions.ts
+@@ -364,8 +364,9 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
+ 				? createLeasedFetch(credentials, "authorization", options?.fetch, (secret) => `Bearer ${secret}`)
+ 				: options?.fetch;
+ 			const compat = getCompat(model);
++			const declaredTools = getDeclaredTools(normalizedContext.messages);
+ 			const grammarToolInputProperties = createGrammarToolInputProperties(
+-				getDeclaredTools(normalizedContext.messages),
++				declaredTools,
+ 				compat.supportsOpenAIGrammarTools,
+ 			);
+ 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
+@@ -463,6 +464,12 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
+ 						partial: output,
+ 					});
+ 				} else if (block.type === "toolCall") {
++					// Some compatible services append Harmony channel metadata to the tool name.
++					const suffix = "<|channel|>commentary";
++					if (block.name.endsWith(suffix)) {
++						const name = block.name.slice(0, -suffix.length);
++						if (declaredTools.some((tool) => tool.name === name)) block.name = name;
++					}
+ 					const input = toolCallStates.get(block)!.input;
+ 					toolCallStates.delete(block);
+ 					if (input.kind === "custom") {

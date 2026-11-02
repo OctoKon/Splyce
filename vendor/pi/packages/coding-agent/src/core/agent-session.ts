@@ -26,11 +26,13 @@ import {
 	type AgentTool,
 	type AgentToolCallOutcome,
 	assertSameSplyceOwner,
+	assertSplycePersistence,
 	assertSplyceReady,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
 	disposeSplyceOwner,
 	inheritSplyceOwner,
+	isSplyceOwned,
 	type PrepareNextTurnContext,
 	runToolCall,
 	sealSplyceAgentCallbacks,
@@ -128,7 +130,6 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.t
 import { exportSessionToJsonl } from "./session-export.ts";
 import {
 	type BranchSummaryEntry,
-	type CompactionEntry,
 	type ContextEditEntry,
 	getLatestCompactionEntry,
 	type SessionEntry,
@@ -404,6 +405,7 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
+	private _pendingCustomFlush: Promise<void> | undefined;
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -425,9 +427,13 @@ export class AgentSession {
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
 	private _pendingBashMessages: BashExecutionMessage[] = [];
+	private _pendingBashFlush: Promise<void> | undefined;
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
+	private _initializeRuntime!: () => Promise<void>;
+	private _runtimeInitialization?: Promise<void>;
+	private _runtimeActive = false;
 	private _turnIndex = 0;
 	private readonly _entryIdsByMessage = new WeakMap<object, string>();
 	private readonly _boundaryDispatchedMessages = new WeakSet<object>();
@@ -489,6 +495,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		if (inheritSplyceOwner(config, this, "session")) {
+			assertSplycePersistence(config.sessionManager);
 			assertSameSplyceOwner(this, config.agent, "agent");
 			assertSameSplyceOwner(this, config.sessionManager, "session-manager");
 			assertSameSplyceOwner(this, config.settingsManager, "settings-manager");
@@ -540,6 +547,21 @@ export class AgentSession {
 
 	get modelRuntime(): ModelRuntime {
 		return this._modelRuntime;
+	}
+
+	/** Await provider registration before using a newly constructed or reloaded runtime. */
+	async initialize(): Promise<void> {
+		assertSplyceReady(this);
+		const runner = this._extensionRunner;
+		this._assertRuntimeCurrent(runner);
+		this._runtimeInitialization ??= this._initializeRuntime();
+		await this._runtimeInitialization;
+		this._assertRuntimeCurrent(runner);
+	}
+
+	private _assertRuntimeCurrent(runner: ExtensionRunner): void {
+		assertSplyceReady(this);
+		if (!this._runtimeActive || runner !== this._extensionRunner) assertSplyceReady();
 	}
 
 	private async _getRequiredRequestAuth(
@@ -638,7 +660,7 @@ export class AgentSession {
 	 * physical selection unless the branch holds a virtual one; checking a physical selection against
 	 * responses would record it on every prompt while `prepareRequest` redirects to another model.
 	 */
-	private _recordSelection(): void {
+	private async _recordSelection(): Promise<void> {
 		const model = this.model;
 		if (!model) return;
 		const getModel = (provider: string, modelId: string) => this._modelRuntime.getModel(provider, modelId);
@@ -646,7 +668,7 @@ export class AgentSession {
 		if (!recorded || (recorded.provider === model.provider && recorded.modelId === model.id)) return;
 		const recordedModel = getModel(recorded.provider, recorded.modelId);
 		if (!isVirtualModel(model) && !(recordedModel && isVirtualModel(recordedModel))) return;
-		this.sessionManager.appendModelChange(model.provider, model.id);
+		await this.sessionManager.withPersistence((manager) => manager.appendModelChange(model.provider, model.id));
 	}
 
 	/** The model whose limits apply to the conversation. */
@@ -859,9 +881,11 @@ export class AgentSession {
 			});
 			if (route.state !== undefined && route.state !== state) {
 				const data: VirtualModelStateData = { provider: model.provider, modelId: model.id, state: route.state };
-				const entry = this.sessionManager.getEntry(
-					this.sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, data),
+				const entryId = await this.sessionManager.withPersistence(
+					(manager) => manager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, data),
+					signal,
 				);
+				const entry = this.sessionManager.getEntry(entryId);
 				if (entry) this._emit({ type: "entry_appended", entry });
 			}
 			// The route stands: the router already decided this request. The state entry does not change
@@ -878,10 +902,13 @@ export class AgentSession {
 		message: AssistantMessage,
 		toolResults: ToolResultMessage[],
 	): Promise<boolean> {
-		this._lastActivityOutcome =
+		const outcome =
 			message.stopReason === "aborted" ? "aborted" : message.stopReason === "error" ? "error" : "completed";
 		const messageEntryId = this._findPersistedMessageEntryId(message);
-		if (!this._extensionRunner.hasHandlers("turn_end")) return false;
+		if (!this._extensionRunner.hasHandlers("turn_end")) {
+			this._lastActivityOutcome = outcome;
+			return false;
+		}
 		if (!messageEntryId) {
 			this._extensionRunner.emitError({
 				extensionPath: "<boundary>",
@@ -902,11 +929,12 @@ export class AgentSession {
 				toolResults,
 				messageEntryId,
 				toolResultEntryIds,
-				outcome: this._lastActivityOutcome,
+				outcome,
 			},
 			(entries) => this._buildBoundaryContext(entries, "turn_end"),
 		);
-		this._commitBoundaryDrafts(boundary.entries);
+		await this._commitBoundaryDrafts(boundary.entries);
+		this._lastActivityOutcome = outcome;
 		if (boundary.continue && !this._buildBoundaryContext([], "turn_end").canContinue) {
 			this._reportInvalidBoundaryContinuation("turn_end");
 			return false;
@@ -1061,11 +1089,17 @@ export class AgentSession {
 		};
 	}
 
-	private _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): void {
+	private async _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): Promise<void> {
 		assertSplyceReady(this);
-		const appended = this._applyBoundaryDrafts(this.sessionManager, drafts);
+		if (drafts.length === 0) return;
+		const appended = await this.sessionManager.withPersistence((manager) =>
+			this._applyBoundaryDrafts(manager, drafts).map((entry) => entry.id),
+		);
 		this._refreshFinalizedContext();
-		for (const entry of appended) this._emit({ type: "entry_appended", entry });
+		for (const id of appended) {
+			const entry = this.sessionManager.getEntry(id);
+			if (entry) this._emit({ type: "entry_appended", entry });
+		}
 	}
 
 	private _reportInvalidBoundaryContinuation(event: "turn_end" | "agent_before_settle"): void {
@@ -1118,6 +1152,10 @@ export class AgentSession {
 
 	private async _emitAgentSettled(): Promise<void> {
 		this._cacheWarmer?.onAgentSettled();
+		// Close the queue window in the same synchronous step as the final empty check.
+		while (this._pendingBashMessages.length > 0 || this._pendingCustomMessages.length > 0) {
+			await this._flushPendingRunMessages();
+		}
 		this._isAgentRunActive = false;
 		this._isEmittingAgentSettled = true;
 		try {
@@ -1138,6 +1176,72 @@ export class AgentSession {
 			return;
 		}
 		this._resolveIdleWaitIfIdle();
+	}
+
+	private async _persistFinalizedMessage(message: AgentMessage, existingId?: string): Promise<string | undefined> {
+		const detached = structuredClone(message);
+		return this.sessionManager.withPersistence((manager) => {
+			const payload =
+				detached.role === "custom"
+					? {
+							type: "custom_message",
+							customType: detached.customType,
+							content: detached.content,
+							display: detached.display,
+							details: detached.details,
+						}
+					: detached.role === "system" ||
+							detached.role === "user" ||
+							detached.role === "assistant" ||
+							detached.role === "toolResult"
+						? { type: "message", message: detached }
+						: undefined;
+			if (!payload) {
+				if (existingId) throw new Error("A finalized message replacement must remain persistable");
+				return undefined;
+			}
+			if (existingId) {
+				const entry = manager.getEntry(existingId);
+				if (!entry) throw new Error("Persisted message is missing");
+				const { id, parentId, timestamp } = entry;
+				for (const key of Object.keys(entry)) delete (entry as unknown as Record<string, unknown>)[key];
+				Object.assign(entry, { id, parentId, timestamp, ...payload });
+				return existingId;
+			}
+			if (detached.role === "custom") {
+				return manager.appendCustomMessageEntry(
+					detached.customType,
+					detached.content,
+					detached.display,
+					detached.details,
+				);
+			}
+			if (
+				detached.role === "system" ||
+				detached.role === "user" ||
+				detached.role === "assistant" ||
+				detached.role === "toolResult"
+			) {
+				return manager.appendMessage(detached);
+			}
+			return undefined;
+		});
+	}
+
+	private _readPersistedMessage(entryId: string, original: AgentMessage): AgentMessage {
+		const entry = this.sessionManager.getEntry(entryId);
+		if (entry?.type === "message") return structuredClone(entry.message);
+		if (entry?.type === "custom_message") {
+			return structuredClone({
+				role: "custom",
+				customType: entry.customType,
+				content: entry.content,
+				display: entry.display,
+				details: entry.details,
+				timestamp: original.timestamp,
+			});
+		}
+		throw new Error("Persisted message is missing");
 	}
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
@@ -1181,33 +1285,31 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first, then notify public listeners.
-		await this._emitExtensionEvent(event);
+		let entryId: string | undefined;
+		let extensionEvent = event;
+		let committedMessage: string | undefined;
+		if (event.type === "message_end") {
+			entryId = await this._persistFinalizedMessage(event.message);
+			if (entryId) {
+				const message = this._readPersistedMessage(entryId, event.message);
+				committedMessage = JSON.stringify(message);
+				extensionEvent = { ...event, message };
+			}
+		}
+		// Extensions observe a detached committed message; their replacement is a second commit.
+		await this._emitExtensionEvent(extensionEvent);
+		if (event.type === "message_end" && extensionEvent.type === "message_end" && entryId) {
+			if (JSON.stringify(extensionEvent.message) !== committedMessage) {
+				await this._persistFinalizedMessage(extensionEvent.message, entryId);
+			}
+			this._replaceMessageInPlace(event.message, this._readPersistedMessage(entryId, event.message));
+			this._entryIdsByMessage.set(event.message, entryId);
+		}
 		assertSplyceReady(this);
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 
 		// Handle session persistence
 		if (event.type === "message_end") {
-			let entryId: string | undefined;
-			// Check if this is a custom message from extensions
-			if (event.message.role === "custom") {
-				// Persist as CustomMessageEntry
-				entryId = this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
-				);
-			} else if (
-				event.message.role === "system" ||
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
-			) {
-				// Regular LLM message - persist as SessionMessageEntry
-				entryId = this.sessionManager.appendMessage(event.message);
-			}
-			if (entryId) this._entryIdsByMessage.set(event.message, entryId);
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			if (event.message.role === "assistant") {
@@ -1236,7 +1338,7 @@ export class AgentSession {
 		// extension and listener dispatch above also picks up messages that turn_end
 		// handlers queued.
 		if (event.type === "turn_end") {
-			this._flushPendingCustomMessages();
+			await this._flushPendingCustomMessages();
 		}
 	};
 
@@ -1284,7 +1386,7 @@ export class AgentSession {
 	 * found in the projected context, so the pair stays together whether the attempt comes from
 	 * the current run or a resumed session. An unpaired result fails the next request (#11227).
 	 */
-	private _omitRecoveryAttempt(message: AssistantMessage): void {
+	private async _omitRecoveryAttempt(message: AssistantMessage): Promise<void> {
 		const toolCallIds = new Set(message.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
 		// A context edit replaces the projected copy, so match it by source entry as well.
 		const entryId = this._findPersistedMessageEntryId(message);
@@ -1305,9 +1407,10 @@ export class AgentSession {
 		if (unresolvedProjectedTarget) {
 			throw new Error("Cannot persist recovery omission because a projected message has no source entry");
 		}
-		for (const targetId of targetIds) {
-			if (!targetId) continue;
-			const editId = this.sessionManager.appendContextEdit(targetId, null);
+		const editIds = await this.sessionManager.withPersistence((manager) =>
+			targetIds.flatMap((targetId) => (targetId ? [manager.appendContextEdit(targetId, null)] : [])),
+		);
+		for (const editId of editIds) {
 			const entry = this.sessionManager.getEntry(editId);
 			if (entry) this._emit({ type: "entry_appended", entry });
 		}
@@ -1931,21 +2034,29 @@ export class AgentSession {
 			messages = await this._prepareRun(trigger);
 		} catch (error) {
 			this._isAgentRunActive = false;
-			this._flushPendingBashMessages();
-			this._flushPendingCustomMessages();
-			this._resolveIdleWaitIfIdle();
+			try {
+				await this._flushPendingRunMessages();
+			} finally {
+				this._resolveIdleWaitIfIdle();
+			}
 			throw error;
 		}
 		assertSplyceReady(this);
 		// Messages held while the run was starting go before its starting messages, as they would
 		// have while idle. No run exists yet, so they cannot split a tool call from its result.
-		this._flushPendingBashMessages();
-		this._flushPendingCustomMessages();
+		try {
+			await this._flushPendingBashMessages();
+			await this._flushPendingCustomMessages();
+			await this._recordSelection();
+		} catch (error) {
+			this._isAgentRunActive = false;
+			this._resolveIdleWaitIfIdle();
+			throw error;
+		}
 		onStarted?.();
 
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
 		this._failedResponse = undefined;
-		this._recordSelection();
 		// The run records the loadout in the transcript; restored tools that did not register by now
 		// are dropped, so a tool that never registers does not stay pending.
 		this._pendingToolNames.clear();
@@ -1965,8 +2076,7 @@ export class AgentSession {
 			if (this._agentRunAbortRequested) this._finishCancelledRetry();
 			this._failedResponse = undefined;
 			this._runSystemPromptOptions = undefined;
-			this._flushPendingBashMessages();
-			this._flushPendingCustomMessages();
+			await this._flushPendingRunMessages();
 			await this._emitAgentSettled();
 		}
 	}
@@ -2077,8 +2187,8 @@ export class AgentSession {
 				{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
 				(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
 			);
-			this._commitBoundaryDrafts(result.entries);
-			this._flushPendingCustomMessages();
+			await this._commitBoundaryDrafts(result.entries);
+			await this._flushPendingCustomMessages();
 			const finalContext = this._buildBoundaryContext([], "agent_before_settle");
 			if (this._abortDuringBeforeSettle) return false;
 			const shouldContinue = result.continue || this.agent.hasQueuedMessages();
@@ -2147,6 +2257,7 @@ export class AgentSession {
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		assertSplyceReady(this);
+		await this.initialize();
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
 			return;
@@ -2447,34 +2558,60 @@ export class AgentSession {
 			// describe messages the session tree does not contain.
 			this._pendingCustomMessages.push(appMessage);
 		} else {
-			this._appendCustomMessage(appMessage);
+			await this._appendCustomMessage(appMessage);
 		}
 	}
 
-	private _appendCustomMessage(appMessage: CustomMessage): void {
+	private async _appendCustomMessage(appMessage: CustomMessage): Promise<void> {
 		assertSplyceReady(this);
-		this.sessionManager.appendCustomMessageEntry(
-			appMessage.customType,
-			appMessage.content,
-			appMessage.display,
-			appMessage.details,
+		const entryId = await this.sessionManager.withPersistence((manager) =>
+			manager.appendCustomMessageEntry(
+				appMessage.customType,
+				appMessage.content,
+				appMessage.display,
+				appMessage.details,
+			),
 		);
+		const committed = this._readPersistedMessage(entryId, appMessage);
 		this._refreshFinalizedContext();
-		this._emit({ type: "message_start", message: appMessage });
-		this._emit({ type: "message_end", message: appMessage });
+		this._emit({ type: "message_start", message: committed });
+		this._emit({ type: "message_end", message: committed });
 	}
 
 	/**
 	 * Append custom messages queued while the agent was running.
 	 * Called once the current turn's tool results are in agent state and session history.
 	 */
-	private _flushPendingCustomMessages(): void {
+	private async _flushPendingCustomMessages(): Promise<void> {
+		if (this._pendingCustomFlush) return this._pendingCustomFlush;
 		if (this._pendingCustomMessages.length === 0) return;
-
-		const pending = this._pendingCustomMessages;
-		this._pendingCustomMessages = [];
-		for (const appMessage of pending) {
-			this._appendCustomMessage(appMessage);
+		const drain = (async () => {
+			while (this._pendingCustomMessages.length > 0) {
+				const pending = this._pendingCustomMessages.slice();
+				const entryIds = await this.sessionManager.withPersistence((manager) =>
+					pending.map((message) =>
+						manager.appendCustomMessageEntry(
+							message.customType,
+							message.content,
+							message.display,
+							message.details,
+						),
+					),
+				);
+				this._pendingCustomMessages.splice(0, pending.length);
+				this._refreshFinalizedContext();
+				for (let i = 0; i < entryIds.length; i++) {
+					const message = this._readPersistedMessage(entryIds[i], pending[i]);
+					this._emit({ type: "message_start", message });
+					this._emit({ type: "message_end", message });
+				}
+			}
+		})();
+		this._pendingCustomFlush = drain;
+		try {
+			await drain;
+		} finally {
+			this._pendingCustomFlush = undefined;
 		}
 	}
 
@@ -2606,17 +2743,7 @@ export class AgentSession {
 
 		const previousModel = this.model;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(model);
-		this.agent.state.model = model;
-		this.sessionManager.appendModelChange(model.provider, model.id);
-		if (options.persist) {
-			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
-			this._addPersistedDefaultToNonEmptyScope(model);
-		}
-
-		// Apply thinking level for the new model.
-		// Per-model thinking level overrides take priority over the global default.
-		// Model persistence does not implicitly rewrite the global thinking default.
-		this.setThinkingLevel(thinkingLevel);
+		await this._applyModelSelection(model, thinkingLevel, options);
 
 		await this._emitModelSelect(model, previousModel, "set");
 	}
@@ -2672,20 +2799,7 @@ export class AgentSession {
 		const next = scopedModels[nextIndex];
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.model, next.thinkingLevel);
 
-		// Apply model
-		this.agent.state.model = next.model;
-		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
-		if (options.persist) {
-			this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
-			this._addPersistedDefaultToNonEmptyScope(next.model);
-		}
-
-		// Apply thinking level for the new model.
-		// - Explicit scoped model thinking level overrides defaults
-		// - Per-model thinking level overrides take priority over the global default
-		// setThinkingLevel clamps to model capabilities.
-		// Model persistence does not implicitly rewrite the global thinking default.
-		this.setThinkingLevel(thinkingLevel);
+		await this._applyModelSelection(next.model, thinkingLevel, options);
 
 		await this._emitModelSelect(next.model, currentModel, "cycle");
 
@@ -2708,16 +2822,7 @@ export class AgentSession {
 		const nextModel = availableModels[nextIndex];
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(nextModel);
-		this.agent.state.model = nextModel;
-		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
-		if (options.persist) {
-			this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
-			this._addPersistedDefaultToNonEmptyScope(nextModel);
-		}
-
-		// Apply thinking level for the new model.
-		// Model persistence does not implicitly rewrite the global thinking default.
-		this.setThinkingLevel(thinkingLevel);
+		await this._applyModelSelection(nextModel, thinkingLevel, options);
 
 		await this._emitModelSelect(nextModel, currentModel, "cycle");
 
@@ -2727,6 +2832,29 @@ export class AgentSession {
 	// =========================================================================
 	// Thinking Level Management
 	// =========================================================================
+
+	private async _applyModelSelection(
+		model: Model<any>,
+		level: ThinkingLevel,
+		options: ModelMutationOptions,
+	): Promise<void> {
+		const effectiveLevel = clampThinkingLevel(model, level) as ThinkingLevel;
+		const previousLevel = this.agent.state.thinkingLevel;
+		await this.sessionManager.withPersistence((manager) => {
+			manager.appendModelChange(model.provider, model.id);
+			if (effectiveLevel !== previousLevel) manager.appendThinkingLevelChange(effectiveLevel);
+		});
+		this.agent.state.model = model;
+		this.agent.state.thinkingLevel = effectiveLevel;
+		if (options.persist) {
+			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+			this._addPersistedDefaultToNonEmptyScope(model);
+		}
+		if (effectiveLevel !== previousLevel) {
+			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
+			await this._extensionRunner.emit({ type: "thinking_level_select", level: effectiveLevel, previousLevel });
+		}
+	}
 
 	/**
 	 * Set thinking level.
@@ -2743,6 +2871,7 @@ export class AgentSession {
 		const previousLevel = this.agent.state.thinkingLevel;
 		const isChanging = effectiveLevel !== previousLevel;
 
+		if (isChanging) this.sessionManager.appendThinkingLevelChange(effectiveLevel);
 		this.agent.state.thinkingLevel = effectiveLevel;
 
 		if (options.persist) {
@@ -2750,13 +2879,28 @@ export class AgentSession {
 		}
 
 		if (isChanging) {
-			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
 			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
 			void this._extensionRunner.emit({
 				type: "thinking_level_select",
 				level: effectiveLevel,
 				previousLevel,
 			});
+		}
+	}
+
+	async setThinkingLevelAsync(level: ThinkingLevel, options: ModelMutationOptions = {}): Promise<void> {
+		assertSplyceReady(this);
+		const availableLevels = this.getAvailableThinkingLevels();
+		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
+		const previousLevel = this.agent.state.thinkingLevel;
+		if (effectiveLevel !== previousLevel) {
+			await this.sessionManager.withPersistence((manager) => manager.appendThinkingLevelChange(effectiveLevel));
+		}
+		this.agent.state.thinkingLevel = effectiveLevel;
+		if (options.persist) this.settingsManager.setDefaultThinkingLevel(level);
+		if (effectiveLevel !== previousLevel) {
+			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
+			await this._extensionRunner.emit({ type: "thinking_level_select", level: effectiveLevel, previousLevel });
 		}
 	}
 
@@ -2773,6 +2917,14 @@ export class AgentSession {
 		const nextLevel = levels[nextIndex];
 
 		this.setThinkingLevel(nextLevel, options);
+		return nextLevel;
+	}
+
+	async cycleThinkingLevelAsync(options: ModelMutationOptions = {}): Promise<ThinkingLevel | undefined> {
+		if (!this.supportsThinking()) return undefined;
+		const levels = this.getAvailableThinkingLevels();
+		const nextLevel = levels[(levels.indexOf(this.thinkingLevel) + 1) % levels.length];
+		await this.setThinkingLevelAsync(nextLevel, options);
 		return nextLevel;
 	}
 
@@ -2973,15 +3125,17 @@ export class AgentSession {
 				throw new Error("Compaction cancelled");
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
+			const compactionId = await this.sessionManager.withPersistence(
+				(manager) =>
+					manager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage),
+				this._compactionAbortController.signal,
+			);
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
+			const savedCompactionEntry = this.sessionManager.getEntry(compactionId);
+			if (savedCompactionEntry?.type !== "compaction") throw new Error("Persisted compaction is missing");
 
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
@@ -2994,12 +3148,12 @@ export class AgentSession {
 			}
 
 			const compactionResult: CompactionResult = {
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
+				summary: savedCompactionEntry.summary,
+				firstKeptEntryId: savedCompactionEntry.firstKeptEntryId,
+				tokensBefore: savedCompactionEntry.tokensBefore,
 				estimatedTokensAfter,
-				usage,
-				details,
+				usage: savedCompactionEntry.usage,
+				details: savedCompactionEntry.details,
 			};
 			// compaction_end listeners may submit queued prompts, so expose idle state before notifying them.
 			this._clearManualCompactionState();
@@ -3164,8 +3318,8 @@ export class AgentSession {
 			}
 
 			// Persistently omit the selected final attempt before post-run recovery compaction.
+			await this._omitRecoveryAttempt(assistantMessage);
 			this._overflowRecoveryAttempted = true;
-			this._omitRecoveryAttempt(assistantMessage);
 			const retry = await this._runAutoCompaction("overflow", willRetry);
 			if (retry) this._failedResponse = assistantMessage;
 			return retry;
@@ -3299,15 +3453,17 @@ export class AgentSession {
 			}
 			abortController.signal.throwIfAborted();
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
+			const compactionId = await this.sessionManager.withPersistence(
+				(manager) =>
+					manager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage),
+				abortController.signal,
+			);
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
+			const savedCompactionEntry = this.sessionManager.getEntry(compactionId);
+			if (savedCompactionEntry?.type !== "compaction") throw new Error("Persisted compaction is missing");
 
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
@@ -3320,12 +3476,12 @@ export class AgentSession {
 			}
 
 			const result: CompactionResult = {
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
+				summary: savedCompactionEntry.summary,
+				firstKeptEntryId: savedCompactionEntry.firstKeptEntryId,
+				tokensBefore: savedCompactionEntry.tokensBefore,
 				estimatedTokensAfter,
-				usage,
-				details,
+				usage: savedCompactionEntry.usage,
+				details: savedCompactionEntry.details,
 			};
 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 
@@ -3335,6 +3491,12 @@ export class AgentSession {
 			// Continue once so queued messages are delivered.
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
+			if (
+				error instanceof Error &&
+				"code" in error &&
+				(error.code === "PERSIST_REDACTION_UNAVAILABLE" || error.code === "PERSIST_ENTRY_TOO_LARGE")
+			)
+				throw error;
 			const message = error instanceof Error ? error.message : "compaction failed";
 			const aborted = abortController?.signal.aborted === true || cancelledByExtension;
 			if (started) {
@@ -3383,6 +3545,7 @@ export class AgentSession {
 
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
 		assertSplyceReady(this);
+		await this.initialize();
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
 		}
@@ -3485,7 +3648,7 @@ export class AgentSession {
 		this.agent.state.model = refreshedModel;
 	}
 
-	private _bindExtensionCore(runner: ExtensionRunner): void {
+	private async _bindExtensionCore(runner: ExtensionRunner): Promise<void> {
 		if (inheritSplyceOwner(this, runner, "runner")) {
 			assertSameSplyceOwner(this, runner, "runner");
 		}
@@ -3514,43 +3677,27 @@ export class AgentSession {
 			return [...extensionCommands, ...templates, ...skills];
 		};
 
-		runner.bindCore(
+		await runner.bindCore(
 			{
-				sendMessage: (message, options) => {
-					this.sendCustomMessage(message, options).catch((err) => {
-						runner.emitError({
-							extensionPath: "<runtime>",
-							event: "send_message",
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-				},
-				sendUserMessage: (content, options) => {
-					this.sendUserMessage(content, options).catch((err) => {
-						runner.emitError({
-							extensionPath: "<runtime>",
-							event: "send_user_message",
-							error: err instanceof Error ? err.message : String(err),
-						});
-					});
-				},
-				appendEntry: (customType, data) => {
+				sendMessage: (message, options) => this.sendCustomMessage(message, options),
+				sendUserMessage: (content, options) => this.sendUserMessage(content, options),
+				appendEntry: async (customType, data) => {
 					assertSameSplyceOwner(this, runner, "runner");
-					const entryId = this.sessionManager.appendCustomEntry(customType, data);
+					const entryId = await this.sessionManager.withPersistence((manager) =>
+						manager.appendCustomEntry(customType, data),
+					);
 					const entry = this.sessionManager.getEntry(entryId);
 					if (entry) {
 						this._emit({ type: "entry_appended", entry });
 					}
 				},
-				setSessionName: (name) => {
-					this.setSessionName(name);
-				},
+				setSessionName: (name) => this.setSessionNameAsync(name),
 				getSessionName: () => {
 					return this.sessionManager.getSessionName();
 				},
-				setLabel: (entryId, label) => {
+				setLabel: async (entryId, label) => {
 					assertSameSplyceOwner(this, runner, "runner");
-					this.sessionManager.appendLabelChange(entryId, label);
+					await this.sessionManager.withPersistence((manager) => manager.appendLabelChange(entryId, label));
 				},
 				getActiveTools: () => this.getActiveToolNames(),
 				getAllTools: () => this.getAllTools(),
@@ -3564,7 +3711,7 @@ export class AgentSession {
 					return true;
 				},
 				getThinkingLevel: () => this.thinkingLevel,
-				setThinkingLevel: (level) => this.setThinkingLevel(level),
+				setThinkingLevel: (level) => this.setThinkingLevelAsync(level),
 			},
 			{
 				getModel: () => this.model,
@@ -3585,6 +3732,10 @@ export class AgentSession {
 				},
 				getContextUsage: () => this.getContextUsage(),
 				compact: (options) => {
+					if (isSplyceOwned(this))
+						throw Object.assign(new Error("PERSIST_REDACTION_UNAVAILABLE"), {
+							code: "PERSIST_REDACTION_UNAVAILABLE",
+						});
 					void (async () => {
 						try {
 							const result = await this.compact(options?.customInstructions);
@@ -3605,8 +3756,10 @@ export class AgentSession {
 					this._modelRuntime.registerProvider(name, config);
 					this._refreshCurrentModelFromRegistry();
 				},
-				registerNativeProvider: (provider) => {
-					this._modelRuntime.registerNativeProvider(provider);
+				registerNativeProvider: async (provider) => {
+					this._assertRuntimeCurrent(runner);
+					await this._modelRuntime.registerNativeProvider(provider);
+					this._assertRuntimeCurrent(runner);
 					this._refreshCurrentModelFromRegistry();
 				},
 				unregisterProvider: (name) => {
@@ -3623,6 +3776,7 @@ export class AgentSession {
 				},
 			},
 		);
+		this._assertRuntimeCurrent(runner);
 	}
 
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
@@ -3780,7 +3934,10 @@ export class AgentSession {
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}
-		this._bindExtensionCore(this._extensionRunner);
+		const runner = this._extensionRunner;
+		this._runtimeActive = true;
+		this._runtimeInitialization = undefined;
+		this._initializeRuntime = () => this._bindExtensionCore(runner);
 		this._applyExtensionBindings(this._extensionRunner);
 
 		const defaultActiveToolNames = this._baseToolsOverride
@@ -3798,6 +3955,7 @@ export class AgentSession {
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
+		this._runtimeActive = false;
 		oldRunner.invalidate();
 		const getDefaultTools = () =>
 			this._usesDefaultTools
@@ -3821,6 +3979,7 @@ export class AgentSession {
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
+		await this.initialize();
 
 		const hasBindings =
 			this._extensionUIContext ||
@@ -3902,13 +4061,12 @@ export class AgentSession {
 			return false;
 		}
 
-		this._retryAttempt++;
+		const attempt = this._retryAttempt + 1;
+		if (attempt > settings.maxRetries) return false;
 
-		if (this._retryAttempt > settings.maxRetries) {
-			// Preserve the completed attempt count so post-run handling can emit the final failure.
-			this._retryAttempt--;
-			return false;
-		}
+		// Omission must commit before a retry is announced or its counter advances.
+		await this._omitRecoveryAttempt(message);
+		this._retryAttempt = attempt;
 
 		const delayMs = retryDelayMs(settings, this._retryAttempt);
 
@@ -3919,9 +4077,6 @@ export class AgentSession {
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
 		});
-
-		// Keep the failed attempt in raw history while durably omitting it from model projection.
-		this._omitRecoveryAttempt(message);
 
 		// Wait with exponential backoff (abortable)
 		this._retryAbortController = new AbortController();
@@ -4004,7 +4159,7 @@ export class AgentSession {
 				},
 			);
 
-			this.recordBashResult(command, result, options);
+			await this.recordBashResultAsync(command, result, options);
 			return result;
 		} finally {
 			this._bashAbortControllers.delete(abortController);
@@ -4039,6 +4194,31 @@ export class AgentSession {
 		}
 	}
 
+	async recordBashResultAsync(
+		command: string,
+		result: BashResult,
+		options?: { excludeFromContext?: boolean },
+	): Promise<void> {
+		assertSplyceReady(this);
+		const bashMessage: BashExecutionMessage = {
+			role: "bashExecution",
+			command,
+			output: result.output,
+			exitCode: result.exitCode,
+			cancelled: result.cancelled,
+			truncated: result.truncated,
+			fullOutputPath: result.fullOutputPath,
+			timestamp: Date.now(),
+			excludeFromContext: options?.excludeFromContext,
+		};
+		if (this.isStreaming) {
+			this._pendingBashMessages.push(bashMessage);
+		} else {
+			await this.sessionManager.withPersistence((manager) => manager.appendMessage(bashMessage));
+			this._refreshFinalizedContext();
+		}
+	}
+
 	/**
 	 * Cancel running bash command.
 	 */
@@ -4062,14 +4242,38 @@ export class AgentSession {
 	 * Flush pending bash messages to agent state and session.
 	 * Called after agent turn completes to maintain proper message ordering.
 	 */
-	private _flushPendingBashMessages(): void {
+	private async _flushPendingBashMessages(): Promise<void> {
+		if (this._pendingBashFlush) return this._pendingBashFlush;
 		if (this._pendingBashMessages.length === 0) return;
-
-		for (const bashMessage of this._pendingBashMessages) {
-			this.sessionManager.appendMessage(bashMessage);
+		const drain = (async () => {
+			while (this._pendingBashMessages.length > 0) {
+				const pending = this._pendingBashMessages.slice();
+				await this.sessionManager.withPersistence((manager) => {
+					for (const bashMessage of pending) manager.appendMessage(bashMessage);
+				});
+				this._pendingBashMessages.splice(0, pending.length);
+				this._refreshFinalizedContext();
+			}
+		})();
+		this._pendingBashFlush = drain;
+		try {
+			await drain;
+		} finally {
+			this._pendingBashFlush = undefined;
 		}
-		this._pendingBashMessages = [];
-		this._refreshFinalizedContext();
+	}
+
+	private async _flushPendingRunMessages(): Promise<void> {
+		try {
+			while (this._pendingBashMessages.length > 0 || this._pendingCustomMessages.length > 0) {
+				await this._flushPendingBashMessages();
+				await this._flushPendingCustomMessages();
+			}
+		} catch (error) {
+			this._isAgentRunActive = false;
+			this._resolveIdleWaitIfIdle();
+			throw error;
+		}
 	}
 
 	// =========================================================================
@@ -4085,6 +4289,14 @@ export class AgentSession {
 		const event = { type: "session_info_changed", name: this.sessionManager.getSessionName() } as const;
 		this._emit(event);
 		void this._extensionRunner.emit(event);
+	}
+
+	async setSessionNameAsync(name: string): Promise<void> {
+		assertSplyceReady(this);
+		await this.sessionManager.withPersistence((manager) => manager.appendSessionInfo(name));
+		const event = { type: "session_info_changed", name: this.sessionManager.getSessionName() } as const;
+		this._emit(event);
+		await this._extensionRunner.emit(event);
 	}
 
 	// =========================================================================
@@ -4246,34 +4458,24 @@ export class AgentSession {
 
 			// Switch leaf (with or without summary)
 			// Summary is attached at the navigation target position (newLeafId), not the old branch
-			let summaryEntry: BranchSummaryEntry | undefined;
-			if (summaryText) {
-				// Create summary at target position (can be null for root)
-				const summaryId = this.sessionManager.branchWithSummary(
-					newLeafId,
-					summaryText,
-					summaryDetails,
-					fromExtension,
-					summaryUsage,
-				);
-				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
-
-				// Attach label to the summary entry
-				if (label) {
-					this.sessionManager.appendLabelChange(summaryId, label);
+			const summaryId = await this.sessionManager.withPersistence((manager) => {
+				if (summaryText) {
+					const id = manager.branchWithSummary(
+						newLeafId,
+						summaryText,
+						summaryDetails,
+						fromExtension,
+						summaryUsage,
+					);
+					if (label) manager.appendLabelChange(id, label);
+					return id;
 				}
-			} else if (newLeafId === null) {
-				// No summary, navigating to root - reset leaf
-				this.sessionManager.resetLeaf();
-			} else {
-				// No summary, navigating to non-root
-				this.sessionManager.branch(newLeafId);
-			}
-
-			// Attach label to target entry when not summarizing (no summary entry to label)
-			if (label && !summaryText) {
-				this.sessionManager.appendLabelChange(targetId, label);
-			}
+				if (newLeafId === null) manager.resetLeaf();
+				else manager.branch(newLeafId);
+				if (label) manager.appendLabelChange(targetId, label);
+				return undefined;
+			});
+			const summaryEntry = summaryId ? (this.sessionManager.getEntry(summaryId) as BranchSummaryEntry) : undefined;
 
 			// Update finalized context from the canonical session projection.
 			this._refreshFinalizedContext();

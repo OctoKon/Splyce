@@ -66,7 +66,7 @@ export interface CodemodeToolOptions {
 	 * Persists `store()` writes as a session custom entry. Without it, writes last only for the
 	 * current script; `load()` still reads entries already on the branch.
 	 */
-	appendEntry?: (customType: string, data: CodemodeStoreEntryData) => void;
+	appendEntry?: (customType: string, data: CodemodeStoreEntryData) => Promise<void>;
 	/** How the tool presents the loadout while active (the `codemode.mode` setting). Default: `on`. */
 	getMode?: () => CodemodeMode;
 	/** Token budget for tool declarations in the description. Default: {@link DEFAULT_CODEMODE_INLINE_BUDGET}. */

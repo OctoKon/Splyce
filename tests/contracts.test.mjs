@@ -1,6 +1,14 @@
+import {
+  validateModelsListRequest,
+  validateModelsListResult,
+} from "@splyce/pi/model-data";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import {
+  validatePageReadRequest,
+  validatePageReadResult,
+} from "@splyce/pi/page-data";
 import {
   CONTRACT_VERSION,
   PROTOCOL_VERSION,
@@ -15,6 +23,9 @@ import {
   validateHandshake,
   validateCursor,
   validateControlFrame,
+  validatePermissionRead,
+  validatePermissionSet,
+  validatePermissionResult,
 } from "@splyce/pi/contracts";
 
 const fixture = (name) =>
@@ -25,6 +36,147 @@ const fixture = (name) =>
     ),
   );
 const records = fixture("records");
+for (const { op, request, result } of fixture("permission-modes")) {
+  test(`permission contract: ${op} ${result.mode}`, () => {
+    const validate =
+      op === "permission.set" ? validatePermissionSet : validatePermissionRead;
+    assert.deepEqual(validate(request, request.requestId), request);
+    assert.deepEqual(validatePermissionResult(result, request), result);
+    assert.throws(() => validate(request, "different-request"));
+    for (const field of Object.keys(request)) {
+      const missing = { ...request };
+      delete missing[field];
+      assert.throws(() => validate(missing, request.requestId));
+      for (const value of [
+        null,
+        "",
+        "bad/id",
+        "bad\\id",
+        "bad id",
+        "bad\u0000id",
+        "bad\u200bid",
+        "λ".repeat(65),
+        "\ud800",
+        "x".repeat(129),
+      ])
+        assert.throws(() =>
+          validate({ ...request, [field]: value }, request.requestId),
+        );
+    }
+    for (const field of ["grantIds", "approvedBy", "path", "secret", "extra"]) {
+      assert.throws(() =>
+        validate({ ...request, [field]: "untrusted" }, request.requestId),
+      );
+      assert.throws(() =>
+        validatePermissionResult({ ...result, [field]: "untrusted" }, request),
+      );
+    }
+    for (const field of ["workspaceId", "sessionId"])
+      assert.throws(() =>
+        validatePermissionResult({ ...result, [field]: "other" }, request),
+      );
+    for (const mode of ["accept-edits", "plan", "unknown", null]) {
+      assert.throws(() =>
+        validatePermissionSet({ ...request, mode }, request.requestId),
+      );
+      assert.throws(() =>
+        validatePermissionResult({ ...result, mode }, request),
+      );
+    }
+    let read = false;
+    const accessor = { ...request };
+    Object.defineProperty(accessor, "mode", {
+      enumerable: true,
+      get() {
+        read = true;
+        return "bypass";
+      },
+    });
+    assert.throws(() => validate(accessor, request.requestId));
+    assert.equal(read, false);
+  });
+}
+for (const { op, request, result } of fixture("page-reads")) {
+  test(`page read contract: ${op}`, () => {
+    assert.deepEqual(validatePageReadRequest(op, request), request);
+    assert.deepEqual(validatePageReadResult(op, result), result);
+    for (const field of ["path", "credentialRef", "secret"]) {
+      assert.throws(
+        () => validatePageReadRequest(op, { ...request, [field]: "private" }),
+        { code: "PAGE_READ_INVALID" },
+      );
+      assert.throws(
+        () => validatePageReadResult(op, { ...result, [field]: "private" }),
+        { code: "PAGE_READ_INVALID" },
+      );
+    }
+    if (op === "usage.read") {
+      assert.throws(
+        () => validatePageReadResult(op, { ...result, inputTokens: 0 }),
+        { code: "PAGE_READ_INVALID" },
+      );
+      assert.throws(
+        () => validatePageReadResult(op, { ...result, runCount: -1 }),
+        { code: "PAGE_READ_INVALID" },
+      );
+    } else {
+      const key = op === "sessions.list" ? "sessions" : "entries";
+      const row = result[key][0];
+      assert.throws(
+        () => validatePageReadResult(op, { ...result, [key]: [row, row] }),
+        { code: "PAGE_READ_INVALID" },
+      );
+      assert.throws(
+        () =>
+          validatePageReadResult(op, {
+            ...result,
+            [key]: [{ ...row, credentialRef: "private" }],
+          }),
+        { code: "PAGE_READ_INVALID" },
+      );
+      assert.throws(
+        () =>
+          validatePageReadResult(op, {
+            ...result,
+            [key]: [{ ...row, createdAt: "2026-02-29T00:00:00.000Z" }],
+          }),
+        { code: "PAGE_READ_INVALID" },
+      );
+    }
+    if (op === "memory.search") {
+      for (const query of ["", " ", "x\n", "Ã©".repeat(513)])
+        assert.throws(
+          () => validatePageReadRequest(op, { ...request, query }),
+          { code: "PAGE_READ_INVALID" },
+        );
+    }
+  });
+}
+test("model catalog contract rejects malformed and private data", () => {
+  const { request, result } = fixture("models-list");
+  assert.deepEqual(validateModelsListRequest(request), request);
+  assert.deepEqual(validateModelsListResult(result), result);
+  for (const value of [
+    { ...request, profileId: "" },
+    { ...request, extra: true },
+  ])
+    assert.throws(() => validateModelsListRequest(value), {
+      code: "MODEL_CATALOG_INVALID",
+    });
+  const row = result.models[0];
+  for (const models of [
+    [row, row],
+    [{ ...row, secret: "x" }],
+    [{ ...row, modelId: "x\u200b" }],
+    [{ ...row, modelId: "\ud800" }],
+    [{ ...row, contextWindow: 0 }],
+    [{ ...row, title: "x\n" }],
+    Array(501).fill(row),
+  ])
+    assert.throws(() => validateModelsListResult({ ...result, models }), {
+      code: "MODEL_CATALOG_INVALID",
+    });
+});
 test("transport defaults are exact, immutable and shared with the native build spec", () => {
   assert.deepEqual(TRANSPORT_LIMITS, {
     maxInlineBytes: 65536,
@@ -79,6 +231,40 @@ const context = {
     scopeId === "w-demo" && referenceIds.has(id),
 };
 const copy = (value) => structuredClone(value);
+
+test("turn.started accepts an optional text prompt and rejects malformed prompt fields", () => {
+  const base = fixture("events").find((value) => value.kind === "turn.started");
+  const event = {
+    schemaVersion: 1,
+    protocolVersion: 2,
+    recordId: "r1",
+    eventId: "r1",
+    createdAt: "2026-10-26T00:00:00.000Z",
+    sourceIds: [],
+    scopeId: "w-demo",
+    sessionId: "s1",
+    seq: 1,
+    durable: true,
+    ...base,
+  };
+  assert.doesNotThrow(() => validateEvent(event, context));
+  assert.doesNotThrow(() =>
+    validateEvent(
+      {
+        ...event,
+        payload: { ...event.payload, userPrompt: "hello [redacted]" },
+      },
+      context,
+    ),
+  );
+  for (const userPrompt of [null, 12, {}, ""])
+    assert.throws(() =>
+      validateEvent(
+        { ...event, payload: { ...event.payload, userPrompt } },
+        context,
+      ),
+    );
+});
 const rejects = (call) =>
   assert.throws(
     call,
@@ -199,7 +385,7 @@ test("TD-26: profileSnapshot preserves namespace, slash, colon and Bedrock model
     "openrouter/anthropic",
     "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
     "arn:aws:bedrock:us-east-1:123456789012:foundation-model/anthropic.claude-v2:1",
-    "模型/модель:é",
+    "æ¨¡åž‹/Ð¼Ð¾Ð´ÐµÐ»ÑŒ:Ã©",
     "x".repeat(256),
   ]) {
     const input = boundProfileSnapshot(modelId);
@@ -578,7 +764,7 @@ test("TD-01: bounded inline events use UTF-8 bytes and accept exact boundary", (
   const input = event({
     kind: "turn.stream_delta",
     durable: false,
-    payload: { runId: "r1", delta: "😀".repeat(40) },
+    payload: { runId: "r1", delta: "ðŸ˜€".repeat(40) },
   });
   const byteLength = Buffer.byteLength(JSON.stringify(input.payload), "utf8");
   assert.ok(byteLength > JSON.stringify(input.payload).length);
@@ -592,7 +778,7 @@ test("TD-01: bounded inline events use UTF-8 bytes and accept exact boundary", (
 });
 
 test("shared inline default accepts 65536 UTF-8 payload bytes and rejects one extra", () => {
-  const payload = { runId: "r1", delta: "😀" };
+  const payload = { runId: "r1", delta: "ðŸ˜€" };
   const padding =
     TRANSPORT_LIMITS.maxInlineBytes -
     Buffer.byteLength(JSON.stringify(payload), "utf8");
@@ -713,6 +899,29 @@ test("TD-01: frozen handshake accepts unavailable but requires all readiness gua
     rejects(() => validateHandshake({ ...input, ...patch }));
 });
 
+test("TD-01: turn.tool_outcome summary is optional, strict and bounded", () => {
+  const base = fixture("events").find(
+    (value) => value.kind === "turn.tool_outcome",
+  );
+  assert.equal(base.payload.summary, undefined);
+  validateEvent(event(base), context);
+  const withSummary = (summary) =>
+    event({ ...base, payload: { ...base.payload, summary } });
+  const cases = fixture("tool-outcome-summary");
+  for (const summary of cases.valid)
+    assert.deepEqual(
+      validateEvent(withSummary(summary), context).payload.summary,
+      summary,
+    );
+  for (const summary of cases.invalid)
+    rejects(() => validateEvent(withSummary(summary), context));
+  const preview = (length) => ({ preview: "p".repeat(length) });
+  validateEvent(withSummary(preview(2048)), context);
+  rejects(() => validateEvent(withSummary(preview(2049)), context));
+  for (const bad of [null, [], "x", 1])
+    rejects(() => validateEvent(withSummary(bad), context));
+});
+
 test("TD-15: stream.resync is an exact unsequenced control frame, never an event", () => {
   const control = {
     frame: "control",
@@ -748,5 +957,52 @@ test("TD-15: stream.resync is an exact unsequenced control frame, never an event
   assert.equal(
     JSON.parse(BRIDGE_PROTOCOL_JSON).eventKinds.includes("stream.resync"),
     false,
+  );
+});
+
+test("TD-70: child.* payloads are strict at every level and status matches the kind", () => {
+  const find = (kind) => fixture("events").find((value) => value.kind === kind);
+  const valid = event(find("child.completed"));
+  assert.deepEqual(validateEvent(valid, context), valid);
+  const patched = (mutate) => {
+    const input = copy(valid);
+    mutate(input.payload);
+    return input;
+  };
+  for (const mutate of [
+    (p) => (p.budget.extra = 1),
+    (p) => (p.budget.used = -1),
+    (p) => delete p.budget.limit,
+    (p) => (p.citations[0].extra = 1),
+    (p) => (p.citations[0].line = 0),
+    (p) => (p.citations = ["src/main.ts:3"]),
+    (p) => delete p.citations[0].path,
+    (p) => (p.diff.extra = 1),
+    (p) => (p.diff.files[0].extra = 1),
+    (p) => (p.diff.files[0].status = "renamed"),
+    (p) => (p.diff = { files: "src/main.ts" }),
+    (p) => (p.status = "running"),
+    (p) => (p.reason = "BUDGET_TURNS"),
+    (p) => (p.runId = "r1"),
+    (p) => (p.parentRunId = "missing"),
+  ])
+    rejects(() => validateEvent(patched(mutate), context));
+  for (const [kind, status] of [
+    ["child.started", "completed"],
+    ["child.progress", "failed"],
+    ["child.cancelled", "running"],
+  ]) {
+    const fields = find(kind);
+    rejects(() =>
+      validateEvent(
+        event({ ...fields, payload: { ...fields.payload, status } }),
+        context,
+      ),
+    );
+  }
+  const failed = find("child.failed");
+  const { reason: _reason, ...noReason } = failed.payload;
+  rejects(() =>
+    validateEvent(event({ ...failed, payload: noReason }), context),
   );
 });

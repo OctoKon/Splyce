@@ -9,9 +9,7 @@
     run,
     stale = false,
     showApprovalControls = true,
-    // Fail closed: a caller that does not state who may answer must not get live
-    // approval controls. App.svelte already passes () => false because session
-    // revisions are not delivered to the renderer yet.
+    // Fail closed unless the caller supplies a live, revision-bound responder.
     canRespond = () => false,
     onApproval,
   }: {
@@ -24,7 +22,7 @@
       runId: string,
       actionId: string,
       decision: ApprovalDecision,
-    ) => void;
+    ) => void | Promise<void>;
   } = $props();
 
   let actions = $derived(
@@ -32,6 +30,13 @@
   );
   let runStatus = $derived(projectTurnStatus(run.status));
 </script>
+
+{#if run.userPrompt !== undefined}
+  <article class="user-turn" aria-label="User message" data-testid="turn-user">
+    <span class="user-label">USER</span>
+    <p>{run.userPrompt}</p>
+  </article>
+{/if}
 
 <article
   class="turn"
@@ -43,11 +48,7 @@
   aria-label="Assistant turn"
 >
   <header class="turn-head">
-    <span
-      class="status"
-      data-status={run.status}
-      data-tone={runStatus.tone}
-    >
+    <span class="status" data-status={run.status} data-tone={runStatus.tone}>
       {runStatus.label}
     </span>
     {#if stale}
@@ -56,9 +57,7 @@
   </header>
 
   {#if stale}
-    <p class="banner" role="status">
-      This transcript may be incomplete.
-    </p>
+    <p class="banner" role="status">This transcript may be incomplete.</p>
   {/if}
 
   <div class="transcript" aria-busy={run.status === "streaming"}>
@@ -99,6 +98,30 @@
 </article>
 
 <style>
+  .user-turn {
+    align-self: flex-end;
+    margin: 1rem 0 1rem auto;
+    max-width: 85%;
+    width: fit-content;
+    padding: 0.75rem 1rem;
+    border-radius: 1rem 1rem 0.25rem 1rem;
+    border: 1px solid var(--splyce-border-default, #e5e7eb);
+    background: var(--splyce-surface-raised, #ffffff);
+    color: var(--splyce-text-primary, #111827);
+  }
+
+  .user-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--splyce-text-secondary, #4b5563);
+  }
+
+  .user-turn p {
+    margin: 0.25rem 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
   .turn {
     display: flex;
     flex-direction: column;
@@ -202,4 +225,3 @@
     }
   }
 </style>
-

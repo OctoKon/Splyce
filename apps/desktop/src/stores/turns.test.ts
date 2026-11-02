@@ -53,6 +53,28 @@ function applyAll(
 const started = (runId = "run_a", turnId = "turn_a"): SplyceEventEnvelope =>
   event(1, "turn.started", { runId, turnId });
 
+it("keeps two submitted prompts and replies in conversation order", () => {
+  const state = applyAll(createTurnsState(), [
+    event(1, "turn.started", {
+      runId: "run_a",
+      turnId: "turn_a",
+      userPrompt: "My name is Itachi.",
+    }),
+    delta(2, "ok"),
+    completed(3),
+    event(4, "turn.started", {
+      runId: "run_b",
+      turnId: "turn_b",
+      userPrompt: "What is my name?",
+    }),
+    delta(5, "Itachi", "run_b", "turn_b"),
+    completed(6, "run_b"),
+  ]);
+  expect(
+    Object.values(state.runs).flatMap((run) => [run.userPrompt, run.text]),
+  ).toEqual(["My name is Itachi.", "ok", "What is my name?", "Itachi"]);
+});
+
 function delta(
   seq: number,
   text: string,

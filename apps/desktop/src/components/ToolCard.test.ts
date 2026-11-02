@@ -190,4 +190,35 @@ describe("tool activity card", () => {
       document.querySelector('[data-testid="approval-allow-button"]'),
     ).not.toBeNull();
   });
+
+  it("reports a rejected response and allows retry", async () => {
+    const onApproval = vi.fn().mockRejectedValue(new Error("unavailable"));
+    render({
+      action: {
+        ...fixtureAction(),
+        actionId: "act_1",
+        status: "pending",
+        approval: approval("requested"),
+      },
+      canRespond: () => true,
+      onApproval,
+    });
+    (
+      document.querySelector(
+        '[data-testid="approval-deny-button"]',
+      ) as HTMLButtonElement
+    ).click();
+    expect(onApproval).toHaveBeenCalledWith("apr_1", "run_1", "act_1", "deny");
+    await vi.waitFor(() => {
+      flushSync();
+      expect(text()).toContain("response could not be confirmed");
+    });
+    expect(
+      (
+        document.querySelector(
+          '[data-testid="approval-deny-button"]',
+        ) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+  });
 });

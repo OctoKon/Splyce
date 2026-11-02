@@ -1,0 +1,32 @@
+{
+  "valid": [
+    {},
+    { "exitCode": 0 },
+    { "exitCode": null, "durationMs": 0, "truncated": false },
+    { "exitCode": -1, "durationMs": 12, "bytes": 4096, "truncated": true },
+    { "bytes": 0, "preview": "" },
+    {
+      "exitCode": 2,
+      "durationMs": 31,
+      "bytes": 9500,
+      "truncated": true,
+      "preview": "FAIL src/a.test.ts"
+    }
+  ],
+  "invalid": [
+    { "surprise": 1 },
+    { "exitCode": 0, "stdout": "x" },
+    { "exitCode": 1.5 },
+    { "exitCode": "0" },
+    { "exitCode": 1e300 },
+    { "durationMs": -1 },
+    { "durationMs": 1.5 },
+    { "bytes": -1 },
+    { "bytes": 2.5 },
+    { "bytes": "9" },
+    { "truncated": "yes" },
+    { "preview": 7 },
+    { "preview": null },
+    { "durationMs": null }
+  ]
+}

@@ -33,6 +33,114 @@ export class ContractError extends Error {
   }
 }
 
+export const PERMISSION_MODES = ["manual", "auto", "bypass"] as const;
+export type NativePermissionMode = (typeof PERMISSION_MODES)[number];
+export interface PermissionReadRequest {
+  readonly requestId: string;
+  readonly workspaceId: string;
+  readonly sessionId: string;
+}
+export interface PermissionSetRequest extends PermissionReadRequest {
+  readonly mode: NativePermissionMode;
+}
+export interface PermissionResult {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly mode: NativePermissionMode;
+}
+
+function permissionFields(value: unknown, fields: readonly string[]) {
+  json(value, false);
+  const input = object(value, "permission");
+  requireThat(
+    Reflect.ownKeys(input).length === fields.length &&
+      fields.every((field) => Object.hasOwn(input, field)),
+    "INVALID_PERMISSION_MODE",
+    "fields",
+  );
+  for (const field of fields.filter((field) => field !== "mode")) {
+    const id = input[field];
+    requireThat(
+      typeof id === "string" &&
+        id.length <= 128 &&
+        /^[\x21-\x7e]+$/u.test(id) &&
+        !/[/\\]/u.test(id),
+      "INVALID_PERMISSION_MODE",
+      field,
+    );
+  }
+  if (fields.includes("mode"))
+    requireThat(
+      PERMISSION_MODES.some((mode) => mode === input.mode),
+      "INVALID_PERMISSION_MODE",
+      "mode",
+    );
+  return input;
+}
+
+export function validatePermissionRead(
+  value: unknown,
+  requestId: string,
+): Readonly<PermissionReadRequest> {
+  const input = permissionFields(value, [
+    "requestId",
+    "workspaceId",
+    "sessionId",
+  ]);
+  requireThat(
+    input.requestId === requestId,
+    "INVALID_PERMISSION_MODE",
+    "requestId",
+  );
+  return Object.freeze({
+    requestId: input.requestId as string,
+    workspaceId: input.workspaceId as string,
+    sessionId: input.sessionId as string,
+  });
+}
+
+export function validatePermissionSet(
+  value: unknown,
+  requestId: string,
+): Readonly<PermissionSetRequest> {
+  const input = permissionFields(value, [
+    "requestId",
+    "workspaceId",
+    "sessionId",
+    "mode",
+  ]);
+  requireThat(
+    input.requestId === requestId,
+    "INVALID_PERMISSION_MODE",
+    "requestId",
+  );
+  return Object.freeze({
+    requestId: input.requestId as string,
+    workspaceId: input.workspaceId as string,
+    sessionId: input.sessionId as string,
+    mode: input.mode as NativePermissionMode,
+  });
+}
+
+export function validatePermissionResult(
+  value: unknown,
+  request: PermissionReadRequest | PermissionSetRequest,
+): Readonly<PermissionResult> {
+  const result = permissionFields(value, ["workspaceId", "sessionId", "mode"]);
+  requireThat(
+    result.workspaceId === request.workspaceId &&
+      result.sessionId === request.sessionId &&
+      (!("mode" in request) || result.mode === request.mode),
+    "INVALID_PERMISSION_MODE",
+    "result",
+  );
+  return Object.freeze({
+    workspaceId: result.workspaceId as string,
+    sessionId: result.sessionId as string,
+    mode: result.mode as NativePermissionMode,
+  });
+}
+
 export interface ContractContext {
   scopeId: string;
   sessionId: string;
@@ -298,6 +406,14 @@ export interface RecordBodies {
     firstChildEntryId: string | null;
     activeLeafEntryId: string | null;
   };
+  /** TD-70 write-child file ownership; a release is a later record with releasedAt. */
+  fileClaim: {
+    workspaceId: string;
+    path: string;
+    ownerChildId: string;
+    revision: string;
+    releasedAt: string | null;
+  };
   /** TD-13 native-admitted directory. The canonical path is never persisted
    * here (records are exportable and path-free); it lives in the native-only
    * `workspace_paths` table keyed by workspaceId. */
@@ -379,8 +495,12 @@ type Rule =
   | "uint"
   | "bool"
   | "limits"
+  | "toolSummary"
   | "portAvailability"
   | "eventEnvelope"
+  | "childBudget"
+  | "citations"
+  | "childDiff"
   | readonly string[];
 type Shape = { readonly [key: string]: Rule };
 export const RECORD_SCHEMAS = {
@@ -527,6 +647,13 @@ export const RECORD_SCHEMAS = {
     forkPointEntryId: "nullableId",
     firstChildEntryId: "nullableId",
     activeLeafEntryId: "nullableId",
+  },
+  fileClaim: {
+    workspaceId: "ref",
+    path: "text",
+    ownerChildId: "id",
+    revision: "text",
+    releasedAt: "nullableUtc",
   },
   admittedWorkspace: {
     workspaceId: "id",
@@ -727,7 +854,7 @@ export interface SplyceErrorPayload {
     "RESTART_ENGINE" | "SWITCH_PROFILE" | "REVERT_HUNK" | "RETRY_SAFE";
 }
 export interface EventPayloads {
-  "turn.started": { runId: string; turnId: string };
+  "turn.started": { runId: string; turnId: string; userPrompt?: string };
   "turn.stream_delta": { runId: string; delta: string };
   "turn.thought_delta": { runId: string; delta: string };
   "turn.tool_intent": {
@@ -743,6 +870,13 @@ export interface EventPayloads {
     status: "success" | "error" | "uncertain";
     outcomeRef?: string;
     error?: string;
+    summary?: {
+      exitCode?: number | null;
+      durationMs?: number;
+      bytes?: number;
+      truncated?: boolean;
+      preview?: string;
+    };
   };
   "turn.completed": {
     runId: string;
@@ -778,7 +912,71 @@ export interface EventPayloads {
     activeActionIds: string[];
     state: "ready" | "busy" | "waiting_approval" | "stopped";
   };
+  // TD-70 delegated children: one payload shape for every child.* kind.
+  "child.started": ChildEventPayload;
+  "child.progress": ChildEventPayload;
+  "child.completed": ChildEventPayload;
+  "child.failed": ChildEventPayload;
+  "child.cancelled": ChildEventPayload;
 }
+/** TD-70 child status; `budget` is tokens used against the child's limit. */
+export interface ChildEventPayload {
+  childId: string;
+  /** The parent run. */
+  parentRunId: string;
+  team?: string;
+  role?: string;
+  status: (typeof SUBAGENT_STATUSES)[number];
+  budget: { used: number; limit: number };
+  summary: string;
+  citations: { path: string; line?: number }[];
+  /** Write children: files changed in the worktree, pending review. */
+  diff?: {
+    files: { path: string; status: (typeof SUBAGENT_FILE_STATUSES)[number] }[];
+  };
+  /** child.failed only. */
+  reason?: (typeof SUBAGENT_FAILURE_REASONS)[number];
+}
+export const SUBAGENT_STATUSES = [
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+] as const;
+export const SUBAGENT_FILE_STATUSES = ["added", "modified", "deleted"] as const;
+export const CHILD_KIND_STATUS: Readonly<
+  Record<
+    | "child.started"
+    | "child.progress"
+    | "child.completed"
+    | "child.failed"
+    | "child.cancelled",
+    (typeof SUBAGENT_STATUSES)[number]
+  >
+> = {
+  "child.started": "running",
+  "child.progress": "running",
+  "child.completed": "completed",
+  "child.failed": "failed",
+  "child.cancelled": "cancelled",
+};
+export const SUBAGENT_MODES = ["read", "write"] as const;
+export const SUBAGENT_FAILURE_REASONS = [
+  "BUDGET_TURNS",
+  "BUDGET_TOKENS",
+  "BUDGET_WALL_CLOCK",
+  "CAPABILITY_DENIED",
+  "PATH_OUTSIDE_WORKSPACE",
+  "FILE_CLAIM_CONFLICT",
+  "DEPENDENCY_FAILED",
+  "POLICY_DENIED",
+  "PROVIDER_ERROR",
+  "ENGINE_ERROR",
+] as const;
+Object.freeze(SUBAGENT_MODES);
+Object.freeze(SUBAGENT_FAILURE_REASONS);
+Object.freeze(SUBAGENT_STATUSES);
+Object.freeze(SUBAGENT_FILE_STATUSES);
 export type EventKind = keyof EventPayloads;
 export type SplyceEvent = {
   [K in EventKind]: {
@@ -802,6 +1000,20 @@ export type SplyceEventEnvelope = SplyceEvent;
 export type SplyceEventDraft = {
   [K in EventKind]: Omit<Extract<SplyceEvent, { kind: K }>, "seq">;
 }[EventKind];
+const CHILD_EVENT = {
+  childId: "id",
+  parentRunId: "ref",
+  status: SUBAGENT_STATUSES,
+  budget: "childBudget",
+  summary: "delta",
+  citations: "citations",
+} as const satisfies Shape;
+const CHILD_OPTIONAL: Shape = {
+  team: "text",
+  role: "text",
+  diff: "childDiff",
+  reason: SUBAGENT_FAILURE_REASONS,
+};
 const EVENT_SCHEMAS = {
   "turn.started": { runId: "ref", turnId: "ref" },
   "turn.stream_delta": { runId: "ref", delta: "delta" },
@@ -849,14 +1061,29 @@ const EVENT_SCHEMAS = {
     activeActionIds: "refs",
     state: ["ready", "busy", "waiting_approval", "stopped"],
   },
+  "child.started": CHILD_EVENT,
+  "child.progress": CHILD_EVENT,
+  "child.completed": CHILD_EVENT,
+  "child.failed": CHILD_EVENT,
+  "child.cancelled": CHILD_EVENT,
 } as const satisfies { [K in EventKind]: Shape };
 const EVENT_OPTIONAL: Partial<Record<EventKind, Shape>> = {
+  "turn.started": { userPrompt: "text" },
   "engine.status": { ports: "portAvailability" },
-  "turn.tool_outcome": { outcomeRef: "ref", error: "text" },
+  "turn.tool_outcome": {
+    outcomeRef: "ref",
+    error: "text",
+    summary: "toolSummary",
+  },
   "approval.requested": { timeoutMs: "uint" },
   "turn.stream_delta": { turnId: "ref" },
   "turn.thought_delta": { turnId: "ref" },
   "run.reconnect_snapshot": { turnId: "ref" },
+  "child.started": CHILD_OPTIONAL,
+  "child.progress": CHILD_OPTIONAL,
+  "child.completed": CHILD_OPTIONAL,
+  "child.failed": CHILD_OPTIONAL,
+  "child.cancelled": CHILD_OPTIONAL,
 };
 export const EVENT_KINDS = Object.freeze(
   Object.keys(EVENT_SCHEMAS) as EventKind[],
@@ -941,7 +1168,10 @@ function opaque(value: unknown, field: string): asserts value is string {
   requireThat(!/\s|[\\/]/u.test(value), "INVALID_SHAPE", field);
 }
 /** A model reference may contain `/` and `:` (OpenRouter, Bedrock); no whitespace, control or format chars. */
-function modelRef(value: unknown, field: string): asserts value is string {
+export function modelRef(
+  value: unknown,
+  field: string,
+): asserts value is string {
   text(value, field);
   requireThat(
     value.length <= 256 && !/[\s\u0000-\u001f\u007f-\u009f\p{Cf}]/u.test(value),
@@ -1160,6 +1390,74 @@ function rule(
       for (const item of value)
         spec === "refs" ? reference(item, field, context) : text(item, field);
       break;
+    case "toolSummary": {
+      const summary = object(value, field);
+      const { exitCode, preview } = summary;
+      shape(
+        summary,
+        {},
+        { durationMs: "uint", bytes: "uint", truncated: "bool" },
+        context,
+        false,
+      );
+      requireThat(
+        Object.keys(summary).every((key) =>
+          ["exitCode", "durationMs", "bytes", "truncated", "preview"].includes(
+            key,
+          ),
+        ),
+        "INVALID_SHAPE",
+        "unknown summary field",
+      );
+      requireThat(
+        exitCode === undefined ||
+          exitCode === null ||
+          Number.isSafeInteger(exitCode),
+        "INVALID_SHAPE",
+        "exitCode",
+      );
+      requireThat(
+        preview === undefined ||
+          (typeof preview === "string" && preview.length <= 2048),
+        "INVALID_SHAPE",
+        "preview",
+      );
+      break;
+    }
+    case "childBudget":
+      shape(
+        object(value, field),
+        { used: "uint", limit: "uint" },
+        {},
+        context,
+        true,
+      );
+      break;
+    case "citations":
+      requireThat(Array.isArray(value), "INVALID_SHAPE", field);
+      for (const item of value) {
+        const citation = object(item, field);
+        shape(citation, { path: "text" }, { line: "uint" }, context, true);
+        requireThat(citation.line !== 0, "INVALID_SHAPE", "line");
+      }
+      break;
+    case "childDiff": {
+      const diff = object(value, field);
+      requireThat(
+        Object.keys(diff).join() === "files" && Array.isArray(diff.files),
+        "INVALID_SHAPE",
+        "files",
+      );
+      for (const file of diff.files)
+        shape(
+          object(file, "files"),
+          { path: "text", status: SUBAGENT_FILE_STATUSES },
+          {},
+          context,
+          true,
+        );
+      break;
+    }
     case "limits":
       for (const limit of Object.values(object(value, field)))
         requireThat(
@@ -1235,24 +1533,8 @@ export function validateRecord<K extends RecordKind>(
   const record = object(value, "record");
   metadata(record, context);
   shape(record, RECORD_SCHEMAS[kind], {}, context, false);
-  if (kind === "profileSnapshot" && Object.hasOwn(record, "bindings")) {
-    requireThat(Array.isArray(record.bindings), "INVALID_SHAPE", "bindings");
-    const roles = new Set<string>();
-    for (const value of record.bindings as unknown[]) {
-      const binding = object(value, "binding");
-      shape(
-        binding,
-        { role: "id", providerConnectionId: "id", connectionRevision: "id" },
-        { modelId: "modelRef" },
-        context,
-        true,
-      );
-      const role = binding.role as string;
-      requireThat(!roles.has(role), "INVALID_SHAPE", "duplicate binding role");
-      roles.add(role);
-    }
-    requireThat(roles.has("chat"), "INVALID_SHAPE", "chat binding");
-  }
+  if (kind === "profileSnapshot" && Object.hasOwn(record, "bindings"))
+    validateProfileBindings(record.bindings, context);
   if (kind === "configurationTransition") {
     const hasProfile = Object.hasOwn(record, "profileId");
     const hasRevision = Object.hasOwn(record, "profileRevision");
@@ -1357,6 +1639,40 @@ export function validateRecord<K extends RecordKind>(
     requireThat(record.kind === kind, "UNKNOWN_KIND", "kind");
   return value as RecordByKind[K];
 }
+
+/** Binding-set invariants of a profile snapshot: strict shape, unique roles, a chat binding. */
+export function validateProfileBindings(
+  bindings: unknown,
+  context: ContractContext = BINDINGS_CONTEXT,
+): void {
+  requireThat(Array.isArray(bindings), "INVALID_SHAPE", "bindings");
+  const roles = new Set<string>();
+  for (const value of bindings as unknown[]) {
+    const binding = object(value, "binding");
+    shape(
+      binding,
+      { role: "id", providerConnectionId: "id", connectionRevision: "id" },
+      { modelId: "modelRef" },
+      context,
+      true,
+    );
+    const role = binding.role as string;
+    requireThat(!roles.has(role), "INVALID_SHAPE", "duplicate binding role");
+    roles.add(role);
+  }
+  requireThat(roles.has("chat"), "INVALID_SHAPE", "chat binding");
+}
+// Binding fields are ids and model references only, so nothing is ever resolved.
+const BINDINGS_CONTEXT: ContractContext = {
+  scopeId: "bindings",
+  sessionId: "bindings",
+  configRevision: "bindings",
+  profileRevision: "bindings",
+  policyRevision: "bindings",
+  lastDurableSeq: 0,
+  maxInlineBytes: 1,
+  resolveReference: () => false,
+};
 
 export function validateCursor(
   afterSeq: unknown,
@@ -1563,6 +1879,19 @@ export function validateEvent(
         "WRONG_SCOPE",
         "sessionId",
       );
+    if (kind.startsWith("child.")) {
+      requireThat(
+        payload.status ===
+          CHILD_KIND_STATUS[kind as keyof typeof CHILD_KIND_STATUS],
+        "INVALID_SHAPE",
+        "status",
+      );
+      requireThat(
+        (kind === "child.failed") === Object.hasOwn(payload, "reason"),
+        "INVALID_SHAPE",
+        "reason",
+      );
+    }
     if (kind === "run.reconnect_snapshot")
       validateCursor(payload.lastDurableSeq, context);
   }

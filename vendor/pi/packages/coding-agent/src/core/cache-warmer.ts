@@ -1,3 +1,4 @@
+import { isSplyceOwned } from "@earendil-works/pi-agent-core";
 import {
 	type Api,
 	type Context,
@@ -154,6 +155,19 @@ interface ActiveRun extends CacheWarmRequest {
 	timer?: ReturnType<typeof setTimeout>;
 }
 
+type CacheWarmingSessionManager = Pick<SessionManager, "appendUsage" | "getBranch"> &
+	Partial<Pick<SessionManager, "withPersistence">>;
+
+function persistenceUnavailable(): never {
+	throw Object.assign(new Error("PERSIST_REDACTION_UNAVAILABLE"), { code: "PERSIST_REDACTION_UNAVAILABLE" });
+}
+
+function rethrowPersistenceError(error: unknown): void {
+	const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+	if (code === "PERSIST_REDACTION_UNAVAILABLE" || code === "PERSIST_ENTRY_TOO_LARGE")
+		throw Object.assign(new Error(code), { code });
+}
+
 /**
  * Keeps one prompt cache entry alive by re-sending its request with a
  * one-token output cap before the entry expires. `start` replaces any
@@ -163,7 +177,7 @@ export class CacheWarmer {
 	private run?: ActiveRun;
 	private inactive: CacheWarmingStatus;
 	private readonly models: Pick<ModelRuntime, "streamSimple">;
-	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">;
+	private readonly sessionManager: CacheWarmingSessionManager;
 	private readonly getMode: () => CacheWarmingMode;
 	/** Lets extensions override `event.action`; failures fall back to pi's decision. */
 	private readonly decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction>;
@@ -172,7 +186,7 @@ export class CacheWarmer {
 
 	constructor(
 		models: Pick<ModelRuntime, "streamSimple">,
-		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">,
+		sessionManager: CacheWarmingSessionManager,
 		getMode: () => CacheWarmingMode,
 		decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction> = async (event) => event.action,
 	) {
@@ -209,6 +223,8 @@ export class CacheWarmer {
 			this.stop("cache warming disabled");
 			return;
 		}
+		// Native background warming has no awaited host failure channel yet.
+		if (isSplyceOwned(this.sessionManager)) persistenceUnavailable();
 		if (!isReplayable(request.model, request.options)) {
 			this.stop("request cannot be replayed safely");
 			return;
@@ -293,7 +309,16 @@ export class CacheWarmer {
 			this.stop(run.phase === "idle" ? "30-minute idle safety limit reached" : "one-hour safety limit reached");
 			return;
 		}
-		run.timer = setTimeout(() => void this.refresh(run), Math.max(0, run.nextWarmAt - Date.now()));
+		run.timer = setTimeout(
+			() => {
+				if (isSplyceOwned(this.sessionManager)) {
+					this.stop("PERSIST_REDACTION_UNAVAILABLE");
+					return;
+				}
+				void this.refresh(run).catch(() => this.stop("cache warming failed"));
+			},
+			Math.max(0, run.nextWarmAt - Date.now()),
+		);
 		run.timer.unref?.();
 	}
 
@@ -312,7 +337,8 @@ export class CacheWarmer {
 				continuationProbability,
 				action,
 			});
-		} catch {
+		} catch (error) {
+			rethrowPersistenceError(error);
 			// Extension failures fall back to pi's own decision.
 		}
 		if (!this.validateRun(run) || this.refreshDeadlineMissed(run)) return;
@@ -339,16 +365,24 @@ export class CacheWarmer {
 				.result();
 			if (!this.validateRun(run)) return;
 			if (message.stopReason !== "error" && message.stopReason !== "aborted") {
-				const entry = this.sessionManager.appendUsage(
-					"cache_warm",
-					message.provider,
-					message.responseModel ?? message.model,
-					message.usage,
-					extensionOverride ? "extension override" : undefined,
-				);
+				const appendUsage = (manager: Pick<SessionManager, "appendUsage">) =>
+					manager.appendUsage(
+						"cache_warm",
+						message.provider,
+						message.responseModel ?? message.model,
+						message.usage,
+						extensionOverride ? "extension override" : undefined,
+					);
+				if (isSplyceOwned(this.sessionManager) && typeof this.sessionManager.withPersistence !== "function")
+					persistenceUnavailable();
+				const entry = this.sessionManager.withPersistence
+					? await this.sessionManager.withPersistence(appendUsage, run.controller.signal)
+					: appendUsage(this.sessionManager);
+				if (!this.validateRun(run)) return;
 				this.onWarmed?.(entry);
 			}
-		} catch {
+		} catch (error) {
+			rethrowPersistenceError(error);
 			// Cache warming is best-effort and must not affect the active agent run.
 		}
 		if (this.run === run) this.schedule(run);
