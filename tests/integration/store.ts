@@ -7,7 +7,6 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { once } from "node:events";
 import {
   chmodSync,
   copyFileSync,
@@ -74,18 +73,12 @@ const waitFor = (file: string, timeoutMs = 15000) => {
   }
 };
 
-const killTree = async (child: ReturnType<typeof spawn>) => {
-  const { pid } = child;
+const killTree = (pid: number) => {
   const result = spawnSync("taskkill", ["/PID", String(pid), "/F", "/T"], {
     stdio: "ignore",
   });
   if (result.status !== 0)
     throw new Error(`taskkill failed for ${String(pid)}`);
-  await once(child, "close", { signal: AbortSignal.timeout(15000) });
-  assert.ok(
-    child.exitCode !== null || child.signalCode !== null,
-    "child must exit before SQLite recovery",
-  );
 };
 
 const spawnChild = (mode: string, dir: string) =>
@@ -116,7 +109,7 @@ test("S1 fresh commit and reopen", () => {
   console.log(`S1 n=${String(trials)} pass`);
 });
 
-test("S2 forced kill mid-transaction (child processes)", async () => {
+test("S2 forced kill mid-transaction (child processes)", () => {
   for (let i = 0; i < trials; i += 1) {
     // killed after acknowledged commit: the record must be present.
     {
@@ -126,7 +119,7 @@ test("S2 forced kill mid-transaction (child processes)", async () => {
       const ack = JSON.parse(readFileSync(join(dir, "ack.json"), "utf8")) as {
         seq: number;
       };
-      await killTree(child);
+      killTree(child.pid as number);
       const reopened = Store.open(join(dir, "store.db"));
       assert.ok(reopened.cursor() >= ack.seq);
       const got = reopened.get("rec-child-ack");
@@ -139,7 +132,7 @@ test("S2 forced kill mid-transaction (child processes)", async () => {
       const dir = freshDir();
       const child = spawnChild("mid-transaction", dir);
       waitFor(join(dir, "mid.json"));
-      await killTree(child);
+      killTree(child.pid as number);
       const reopened = Store.open(join(dir, "store.db"));
       // the acknowledged first append survives; the uncommitted one must not.
       assert.ok(reopened.get("rec-child-open"));
@@ -1181,63 +1174,4 @@ test("migrateV1 decides attribution inside its write transaction (no check-then-
   assert.equal(layout.value, "1");
   check.close();
   rmSync(dir, { recursive: true, force: true });
-});
-
-test("action reservation fence rejects competing terminal history atomically", () => {
-  const dir = freshDir();
-  const path = join(dir, "store.db");
-  const first = Store.open(path);
-  const second = Store.open(path);
-  const fixtures = JSON.parse(
-    readFileSync(
-      new URL("../fixtures/contracts/records.json", import.meta.url),
-      "utf8",
-    ),
-  ) as Record<string, Record<string, unknown>>;
-  const proposal = {
-    ...structuredClone(fixtures.action),
-    recordId: "reservation",
-    state: "proposed",
-  };
-  const expected = {
-    scopeId: String(proposal.scopeId),
-    actionId: String(proposal.actionId),
-    idempotencyKey: String(proposal.idempotencyKey),
-    recordId: "reservation",
-  };
-  try {
-    first.appendBatch([{ kind: "action", record: proposal }], caller, expected);
-    second.append(
-      {
-        kind: "action",
-        record: { ...proposal, recordId: "competing", state: "canceled" },
-      },
-      caller,
-    );
-    const cursor = first.cursor();
-    assert.throws(
-      () =>
-        first.appendBatch(
-          [
-            {
-              kind: "action",
-              record: { ...proposal, recordId: "attempt", state: "running" },
-            },
-          ],
-          caller,
-          undefined,
-          undefined,
-          undefined,
-          expected,
-        ),
-      (error: unknown) =>
-        error instanceof StoreError &&
-        error.code === "ACTION_RESERVATION_CHANGED",
-    );
-    assert.equal(first.cursor(), cursor);
-  } finally {
-    second.close();
-    first.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
 });

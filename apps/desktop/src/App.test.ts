@@ -7,23 +7,14 @@ const ipc = vi.hoisted(() => ({
   ready: false,
   invoke: vi.fn(),
 }));
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: ipc.invoke,
-  Channel: class {
-    onmessage = (_event: unknown) => {};
-  },
-}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: ipc.invoke }));
 
 import App from "./App.svelte";
 import {
   dispatchEngineEvent,
   handshake as engineHandshake,
 } from "./stores/engine";
-import {
-  FOUNDATION,
-  PI_REVISION,
-  type SplyceEvent,
-} from "@splyce/pi/contracts";
+import { FOUNDATION, PI_REVISION } from "@splyce/pi/contracts";
 import { clearSession, selectedSession } from "./stores/session-selection";
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
@@ -37,26 +28,16 @@ const subscribes = () =>
 
 let app: object | undefined;
 const readyHandshake = {
-  protocolVersion: 2,
+  protocolVersion: 1,
   schemaVersion: 1,
-  engineProtocolVersion: 2,
-  bridgeProtocolVersion: 2,
+  engineProtocolVersion: 1,
+  bridgeProtocolVersion: 1,
   piRevision: PI_REVISION,
   entryMode: FOUNDATION.entryMode,
   disabledBuiltinExtensions: [...FOUNDATION.disabledBuiltinExtensions],
-  readiness: {
-    state: "ready",
-    policy: true,
-    store: true,
-    receipts: true,
-    ports: { generation: true, provider: true, workspace: true, modules: true },
-  },
+  readiness: { state: "ready", policy: true, store: true, receipts: true },
 };
 beforeEach(() => {
-  Object.defineProperty(window, "__TAURI_INTERNALS__", {
-    configurable: true,
-    value: {},
-  });
   ipc.ready = false;
   ipc.invoke.mockImplementation(async (cmd: string) => {
     if (cmd !== "handshake") return undefined;
@@ -71,7 +52,6 @@ afterEach(() => {
   if (app) unmount(app);
   app = undefined;
   document.body.innerHTML = "";
-  Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 });
 
 async function boot(props: Record<string, unknown> = {}) {
@@ -89,107 +69,6 @@ const treeEvent = (sessionId: string, scopeId: string) =>
   }) as never;
 
 describe("App wiring", () => {
-  it("shows generation unconfigured while the native core is ready and runnable ports are unavailable", async () => {
-    ipc.invoke.mockImplementation(async (cmd: string) => {
-      if (cmd !== "handshake") return undefined;
-      return {
-        ...readyHandshake,
-        readiness: {
-          ...readyHandshake.readiness,
-          ports: {
-            generation: false,
-            provider: false,
-            workspace: false,
-            modules: false,
-          },
-        },
-      };
-    });
-    await boot();
-    const shell = q("[data-testid=app-shell]")!;
-    expect(shell.dataset.connectionState).toBe("unavailable");
-    for (const service of ["Policy", "Store", "Receipts"])
-      expect(shell.dataset[`readiness${service}`]).toBe("true");
-    const banner = q("[data-testid=unavailable-banner]")!;
-    expect(banner.textContent).toContain("Generation unconfigured");
-    expect(banner.textContent).not.toMatch(/initializing/);
-    expect(button("Send").disabled).toBe(true);
-  });
-
-  it("refreshes native readiness after Retry and observes the recovered engine exiting", async () => {
-    await boot();
-    ipc.ready = true;
-    button("Retry").click();
-    await settle();
-    const shell = q("[data-testid=app-shell]")!;
-    expect(shell.dataset.connectionState).toBe("ready");
-    for (const service of ["Policy", "Store", "Receipts"])
-      expect(shell.dataset[`readiness${service}`]).toBe("true");
-    const nativeHandshake = ipc.invoke.mock.calls
-      .filter(([command]) => command === "handshake")
-      .at(-1)!;
-    nativeHandshake[1].onLifecycle.onmessage({
-      protocolVersion: 2,
-      kind: "engine_exited",
-      expected: false,
-      exitCode: 1,
-      cleanupComplete: true,
-    });
-    await settle();
-    expect(q("[data-testid=unavailable-banner]")?.textContent).toMatch(
-      /Engine stopped/,
-    );
-  });
-
-  it("retains native readiness and shows engine loss beside the last transcript", async () => {
-    ipc.ready = true;
-    await boot();
-    const shell = q("[data-testid=app-shell]")!;
-    expect(document.querySelectorAll("main")).toHaveLength(1);
-    expect(shell.dataset.connectionState).toBe("ready");
-    for (const service of ["Policy", "Store", "Receipts"])
-      expect(shell.dataset[`readiness${service}`]).toBe("true");
-    dispatchEngineEvent(treeEvent("ses_1", "scope_1"));
-    await settle();
-    q("[role=treeitem]")!.click();
-    await settle();
-    dispatchEngineEvent({
-      schemaVersion: 1,
-      protocolVersion: 2,
-      recordId: "rec_1",
-      eventId: "evt_1",
-      createdAt: "2026-10-26T00:00:00.000Z",
-      sourceIds: [],
-      scopeId: "scope_1",
-      sessionId: "ses_1",
-      seq: 1,
-      durable: true,
-      kind: "turn.started",
-      payload: { runId: "run_1", turnId: "turn_1" },
-    } as SplyceEvent);
-    await settle();
-    expect(q('[aria-label="Transcript"]')).not.toBeNull();
-    const nativeHandshake = ipc.invoke.mock.calls.find(
-      ([command]) => command === "handshake",
-    )!;
-    nativeHandshake[1].onLifecycle.onmessage({
-      protocolVersion: 2,
-      kind: "engine_exited",
-      expected: false,
-      exitCode: 1,
-      cleanupComplete: true,
-    });
-    await settle();
-    expect(shell.dataset.connectionState).toBe("disconnected");
-    for (const service of ["Policy", "Store", "Receipts"])
-      expect(shell.dataset[`readiness${service}`]).toBe("unknown");
-    expect(q("[data-testid=unavailable-banner]")?.textContent).toMatch(
-      /Engine stopped.*last transcript may be incomplete/s,
-    );
-    expect(q('[aria-label="Transcript"]')).not.toBeNull();
-    expect(button("Send").disabled).toBe(true);
-  });
-
   it("shows an unavailable, disabled composer when no session is selected", async () => {
     await boot();
     expect(q("[data-testid=unavailable-banner]")).not.toBeNull();
@@ -355,146 +234,9 @@ describe("App wiring", () => {
     await settle();
     expect(button("Send").disabled).toBe(true);
     expect(q("#composer-status")?.textContent).toBe(
-      "Sending is not available yet",
+      "Generation readiness has not been reported yet. Sending stays blocked.",
     );
     expect(ipc.invoke.mock.calls.filter(([c]) => c === "send")).toHaveLength(0);
-  });
-
-  it("updates generation readiness dynamically without reconnect, clears ports on late exit, and preserves draft", async () => {
-    ipc.ready = true;
-    await boot();
-    dispatchEngineEvent(treeEvent("ses_1", "scope_1"));
-    await settle();
-    q("[role=treeitem]")!.click();
-    await settle();
-
-    const ta = q("textarea") as HTMLTextAreaElement;
-    ta.value = "draft preserved across exit";
-    ta.dispatchEvent(new Event("input", { bubbles: true }));
-    await settle();
-
-    // 1. Initial state: readyHandshake has generation: true -> honest wiring gap
-    expect(button("Send").disabled).toBe(true);
-    expect(q("#composer-status")?.textContent).toBe(
-      "Sending is not available yet",
-    );
-
-    for (const missing of ["provider", "workspace"] as const) {
-      dispatchEngineEvent({
-        schemaVersion: 1,
-        protocolVersion: 2,
-        recordId: `rec_${missing}`,
-        eventId: `evt_${missing}`,
-        createdAt: "2026-10-26T00:00:00.000Z",
-        sourceIds: [],
-        scopeId: "scope_1",
-        sessionId: "ses_1",
-        seq: 1,
-        durable: true,
-        kind: "engine.status",
-        payload: {
-          state: "ready",
-          activeWorkers: 0,
-          ports: {
-            generation: true,
-            provider: true,
-            workspace: true,
-            modules: true,
-            [missing]: false,
-          },
-        },
-      } as SplyceEvent);
-      await settle();
-      expect(button("Send").disabled).toBe(true);
-      expect(q("#composer-status")?.textContent).toContain(
-        "Generation unconfigured",
-      );
-    }
-
-    // 2. Dynamic engine.status event with generation: false without reconnect
-    dispatchEngineEvent({
-      schemaVersion: 1,
-      protocolVersion: 2,
-      recordId: "rec_status_1",
-      eventId: "evt_status_1",
-      createdAt: "2026-10-26T00:00:00.000Z",
-      sourceIds: [],
-      scopeId: "scope_1",
-      sessionId: "ses_1",
-      seq: 2,
-      durable: false,
-      kind: "engine.status",
-      payload: {
-        state: "ready",
-        activeWorkers: 0,
-        ports: {
-          generation: false,
-          provider: true,
-          workspace: true,
-          modules: true,
-        },
-      },
-    } as SplyceEvent);
-    await settle();
-
-    // Now generation is false: blocks with generation unconfigured copy
-    expect(button("Send").disabled).toBe(true);
-    expect(q("#composer-status")?.textContent).toBe(
-      "Generation unconfigured. Connect a provider and select a model.",
-    );
-    expect(ta.value).toBe("draft preserved across exit");
-
-    // 3. Dynamic engine.status event back to generation: true without reconnect
-    dispatchEngineEvent({
-      schemaVersion: 1,
-      protocolVersion: 2,
-      recordId: "rec_status_2",
-      eventId: "evt_status_2",
-      createdAt: "2026-10-26T00:00:00.000Z",
-      sourceIds: [],
-      scopeId: "scope_1",
-      sessionId: "ses_1",
-      seq: 3,
-      durable: false,
-      kind: "engine.status",
-      payload: {
-        state: "ready",
-        activeWorkers: 0,
-        ports: {
-          generation: true,
-          provider: true,
-          workspace: true,
-          modules: true,
-        },
-      },
-    } as SplyceEvent);
-    await settle();
-
-    expect(button("Send").disabled).toBe(true);
-    expect(q("#composer-status")?.textContent).toBe(
-      "Sending is not available yet",
-    );
-    expect(ta.value).toBe("draft preserved across exit");
-
-    // 4. Late engine exit: clears ports, status disconnected, blocks composer, draft kept
-    const nativeHandshake = ipc.invoke.mock.calls
-      .filter(([command]) => command === "handshake")
-      .at(-1)!;
-    nativeHandshake[1].onLifecycle.onmessage({
-      protocolVersion: 2,
-      kind: "engine_exited",
-      expected: false,
-      exitCode: 1,
-      cleanupComplete: true,
-    });
-    await settle();
-
-    const shell = q("[data-testid=app-shell]")!;
-    expect(shell.dataset.connectionState).toBe("disconnected");
-    expect(shell.dataset.readinessGeneration).toBe("unknown");
-    expect(button("Send").disabled).toBe(true);
-    expect(q("#composer-status")?.textContent).toBe("Engine is not connected.");
-    expect(ta.value).toBe("draft preserved across exit");
   });
 
   async function dropAndRecover() {

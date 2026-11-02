@@ -7,14 +7,14 @@
 // Frozen contract types only; no unfrozen schema or local shim.
 
 import {
-  type ContractContext,
-  type ResyncControlFrame,
-  type SplyceEvent,
+  PROTOCOL_VERSION,
+  CONTRACT_VERSION,
   TRANSPORT_LIMITS,
-  validateControlFrame,
+  type ContractContext,
+  type SplyceEvent,
   validateEvent,
 } from "./contracts.js";
-import type { Receipts } from "./receipts.js";
+import { Receipts } from "./receipts.js";
 
 /** Renderer transport limits, bound to the frozen shared constants. */
 export const TRANSPORT_LIMIT_OPTIONS = TRANSPORT_LIMITS;
@@ -32,14 +32,11 @@ export class BridgeError extends Error {
 }
 
 /** A renderer-ready frame: 4-byte big-endian length header + JSON body. */
-export interface Frame<T = SplyceEvent> {
+export interface Frame {
   readonly bytes: number;
   readonly encoded: Uint8Array;
-  readonly event: T;
+  readonly event: SplyceEvent;
 }
-
-/** The unsequenced resync control frame returned by an overflowing submit. */
-export type ResyncFrame = Frame<ResyncControlFrame>;
 
 export interface DrainResult {
   frames: Frame[];
@@ -63,8 +60,6 @@ export class DesktopBridge {
   private readonly limits: typeof TRANSPORT_LIMIT_OPTIONS;
   private readonly baseContext: ContractContext;
   private readonly receipts: Receipts;
-  /** Client's last applied/acknowledged event seq for this subscription. */
-  private _clientAppliedSeq = 0;
   /** Pending frames in delivery order (durable and coalesced transient). */
   private queue: Frame[] = [];
   private queueBytes = 0;
@@ -116,18 +111,10 @@ export class DesktopBridge {
     this.limits = { ...TRANSPORT_LIMIT_OPTIONS, ...options };
   }
 
-  /** This session's event highwater: the cursor domain of every envelope seq. */
-  private sessionEventCursor(): number {
-    return this.receipts.sessionEventCursor(
-      this.baseContext.scopeId,
-      this.baseContext.sessionId,
-    );
-  }
-
   private context(): ContractContext {
     return {
       ...this.baseContext,
-      lastDurableSeq: this.sessionEventCursor(),
+      lastDurableSeq: this.receipts.durableCursor(),
       // The tightest of the caller's budget, the option budget and the frozen
       // shared ceiling applies: smaller is honored, larger never widens it.
       maxInlineBytes: Math.min(
@@ -138,7 +125,7 @@ export class DesktopBridge {
     };
   }
 
-  private encode<T>(event: T): Frame<T> {
+  private encode(event: SplyceEvent): Frame {
     const body = new TextEncoder().encode(JSON.stringify(event));
     // 4-byte big-endian header included in the encoded budget.
     const encoded = new Uint8Array(4 + body.byteLength);
@@ -155,9 +142,9 @@ export class DesktopBridge {
    * Submits one event for renderer delivery. Validation uses the frozen
    * contract (payload XOR payloadArtifactId, durable flag per kind, inline
    * budget). On any queue overflow the queue is reset and exactly one
-   * unsequenced `stream.resync` control frame is returned.
+   * `stream.resync {fromSeq = durable cursor}` is emitted for the advance.
    */
-  submit(value: unknown): ResyncFrame | undefined {
+  submit(value: unknown): Frame | undefined {
     if (this.paused)
       throw new BridgeError(
         "BRIDGE_PAUSED",
@@ -240,29 +227,38 @@ export class DesktopBridge {
     this.paused = true;
   }
 
-  private resyncFrame(): ResyncFrame {
+  private resyncFrame(): Frame {
     // Every overflow emits its own resync control frame; the exactly-one
     // rule is per overflow, not per cursor advance. The base cursor is
     // session-exact: other sessions'/scopes' records never move it.
-    const highwater = this.sessionEventCursor();
-    const fromSeq = this._clientAppliedSeq;
-    if (fromSeq > highwater)
+    const fromSeq = this.receipts.sessionDurableCursor(
+      this.baseContext.scopeId,
+      this.baseContext.sessionId,
+    );
+    if (fromSeq === 0)
       throw new BridgeError(
-        "INVALID_CURSOR",
-        `client-applied seq ${String(fromSeq)} exceeds event highwater ${String(highwater)}`,
+        "BRIDGE_OVERFLOW",
+        "queue overflow with no durable progress; nothing to resync",
       );
     this.lastResyncFromSeq = fromSeq;
-    // Unsequenced control: no seq, never persisted, never a cursor advance.
-    // It must itself validate or the bridge is broken — never emit unvalidated.
+    const event = {
+      schemaVersion: CONTRACT_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
+      recordId: `resync-${String(fromSeq)}`,
+      eventId: `resync-${String(fromSeq)}`,
+      createdAt: new Date().toISOString(),
+      sourceIds: [],
+      scopeId: this.baseContext.scopeId,
+      sessionId: this.baseContext.sessionId,
+      seq: fromSeq,
+      durable: true,
+      kind: "stream.resync",
+      payload: { fromSeq },
+    } as SplyceEvent;
+    // The resync is control delivery: it must itself validate against the
+    // frozen envelope or the bridge is broken — never emit unvalidated.
     try {
-      return this.encode(
-        validateControlFrame({
-          frame: "control",
-          kind: "stream.resync",
-          sessionId: this.baseContext.sessionId,
-          fromSeq,
-        }),
-      );
+      return this.encode(validateEvent(event, this.context()));
     } catch (error) {
       throw new BridgeError(
         `CONTRACT_${(error as { code?: string }).code ?? "INVALID_SHAPE"}`,
@@ -297,15 +293,11 @@ export class DesktopBridge {
   }
 
   /**
-   * This session's retained event envelopes with seq > afterSeq (exclusive),
-   * in the session event-seq domain: identical to `subscribe afterSeq`.
+   * Replay after a cursor (exclusive) directly from the durable store, used
+   * after a resync: identical semantics to `subscribe afterSeq`.
    */
-  replay(afterSeq: number): SplyceEvent[] {
-    return this.receipts.replayEvents(
-      this.baseContext.scopeId,
-      this.baseContext.sessionId,
-      afterSeq,
-    );
+  replay(afterSeq: number, caller: Parameters<Receipts["replay"]>[2]) {
+    return this.receipts.replay(this.baseContext.scopeId, afterSeq, caller);
   }
 
   status(): BridgeStatus {
@@ -315,19 +307,6 @@ export class DesktopBridge {
       pendingBytes: this.queueBytes,
       lastResyncFromSeq: this.lastResyncFromSeq,
     };
-  }
-
-  /**
-   * (Re)subscribe at the client's last applied event seq: the base of every
-   * later overflow resync on this subscription.
-   */
-  resubscribe(afterSeq: number): void {
-    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0)
-      throw new BridgeError(
-        "INVALID_CURSOR",
-        "client-applied seq must be a non-negative safe integer",
-      );
-    this._clientAppliedSeq = afterSeq;
   }
 
   /** Highest queued durable seq — the renderer's next afterSeq base. */

@@ -4,17 +4,15 @@ import test from "node:test";
 import {
   CONTRACT_VERSION,
   PROTOCOL_VERSION,
+  TRANSPORT_LIMITS,
   PI_REVISION,
   FOUNDATION,
-  TRANSPORT_LIMITS,
-  BRIDGE_PROTOCOL_JSON,
   ContractError,
   validateRecord,
   validateCommand,
   validateEvent,
   validateHandshake,
   validateCursor,
-  validateControlFrame,
 } from "@splyce/pi/contracts";
 
 const fixture = (name) =>
@@ -25,47 +23,6 @@ const fixture = (name) =>
     ),
   );
 const records = fixture("records");
-test("transport defaults are exact, immutable and shared with the native build spec", () => {
-  assert.deepEqual(TRANSPORT_LIMITS, {
-    maxInlineBytes: 65536,
-    maxEncodedFrameBytes: 262144,
-    pendingQueueMaxFrames: 1024,
-    pendingQueueMaxBytes: 8388608,
-    transientCoalesceWindowMs: 16,
-    rendererMaxFrames: 256,
-    rendererMaxBytes: 4194304,
-  });
-  assert.equal(Object.isFrozen(TRANSPORT_LIMITS), true);
-  assert.throws(() => {
-    TRANSPORT_LIMITS.maxEncodedFrameBytes = 1;
-  }, TypeError);
-  assert.equal(TRANSPORT_LIMITS.maxEncodedFrameBytes, 262144);
-  assert.deepEqual(
-    JSON.parse(BRIDGE_PROTOCOL_JSON).transportLimits,
-    TRANSPORT_LIMITS,
-  );
-});
-test("TD-01: native build spec comes from the shared operation definitions", () => {
-  const spec = JSON.parse(BRIDGE_PROTOCOL_JSON);
-  assert.equal(spec.protocolVersion, 2);
-  assert.equal(spec.schemaVersion, 1);
-  assert.equal(spec.piRevision, "d5b3de22d0e24a3e9c38a9410d3329b099717283");
-  assert.deepEqual(
-    Object.keys(spec.commands).sort(),
-    fixture("commands")
-      .map(({ op }) => op)
-      .sort(),
-  );
-  assert.equal(spec.commands["approval.respond"].approvalRequestId, "ref");
-  assert.equal(spec.commands["workspace.select"].selectionRef, "ref");
-  assert.equal(spec.commands["session.subscribe"].afterSeq, "uint");
-  assert.deepEqual(
-    spec.eventKinds.slice().sort(),
-    fixture("events")
-      .map(({ kind }) => kind)
-      .sort(),
-  );
-});
 const referenceIds = new Set(fixture("references"));
 const context = {
   scopeId: "w-demo",
@@ -88,7 +45,7 @@ const rejects = (call) =>
       error.code.length > 0,
   );
 const command = (op, payload) => ({
-  protocolVersion: 2,
+  protocolVersion: 1,
   correlationId: "request1",
   sessionId: "s1",
   scopeId: "w-demo",
@@ -100,7 +57,7 @@ const command = (op, payload) => ({
 });
 const event = (fields = {}) => ({
   schemaVersion: 1,
-  protocolVersion: 2,
+  protocolVersion: 1,
   recordId: "rec-event",
   eventId: "event1",
   createdAt: "2026-10-26T00:00:00.000Z",
@@ -116,12 +73,29 @@ const event = (fields = {}) => ({
 
 test("TD-01: public package exports the frozen versions and pinned Pi revision", () => {
   assert.equal(CONTRACT_VERSION, 1);
-  assert.equal(PROTOCOL_VERSION, 2);
+  assert.equal(PROTOCOL_VERSION, 1);
   assert.equal(PI_REVISION, "d5b3de22d0e24a3e9c38a9410d3329b099717283");
   assert.deepEqual(FOUNDATION, {
     entryMode: "sdk-host",
     disabledBuiltinExtensions: ["llama.cpp", "codemode", "tool-search", "mcp"],
   });
+});
+
+test("TD-01: transport defaults are exact and immutable", () => {
+  assert.deepEqual(TRANSPORT_LIMITS, {
+    maxInlineBytes: 65536,
+    maxEncodedFrameBytes: 262144,
+    pendingQueueMaxFrames: 1024,
+    pendingQueueMaxBytes: 8388608,
+    transientCoalesceWindowMs: 16,
+    rendererMaxFrames: 256,
+    rendererMaxBytes: 4194304,
+  });
+  assert.ok(Object.isFrozen(TRANSPORT_LIMITS));
+  assert.throws(() => {
+    TRANSPORT_LIMITS.maxEncodedFrameBytes = 1;
+  }, TypeError);
+  assert.equal(TRANSPORT_LIMITS.maxEncodedFrameBytes, 262144);
 });
 
 for (const { op, payload } of fixture("commands")) {
@@ -180,57 +154,6 @@ for (const [kind, original] of Object.entries(records)) {
   });
 }
 
-const boundProfileSnapshot = (modelId = "org/model:version") => ({
-  ...copy(records.profileSnapshot),
-  bindings: [
-    {
-      role: "chat",
-      providerConnectionId: records.providerConnection.providerConnectionId,
-      connectionRevision: records.providerConnection.revision,
-      modelId,
-    },
-  ],
-});
-
-test("TD-26: profileSnapshot preserves namespace, slash, colon and Bedrock model references", () => {
-  for (const modelId of [
-    "anthropic",
-    "anthropic/claude-sonnet-4-5",
-    "openrouter/anthropic",
-    "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "arn:aws:bedrock:us-east-1:123456789012:foundation-model/anthropic.claude-v2:1",
-    "模型/модель:é",
-    "x".repeat(256),
-  ]) {
-    const input = boundProfileSnapshot(modelId);
-    assert.deepEqual(validateRecord("profileSnapshot", input, context), input);
-  }
-});
-
-test("TD-26: legacy profileSnapshot bindings remain readable without a model reference", () => {
-  const input = boundProfileSnapshot();
-  delete input.bindings[0].modelId;
-  assert.deepEqual(validateRecord("profileSnapshot", input, context), input);
-});
-
-for (const point of [
-  0x0080, 0x0085, 0x009f, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x202a,
-  0x2060, 0xfeff, 0x2028, 0x2029, 0x00ad, 0x061c, 0x180e, 0xe0001,
-]) {
-  const label = `U+${point.toString(16).toUpperCase().padStart(4, "0")}`;
-  test(`TD-26: profileSnapshot independently rejects a model reference containing ${label}`, () => {
-    const valid = boundProfileSnapshot();
-    assert.deepEqual(validateRecord("profileSnapshot", valid, context), valid);
-    const invalid = copy(valid);
-    invalid.bindings[0].modelId = `org/model${String.fromCodePoint(point)}suffix:v1`;
-    assert.throws(
-      () => validateRecord("profileSnapshot", invalid, context),
-      (error) =>
-        error instanceof ContractError && error.code === "INVALID_SHAPE",
-    );
-  });
-}
-
 test("TD-01: record states, references and numeric bounds fail closed", () => {
   rejects(() => validateRecord("unknown", records.run, context));
   for (const [kind, value] of Object.entries(records)) {
@@ -256,8 +179,6 @@ test("TD-01: record states, references and numeric bounds fail closed", () => {
     ["memoryObservation", { claimArtifactId: "missing" }],
     ["profileSnapshot", { limitsArtifactId: "missing" }],
     ["configurationTransition", { changedValuesArtifactId: "missing" }],
-    ["branchAnchor", { piSessionId: "missing" }],
-    ["branchAnchor", { parentAnchorId: "missing" }],
     ["action", { targetScopeId: "other-workspace" }],
     ["providerRole", { locality: "hosted", qualificationRef: null }],
     ["providerRole", { limits: { tokens: Infinity } }],
@@ -266,27 +187,6 @@ test("TD-01: record states, references and numeric bounds fail closed", () => {
       validateRecord(kind, { ...records[kind], ...patch }, context),
     );
   assert.deepEqual(validateRecord("run", records.run, context), records.run);
-});
-
-test("event ledger records validate nested envelopes and matching durable metadata", () => {
-  const original = records.event;
-  for (const patch of [
-    { seq: 0 },
-    { sessionId: "other" },
-    { recordId: "missing" },
-    { eventId: "different" },
-    { durable: false },
-    { payload: { state: "ready", activeWorkers: -1 } },
-    { sourceIds: ["missing"] },
-  ]) {
-    rejects(() =>
-      validateRecord(
-        "event",
-        { ...original, envelope: { ...original.envelope, ...patch } },
-        context,
-      ),
-    );
-  }
 });
 
 test("TD-01: optional record data cannot smuggle raw credentials or absolute paths", () => {
@@ -364,7 +264,7 @@ test("TD-01: commands reject unknown operation, stale identity and revision", ()
   const restart = command("engine.restart", {});
   assert.deepEqual(validateCommand(restart, context), restart);
   for (const patch of [
-    { protocolVersion: 1 },
+    { protocolVersion: 2 },
     { op: "execute.arbitrary" },
     { scopeId: "other" },
     { sessionId: "other" },
@@ -439,39 +339,6 @@ for (const fields of fixture("events")) {
   });
 }
 
-test("TD-10: branch anchors hold opaque Pi identities, never raw paths", () => {
-  const anchor = records.branchAnchor;
-  assert.deepEqual(
-    validateRecord(
-      "branchAnchor",
-      {
-        ...anchor,
-        parentAnchorId: null,
-        forkPointEntryId: null,
-        activeLeafEntryId: null,
-        firstChildEntryId: "entry2",
-      },
-      context,
-    ).firstChildEntryId,
-    "entry2",
-  );
-  for (const field of [
-    "branchAnchorId",
-    "piSessionId",
-    "forkPointEntryId",
-    "firstChildEntryId",
-    "activeLeafEntryId",
-  ])
-    for (const value of ["C:\\pi\\s1.jsonl", "/home/pi/s1.jsonl", " "])
-      rejects(() =>
-        validateRecord("branchAnchor", { ...anchor, [field]: value }, context),
-      );
-  for (const field of ["branchAnchorId", "piSessionId"])
-    rejects(() =>
-      validateRecord("branchAnchor", { ...anchor, [field]: null }, context),
-    );
-});
-
 test("TD-01: historical records remain readable after configuration/profile changes", () => {
   const advanced = {
     ...context,
@@ -514,6 +381,7 @@ test("TD-01: event-specific scope/session and replay cursors reject mismatches",
   for (const [kind, patch] of [
     ["approval.requested", { targetScope: "other-workspace" }],
     ["session.tree_updated", { sessionId: "other-session" }],
+    ["stream.resync", { fromSeq: 13 }],
     ["run.reconnect_snapshot", { lastDurableSeq: 13 }],
   ]) {
     const fields = fixture("events").find((value) => value.kind === kind);
@@ -529,7 +397,7 @@ test("TD-01: event-specific scope/session and replay cursors reject mismatches",
 test("TD-01: events reject invalid identities, payload variants and unknown messages", () => {
   for (const patch of [
     { schemaVersion: 2 },
-    { protocolVersion: 1 },
+    { protocolVersion: 2 },
     { kind: "unknown.required" },
     { scopeId: "other" },
     { sessionId: "other" },
@@ -591,81 +459,12 @@ test("TD-01: bounded inline events use UTF-8 bytes and accept exact boundary", (
   );
 });
 
-test("shared inline default accepts 65536 UTF-8 payload bytes and rejects one extra", () => {
-  const payload = { runId: "r1", delta: "😀" };
-  const padding =
-    TRANSPORT_LIMITS.maxInlineBytes -
-    Buffer.byteLength(JSON.stringify(payload), "utf8");
-  payload.delta += "x".repeat(padding);
-  const input = event({ kind: "turn.stream_delta", durable: false, payload });
-  const bounded = {
-    ...context,
-    maxInlineBytes: TRANSPORT_LIMITS.maxInlineBytes,
-  };
-  assert.equal(Buffer.byteLength(JSON.stringify(payload), "utf8"), 65536);
-  assert.deepEqual(validateEvent(input, bounded), input);
-  assert.throws(
-    () =>
-      validateEvent(
-        { ...input, payload: { ...payload, delta: payload.delta + "x" } },
-        bounded,
-      ),
-    (error) =>
-      error instanceof ContractError && error.code === "FRAME_TOO_LARGE",
-  );
-  assert.deepEqual(validateEvent(input, bounded), input);
-});
-
-test("engine status ports use the same exact availability contract", () => {
-  const ports = {
-    generation: false,
-    provider: false,
-    workspace: false,
-    modules: false,
-  };
-  const status = event({
-    kind: "engine.status",
-    payload: { state: "ready", activeWorkers: 0, ports },
-  });
-  assert.deepEqual(validateEvent(status, context), status);
-  for (const invalid of [
-    {},
-    { ...ports, generation: 1 },
-    { ...ports, extra: false },
-  ])
-    rejects(() =>
-      validateEvent(
-        { ...status, payload: { ...status.payload, ports: invalid } },
-        context,
-      ),
-    );
-  rejects(() => validateEvent({ ...status, protocolVersion: 1 }, context));
-  assert.deepEqual(
-    validateEvent(
-      { ...status, payload: { state: "ready", activeWorkers: 0 } },
-      context,
-    ).payload,
-    { state: "ready", activeWorkers: 0 },
-  );
-});
-
 test("TD-01: frozen handshake accepts unavailable but requires all readiness guards", () => {
   const input = fixture("handshake");
   assert.deepEqual(validateHandshake(input), input);
   const ready = {
     ...input,
-    readiness: {
-      state: "ready",
-      policy: true,
-      store: true,
-      receipts: true,
-      ports: {
-        generation: true,
-        provider: true,
-        workspace: true,
-        modules: true,
-      },
-    },
+    readiness: { state: "ready", policy: true, store: true, receipts: true },
   };
   assert.deepEqual(validateHandshake(ready), ready);
   for (const field of [
@@ -674,12 +473,7 @@ test("TD-01: frozen handshake accepts unavailable but requires all readiness gua
     "engineProtocolVersion",
     "bridgeProtocolVersion",
   ])
-    rejects(() =>
-      validateHandshake({
-        ...input,
-        [field]: field === "schemaVersion" ? 2 : 1,
-      }),
-    );
+    rejects(() => validateHandshake({ ...input, [field]: 2 }));
   for (const field of ["policy", "store", "receipts"])
     rejects(() =>
       validateHandshake({
@@ -687,20 +481,6 @@ test("TD-01: frozen handshake accepts unavailable but requires all readiness gua
         readiness: { ...ready.readiness, [field]: false },
       }),
     );
-  for (const ports of [
-    {},
-    { ...ready.readiness.ports, generation: "true" },
-    { ...ready.readiness.ports, extra: false },
-  ])
-    rejects(() =>
-      validateHandshake({ ...ready, readiness: { ...ready.readiness, ports } }),
-    );
-  rejects(() =>
-    validateHandshake({
-      ...input,
-      readiness: { ...input.readiness, ports: ready.readiness.ports },
-    }),
-  );
   for (const patch of [
     { piRevision: "unknown" },
     { entryMode: "rpc" },
@@ -711,42 +491,4 @@ test("TD-01: frozen handshake accepts unavailable but requires all readiness gua
     { readiness: { state: "ready" } },
   ])
     rejects(() => validateHandshake({ ...input, ...patch }));
-});
-
-test("TD-15: stream.resync is an exact unsequenced control frame, never an event", () => {
-  const control = {
-    frame: "control",
-    kind: "stream.resync",
-    sessionId: "s1",
-    fromSeq: 0,
-  };
-  assert.deepEqual(validateControlFrame(control), control);
-  assert.equal(
-    validateControlFrame({ ...control, fromSeq: Number.MAX_SAFE_INTEGER })
-      .fromSeq,
-    Number.MAX_SAFE_INTEGER,
-  );
-  for (const bad of [
-    { ...control, seq: 1 },
-    { ...control, extra: true },
-    { ...control, frame: "data" },
-    { ...control, kind: "stream.other" },
-    { ...control, sessionId: "a b" },
-    { ...control, fromSeq: -1 },
-    { ...control, fromSeq: 1.5 },
-    { ...control, fromSeq: Number.MAX_SAFE_INTEGER + 1 },
-    { frame: "control", kind: "stream.resync", sessionId: "s1" },
-  ])
-    rejects(() => validateControlFrame(bad));
-  // The old durable data shape is no longer an event kind.
-  rejects(() =>
-    validateEvent(
-      event({ kind: "stream.resync", payload: { fromSeq: 0 } }),
-      context,
-    ),
-  );
-  assert.equal(
-    JSON.parse(BRIDGE_PROTOCOL_JSON).eventKinds.includes("stream.resync"),
-    false,
-  );
 });

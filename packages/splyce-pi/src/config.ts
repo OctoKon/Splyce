@@ -29,9 +29,6 @@ export interface ConfigChange {
   acceptedConfigRevision: string;
   intentRef: string;
   changedValuesArtifactId: string;
-  /** Optional exact profile selection; both fields must be present together. */
-  profileId?: string;
-  profileRevision?: string;
 }
 
 export interface ConfigCommit {
@@ -96,12 +93,6 @@ export class ConfigAuthority {
       changedValuesArtifactId: change.changedValuesArtifactId,
       state,
       outcomeRef: null,
-      ...(change.profileId === undefined
-        ? {}
-        : { profileId: change.profileId }),
-      ...(change.profileRevision === undefined
-        ? {}
-        : { profileRevision: change.profileRevision }),
     };
     try {
       const { seqs } = this.store.appendBatch(

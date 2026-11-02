@@ -111,7 +111,6 @@
     oncompositionstart={() => (composing = true)}
     oncompositionend={() => (composing = false)}
     aria-describedby="composer-status"
-    placeholder="Type a message or prompt…"
   ></textarea>
   <div class="composer-footer">
     <p id="composer-status" role="status" class:has-error={!!error} class:is-blocked={!!reason}>
@@ -132,10 +131,6 @@
   .composer {
     display: flex;
     flex-direction: column;
-    box-sizing: border-box;
-    width: 100%;
-    max-width: 960px;
-    margin: 0 auto;
     gap: var(--splyce-space-2, 0.5rem);
     padding: var(--splyce-space-3, 0.75rem);
     background: var(--splyce-surface-raised, #ffffff);
@@ -162,7 +157,6 @@
     border: 1px solid var(--splyce-border-default, #d1d5db);
     border-radius: var(--radius-md, 6px);
     resize: vertical;
-    min-height: 56px;
     transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
   textarea:focus {

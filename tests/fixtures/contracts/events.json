@@ -75,6 +75,7 @@
     "kind": "engine.status",
     "payload": { "state": "ready", "activeWorkers": 0 }
   },
+  { "kind": "stream.resync", "payload": { "fromSeq": 10 } },
   {
     "kind": "run.reconnect_snapshot",
     "payload": {
