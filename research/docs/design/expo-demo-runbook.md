@@ -48,7 +48,7 @@ Step 3 runs three things in order: `build:engine` (contracts, memory and index p
 
 `apps/desktop/src-tauri/tauri.conf.json` fixes the shipped identity: product `Splyce`, version `0.1.0`, bundle target `nsis`, `resources/engine/` mapped to `engine/`. The installer lands in `apps/desktop/src-tauri/target/release/bundle/nsis/` as `Splyce_0.1.0_x64-setup.exe`. Hash it (`Get-FileHash -Algorithm SHA256`) and install that file on the demo machine — not `vite dev`, and never a build from a commit other than the one recorded in step 1. `npm run build:desktop:e2e` is the WebDriver harness (`--no-bundle`) and produces no installer.
 
-**CI is not a shortcut today.** On this lineage `.github/workflows/staging-gate.yml` does run `npm run build:desktop` and `cargo test` on `windows-latest` with the pinned Rust toolchain, so the app is genuinely built there — but it uploads no artifact, so the `.exe` it produced is not retrievable. On `staging` itself the same workflow has no app build at all. Until an artifact upload exists, a machine with the prerequisites above is the only way to obtain the installer.
+**CI is not a shortcut today.** On the demo lineage `.github/workflows/staging-gate.yml` does run `npm run build:desktop` and `cargo test` on `windows-latest` with the pinned Rust toolchain, so the app is genuinely built there — but the only artifacts it uploads are sanitized release-smoke diagnostics and a GLib regression lockfile, never the NSIS installer, so the `.exe` it produced is not retrievable. On `staging` itself the same workflow has no app build at all. Until an artifact upload exists, a machine with the prerequisites above is the only way to obtain the installer.
 
 ## How to read each step
 
