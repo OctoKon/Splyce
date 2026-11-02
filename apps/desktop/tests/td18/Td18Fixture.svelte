@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { EventPayloads, SplyceEventEnvelope } from "@splyce/pi/contracts";
+  import {
+    CONTRACT_VERSION,
+    PROTOCOL_VERSION,
+    type EventPayloads,
+    type SplyceEventEnvelope,
+  } from "@splyce/pi/contracts";
   import TurnStream from "../../src/components/TurnStream.svelte";
   import {
     createTurnStreamTransport,
@@ -44,8 +49,8 @@
     durable = true,
   ): SplyceEventEnvelope {
     return {
-      schemaVersion: 1,
-      protocolVersion: 1,
+      schemaVersion: CONTRACT_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
       recordId: `rec_${seq}`,
       eventId: `evt_${seq}_${Math.random().toString(36).slice(2, 8)}`,
       createdAt: new Date().toISOString(),
