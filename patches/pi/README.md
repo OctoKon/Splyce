@@ -214,15 +214,15 @@ selection, credential lifecycle or executor containment is qualified. Trusted
 in-process code retains OS authority. Reapply against the exact owned source
 and rerun these regressions after donor or wrapper changes.
 
-## 0016: Google and Vertex leased sends refuse redirects (TD-13, #138)
+## 0019: Google and Vertex leased sends refuse redirects (TD-13, #138)
 
-`0016-google-leased-redirect-refusal.patch` applies from the Splyce root to `vendor/pi/` after 0004. The pinned
+`0019-google-leased-redirect-refusal.patch` applies from the Splyce root to `vendor/pi/` after 0004. The pinned
 `@google/genai` 2.21.0 client sends every request through `ApiClient.apiCall(url, requestInit, ...)`, which spreads
 `requestInit` into the global fetch and cannot be handed the leased fetch. `refuseGoogleClientRedirects` in
 `splyce-credentials.ts` wraps that seam on the one client built per leased attempt to force `redirect: "error"`; a
 client without the seam is refused with `CredentialPreflightError`, so an SDK change fails closed instead of sending
 unguarded. Both `google-generative-ai.ts` and `google-vertex.ts` use it on the lease path only; the API-key path is
-unchanged. See [0016-google-leased-redirect-refusal.md](0016-google-leased-redirect-refusal.md) for evidence and limits.
+unchanged. See [0019-google-leased-redirect-refusal.md](0019-google-leased-redirect-refusal.md) for evidence and limits.
 
 ## Library maintenance
 
