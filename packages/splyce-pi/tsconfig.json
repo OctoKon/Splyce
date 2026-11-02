@@ -36,6 +36,7 @@
     "src/session-map.ts",
     "src/agent-context-tools.ts",
     "src/subagents.ts",
+    "src/jobs.ts",
     "src/node-sqlite.d.ts",
     "src/policy-node.d.ts",
     "src/node-child-process.d.ts",
