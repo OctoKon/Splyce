@@ -370,7 +370,7 @@ public static class StandardDesktopLauncher {
     IntPtr read = IntPtr.Zero, write = IntPtr.Zero;
     try {
       Check(ImpersonateLoggedOnUser(fixture), "Impersonate fresh selfcheck token");
-      var attributes = new PipeAttributes { Inherit = 1 };
+      var attributes = new PipeAttributes { Length = Marshal.SizeOf<PipeAttributes>(), Inherit = 1 };
       bool created = CreatePipe(out read, out write, ref attributes, 0); int error = created ? 0 : Marshal.GetLastWin32Error();
       if (!created) { read = write = IntPtr.Zero; return error; }
       byte[] payload = new byte[] { 17, 0, 255, 42 }, received = new byte[4]; uint written, count;
