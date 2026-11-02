@@ -502,6 +502,15 @@ impl Child {
                     r.status = "timeout";
                 }
                 if r.status != "exit" {
+                    #[cfg(test)]
+                    if r.status == "timeout"
+                        && matches!(
+                            std::thread::current().name(),
+                            Some("shell-root-diagnostic" | "shell-member-diagnostic")
+                        )
+                    {
+                        eprintln!("{:?} timeout: stdout_bytes={} stderr_bytes={} out_eof={out_eof} err_eof={err_eof}", std::thread::current().name(), r.stdout.len(), r.stderr.len());
+                    }
                     // SAFETY: job denotes only this effect's associated process tree.
                     checked(unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) })?;
                     terminating = Some(Instant::now() + Duration::from_secs(5));

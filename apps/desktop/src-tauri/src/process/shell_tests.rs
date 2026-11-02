@@ -4,6 +4,15 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn root_exit_waits_for_a_healthy_associated_member_and_its_output() {
+    associated_member_case(false);
+}
+
+#[test]
+fn root_exit_waits_for_a_bcl_associated_member_and_its_output() {
+    associated_member_case(true);
+}
+
+fn associated_member_case(bcl: bool) {
     let dir = std::env::temp_dir().join(format!(
         "splyce-associated-{}-{}",
         std::process::id(),
@@ -29,23 +38,34 @@ fn root_exit_waits_for_a_healthy_associated_member_and_its_output() {
     let started = Instant::now();
     let root = launch(
         &engine,
-        &request("[IO.File]::WriteAllText('root-entered','entered'); Write-Output root"),
+        &request(if bcl {
+            "[IO.File]::WriteAllText('root-entered','entered'); [Console]::Out.WriteLine('root'); [IO.File]::WriteAllText('root-after','done')"
+        } else {
+            "[IO.File]::WriteAllText('root-entered','entered'); Write-Output root; [IO.File]::WriteAllText('root-after','done')"
+        }),
     )
     .unwrap();
     let root_process = root.process.try_clone().unwrap();
     // A second, explicitly associated fixture process waits for the test's release file.
     let member = launch(
         &root.job,
-        &request("while (!(Test-Path go)) { Start-Sleep -Milliseconds 20 }; Write-Output member"),
+        &request(if bcl {
+            "[IO.File]::WriteAllText('member-entered',[string]($PWD.Path -eq [Environment]::CurrentDirectory)); while (![IO.File]::Exists('go')) { [Threading.Thread]::Sleep(20) }; [Console]::Out.WriteLine('member')"
+        } else {
+            "[IO.File]::WriteAllText('member-entered',[string]($PWD.Path -eq [Environment]::CurrentDirectory)); while (!(Test-Path go)) { Start-Sleep -Milliseconds 20 }; Write-Output member"
+        }),
     )
     .unwrap();
     let member_process = member.process.try_clone().unwrap();
-    let member_worker = std::thread::spawn(move || {
-        member.monitor(
-            Instant::now() + Duration::from_secs(10),
-            &AtomicBool::new(false),
-        )
-    });
+    let member_worker = std::thread::Builder::new()
+        .name("shell-member-diagnostic".into())
+        .spawn(move || {
+            member.monitor(
+                Instant::now() + Duration::from_secs(10),
+                &AtomicBool::new(false),
+            )
+        })
+        .unwrap();
     let root_worker = std::thread::Builder::new()
         .name("shell-root-diagnostic".into())
         .spawn(move || {
@@ -61,6 +81,9 @@ fn root_exit_waits_for_a_healthy_associated_member_and_its_output() {
     let member_wait = unsafe { WaitForSingleObject(member_process.as_raw_handle(), 0) };
     let root_finished = root_worker.is_finished();
     let marker = dir.join("root-entered").exists();
+    let root_after = dir.join("root-after").exists();
+    let member_entry = fs::read_to_string(dir.join("member-entered")).ok();
+    eprintln!("bcl={bcl} root_after={root_after} member_entry_cwd_equal={member_entry:?}");
     eprintln!("after {:?}: root_wait={root_wait}, member_wait={member_wait}, root_finished={root_finished}, command_entered={marker}", started.elapsed());
     let release = fs::write(dir.join("go"), []);
     let root_result = root_worker.join();
@@ -97,6 +120,8 @@ fn root_exit_waits_for_a_healthy_associated_member_and_its_output() {
     assert_eq!(active_count(&engine).unwrap(), 0);
     fs::remove_file(dir.join("go")).unwrap();
     fs::remove_file(dir.join("root-entered")).unwrap();
+    fs::remove_file(dir.join("root-after")).unwrap();
+    fs::remove_file(dir.join("member-entered")).unwrap();
     fs::remove_dir(temp).unwrap();
     fs::remove_dir(dir).unwrap();
 }
