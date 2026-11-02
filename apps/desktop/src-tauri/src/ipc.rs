@@ -854,7 +854,7 @@ fn configure_provider(
     payload: Value,
     call: impl Fn(&str, Value) -> Result<Value, BridgeError>,
 ) -> Result<Value, BridgeError> {
-    use crate::credentials::{CredentialRef, read_owned, write_generated};
+    use crate::credentials::{CredentialRef, delete_owned, read_owned, write_generated};
     let (metadata, secret) = setup_metadata(payload)?;
     let encoded = setup_text(&metadata);
     let (_, redacted) = crate::credentials::redact_owned(&encoded)
@@ -885,12 +885,24 @@ fn configure_provider(
             .and_then(|value| CredentialRef::parse(value).ok())
             .ok_or_else(|| BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"))?,
     };
-    let present =
-        read_owned(&reference).map_err(|_| BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"))?;
+    let created = !replay && secret.is_some();
+    let present = match read_owned(&reference) {
+        Ok(present) => present,
+        Err(_) => {
+            if created {
+                delete_owned(&reference)
+                    .map_err(|_| BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"))?;
+            }
+            return Err(BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"));
+        }
+    };
     if secret
         .as_ref()
         .is_some_and(|secret| secret.as_bytes() != present.as_bytes())
     {
+        if created && delete_owned(&reference).is_err() {
+            return Err(BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE"));
+        }
         return Err(BridgeError::setup("SETUP_REQUEST_CONFLICT"));
     }
     drop(present);
@@ -905,7 +917,11 @@ fn configure_provider(
                     | "SETUP_WORKSPACE_UNAVAILABLE"
                     | "SETUP_INVALID"
             ) {
-                error
+                if created && delete_owned(&reference).is_err() {
+                    BridgeError::setup("SETUP_CREDENTIAL_UNAVAILABLE")
+                } else {
+                    error
+                }
             } else {
                 BridgeError::setup("SETUP_OUTCOME_UNKNOWN")
             }
@@ -1368,6 +1384,55 @@ mod tests {
         let reference = reference.borrow_mut().take().unwrap();
         assert!(read_owned(&reference).is_ok());
         delete_owned(&reference).unwrap();
+    }
+
+    #[test]
+    fn provider_setup_definite_commit_rejection_removes_only_new_key() {
+        let _inventory = crate::credentials::fixture_guard();
+        use crate::credentials::{CredentialRef, delete_owned, read_owned, write_generated};
+        for code in [
+            "SETUP_REQUEST_CONFLICT",
+            "SETUP_STALE_REVISION",
+            "SETUP_WORKSPACE_UNAVAILABLE",
+            "SETUP_INVALID",
+        ] {
+            let reference = std::cell::RefCell::new(None);
+            let result =
+                configure_provider(provider_setup_fixture(), |method, params| match method {
+                    "native.provider.prepare" => {
+                        Ok(json!({"state":"prepared","credentialRef":null}))
+                    }
+                    "native.provider.commit" => {
+                        let minted =
+                            CredentialRef::parse(params["credentialRef"].as_str().unwrap())
+                                .unwrap();
+                        assert!(read_owned(&minted).is_ok());
+                        *reference.borrow_mut() = Some(minted);
+                        Err(BridgeError::setup(code))
+                    }
+                    _ => panic!("unexpected transport call"),
+                });
+            assert_eq!(result.err().unwrap().code, code);
+            let minted = reference.borrow_mut().take().unwrap();
+            assert!(read_owned(&minted).is_err(), "{code} left an orphan key");
+        }
+
+        let existing = write_generated("synthetic-existing-setup-key").unwrap();
+        let mut input = provider_setup_fixture();
+        input["credential"] = json!({"kind":"keep"});
+        input["expectedConnectionRevision"] = json!("c1");
+        input["expectedProfileRevision"] = json!("p1");
+        input["expectedEndpointRevision"] = json!("r1");
+        let result = configure_provider(input, |method, _| match method {
+            "native.provider.prepare" => {
+                Ok(json!({"state":"prepared","credentialRef":existing.as_str()}))
+            }
+            "native.provider.commit" => Err(BridgeError::setup("SETUP_STALE_REVISION")),
+            _ => panic!("unexpected transport call"),
+        });
+        assert_eq!(result.err().unwrap().code, "SETUP_STALE_REVISION");
+        assert!(read_owned(&existing).is_ok());
+        delete_owned(&existing).unwrap();
     }
 
     #[test]
