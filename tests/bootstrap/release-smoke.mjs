@@ -241,6 +241,54 @@ export function sanitizeSmokeDiagnostics(report, driverLog) {
   };
 }
 
+export async function smokeRequest(base, method, path, body, report) {
+  report.lastRequest = { method, path };
+  const timed = method === "POST" && path === "/session";
+  const started = performance.now();
+  const signal = AbortSignal.timeout(20000);
+  if (timed) report.parentTiming = [{ event: "request_start", elapsedMs: 0 }];
+  let response;
+  try {
+    response = await fetch(`${base}${path}`, {
+      method,
+      headers: { "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal,
+    });
+  } catch (error) {
+    if (timed && signal.aborted)
+      report.parentTiming.push({
+        event: "abort",
+        elapsedMs: Math.round(performance.now() - started),
+      });
+    throw error;
+  }
+  if (timed)
+    report.parentTiming.push({
+      event: "response_headers",
+      elapsedMs: Math.round(performance.now() - started),
+    });
+  let result;
+  try {
+    result = await response.json();
+  } catch (error) {
+    if (timed && signal.aborted)
+      report.parentTiming.push({
+        event: "abort",
+        elapsedMs: Math.round(performance.now() - started),
+      });
+    throw error;
+  }
+  if (timed)
+    report.parentTiming.push({
+      event: "body_complete",
+      elapsedMs: Math.round(performance.now() - started),
+    });
+  if (!response.ok || result.value?.error)
+    throw new Error(JSON.stringify(result));
+  return result.value;
+}
+
 export function assertGenerationUnconfigured(state) {
   assert.equal(state.connection, "unavailable");
   assert.deepEqual(state.readiness, {
@@ -624,52 +672,8 @@ export async function runSmoke() {
   let sessionRequestStartedAt;
   const port = 4444;
   const base = `http://127.0.0.1:${port}`;
-  async function request(method, path, body) {
-    report.lastRequest = { method, path };
-    const timed = method === "POST" && path === "/session";
-    const started = performance.now();
-    if (timed) report.parentTiming = [{ event: "request_start", elapsedMs: 0 }];
-    let response;
-    try {
-      response = await fetch(`${base}${path}`, {
-        method,
-        headers: { "content-type": "application/json" },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(20000),
-      });
-    } catch (error) {
-      if (timed && error.name === "TimeoutError")
-        report.parentTiming.push({
-          event: "abort",
-          elapsedMs: Math.round(performance.now() - started),
-        });
-      throw error;
-    }
-    if (timed)
-      report.parentTiming.push({
-        event: "response_headers",
-        elapsedMs: Math.round(performance.now() - started),
-      });
-    let result;
-    try {
-      result = await response.json();
-    } catch (error) {
-      if (timed && error.name === "TimeoutError")
-        report.parentTiming.push({
-          event: "abort",
-          elapsedMs: Math.round(performance.now() - started),
-        });
-      throw error;
-    }
-    if (timed)
-      report.parentTiming.push({
-        event: "body_complete",
-        elapsedMs: Math.round(performance.now() - started),
-      });
-    if (!response.ok || result.value?.error)
-      throw new Error(JSON.stringify(result));
-    return result.value;
-  }
+  const request = (method, path, body) =>
+    smokeRequest(base, method, path, body, report);
   const execute = (script) =>
     request("POST", `/session/${session}/execute/sync`, { script, args: [] });
   const state = () =>
