@@ -4,6 +4,15 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn root_exit_waits_for_a_healthy_associated_member_and_its_output() {
+    associated_member_case(false);
+}
+
+#[test]
+fn root_exit_waits_for_a_bcl_associated_member_and_its_output() {
+    associated_member_case(true);
+}
+
+fn associated_member_case(bcl: bool) {
     let dir = std::env::temp_dir().join(format!(
         "splyce-associated-{}-{}",
         std::process::id(),
@@ -26,53 +35,109 @@ fn root_exit_waits_for_a_healthy_associated_member_and_its_output() {
         system_root: system_root().unwrap(),
     };
     let engine = create_job().unwrap();
-    let root = launch(&engine, &request("Write-Output root")).unwrap();
+    let started = Instant::now();
+    let root = launch(
+        &engine,
+        &request(if bcl {
+            "[IO.File]::WriteAllText('root-entered','entered'); [Console]::Out.WriteLine('root'); [IO.File]::WriteAllText('root-after','done')"
+        } else {
+            "[IO.File]::WriteAllText('root-module',[string]([IO.Path]::GetFullPath($env:PSModulePath) -eq [IO.Path]::GetFullPath($PSHOME+'\\Modules'))); [IO.File]::WriteAllText('root-entered','entered'); Write-Output root; [IO.File]::WriteAllText('root-after','done')"
+        }),
+    )
+    .unwrap();
     let root_process = root.process.try_clone().unwrap();
     // A second, explicitly associated fixture process waits for the test's release file.
     let member = launch(
         &root.job,
-        &request("while (!(Test-Path go)) { Start-Sleep -Milliseconds 20 }; Write-Output member"),
+        &request(if bcl {
+            "[IO.File]::WriteAllText('member-entered',[string]($PWD.Path -eq [Environment]::CurrentDirectory)); while (![IO.File]::Exists('go')) { [Threading.Thread]::Sleep(20) }; [Console]::Out.WriteLine('member')"
+        } else {
+            "[IO.File]::WriteAllText('member-module',[string]([IO.Path]::GetFullPath($env:PSModulePath) -eq [IO.Path]::GetFullPath($PSHOME+'\\Modules'))); [IO.File]::WriteAllText('member-entered',[string]($PWD.Path -eq [Environment]::CurrentDirectory)); while (!(Test-Path go)) { Start-Sleep -Milliseconds 20 }; Write-Output member"
+        }),
     )
     .unwrap();
     let member_process = member.process.try_clone().unwrap();
-    let member_worker = std::thread::spawn(move || {
-        member.monitor(
-            Instant::now() + Duration::from_secs(10),
-            &AtomicBool::new(false),
-        )
-    });
-    let root_worker = std::thread::spawn(move || {
-        root.monitor(
-            Instant::now() + Duration::from_secs(10),
-            &AtomicBool::new(false),
-        )
-    });
+    let member_worker = std::thread::Builder::new()
+        .name("shell-member-diagnostic".into())
+        .spawn(move || {
+            member.monitor(
+                Instant::now() + Duration::from_secs(10),
+                &AtomicBool::new(false),
+            )
+        })
+        .unwrap();
+    let root_worker = std::thread::Builder::new()
+        .name("shell-root-diagnostic".into())
+        .spawn(move || {
+            eprintln!("root monitor starts after {:?}", started.elapsed());
+            root.monitor(
+                Instant::now() + Duration::from_secs(10),
+                &AtomicBool::new(false),
+            )
+        })
+        .unwrap();
     // SAFETY: both wait handles remain live until their monitors join.
-    assert_eq!(
-        unsafe { WaitForSingleObject(root_process.as_raw_handle(), 5000) },
-        WAIT_OBJECT_0
+    let root_wait = unsafe { WaitForSingleObject(root_process.as_raw_handle(), 5000) };
+    let member_wait = unsafe { WaitForSingleObject(member_process.as_raw_handle(), 0) };
+    let root_finished = root_worker.is_finished();
+    let marker = dir.join("root-entered").exists();
+    let root_after = dir.join("root-after").exists();
+    let member_entry = fs::read_to_string(dir.join("member-entered")).ok();
+    eprintln!("bcl={bcl} root_after={root_after} member_entry_cwd_equal={member_entry:?}");
+    eprintln!(
+        "after {:?}: root_wait={root_wait}, member_wait={member_wait}, root_finished={root_finished}, command_entered={marker}",
+        started.elapsed()
     );
-    assert_eq!(
-        unsafe { WaitForSingleObject(member_process.as_raw_handle(), 0) },
-        WAIT_TIMEOUT
-    );
-    assert!(!root_worker.is_finished());
-    fs::write(dir.join("go"), []).unwrap();
-    let result = root_worker.join().unwrap().unwrap();
+    let release = fs::write(dir.join("go"), []);
+    let root_result = root_worker.join();
+    let member_after_root = unsafe { WaitForSingleObject(member_process.as_raw_handle(), 0) };
+    let member_result = member_worker.join();
+    eprintln!("member_after_root={member_after_root}");
+    for (name, result) in [("root", &root_result), ("member", &member_result)] {
+        match result {
+            Ok(Ok(output)) => eprintln!(
+                "{name}: status={} code={} stdout={:?} stderr={:?}",
+                output.status,
+                output.code,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Ok(Err(error)) => eprintln!("{name}: monitor error {error:?}"),
+            Err(_) => eprintln!("{name}: monitor panicked"),
+        }
+    }
+    release.unwrap();
+    if !bcl {
+        let root_module = fs::read_to_string(dir.join("root-module"));
+        let member_module = fs::read_to_string(dir.join("member-module"));
+        eprintln!(
+            "root_module_controlled={root_module:?} member_module_controlled={member_module:?}"
+        );
+        assert_eq!(root_module.unwrap(), "True");
+        assert_eq!(member_module.unwrap(), "True");
+    }
+    assert_eq!(root_wait, WAIT_OBJECT_0);
+    assert_eq!(member_wait, WAIT_TIMEOUT);
+    assert!(!root_finished);
+    let result = root_result.unwrap().unwrap();
     assert_eq!(result.status, "exit");
     assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "root");
+    assert_eq!(member_after_root, WAIT_OBJECT_0);
     assert_eq!(
-        unsafe { WaitForSingleObject(member_process.as_raw_handle(), 0) },
-        WAIT_OBJECT_0
-    );
-    assert_eq!(
-        String::from_utf8(member_worker.join().unwrap().unwrap().stdout)
+        String::from_utf8(member_result.unwrap().unwrap().stdout)
             .unwrap()
             .trim(),
         "member"
     );
     assert_eq!(active_count(&engine).unwrap(), 0);
     fs::remove_file(dir.join("go")).unwrap();
+    fs::remove_file(dir.join("root-entered")).unwrap();
+    fs::remove_file(dir.join("root-after")).unwrap();
+    fs::remove_file(dir.join("member-entered")).unwrap();
+    if !bcl {
+        fs::remove_file(dir.join("root-module")).unwrap();
+        fs::remove_file(dir.join("member-module")).unwrap();
+    }
     fs::remove_dir(temp).unwrap();
     fs::remove_dir(dir).unwrap();
 }
@@ -192,4 +257,62 @@ fn disconnect_reaps_only_its_own_shell_registry() {
     assert!(!flag.load(Ordering::Acquire));
     fs::remove_dir(temp).unwrap();
     fs::remove_dir(dir).unwrap();
+}
+
+#[test]
+fn powershell_uses_only_system_modules_at_the_existing_deadline() {
+    let dir = std::env::temp_dir().join(format!(
+        "splyce-modules-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&dir).unwrap();
+    let temp = dir.join("temp");
+    fs::create_dir(&temp).unwrap();
+    let request = Start {
+        effect_id: "00000000-0000-0000-0000-000000000001".into(),
+        action_id: "a".into(),
+        workspace_id: "w".into(),
+        session_id: "s".into(),
+        ownership_epoch: 1,
+        kind: "powershell".into(),
+        command: r#"$entries=@($env:PSModulePath.Split(';',[StringSplitOptions]::RemoveEmptyEntries)); [IO.File]::WriteAllText('modules-count',[string]$entries.Count); [IO.File]::WriteAllText('modules-path',[string]($entries.Count -eq 1 -and [IO.Path]::GetFullPath($entries[0]) -eq [IO.Path]::GetFullPath($PSHOME+'\Modules'))); $cmd=Get-Command Test-Path -ErrorAction Stop; if (![IO.Path]::GetFullPath($cmd.Module.Path).StartsWith([IO.Path]::GetFullPath($PSHOME+'\Modules\'),[StringComparison]::OrdinalIgnoreCase)) { throw 'unexpected module' }; if (!(Test-Path -LiteralPath . -PathType Container)) { throw 'system cmdlet failed' }; Write-Output system-modules-ok"#.into(),
+        cwd: dir.clone(),
+        temp: temp.clone(),
+        timeout_ms: 3000,
+        system_root: system_root().unwrap(),
+    };
+    let engine = create_job().unwrap();
+    let deadline = Instant::now() + Duration::from_millis(request.timeout_ms);
+    let output = launch(&engine, &request)
+        .unwrap()
+        .monitor(deadline, &AtomicBool::new(false))
+        .unwrap();
+    let count = fs::read_to_string(dir.join("modules-count")).unwrap();
+    let path = fs::read_to_string(dir.join("modules-path")).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(count, "1", "effective module entries must be system-only");
+    assert_eq!(path, "True");
+    assert_eq!(output.status, "exit", "{:?}", output.stderr);
+    assert_eq!(output.code, 0);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "system-modules-ok"
+    );
+    assert_eq!(active_count(&engine).unwrap(), 0);
+}
+
+#[test]
+fn module_path_separator_spelling_preserves_utf16() {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let input = std::ffi::OsString::from_wide(&[0x43, 0x3a, 0x5c, 0xd83d, 0xde80, 0x5c, 0xd800]);
+    assert_eq!(
+        powershell_module_path(Path::new(&input))
+            .encode_wide()
+            .collect::<Vec<_>>(),
+        [
+            0x43, 0x3a, 0x2f, 0xd83d, 0xde80, 0x2f, 0xd800, 0x2f, 0x4d, 0x6f, 0x64, 0x75, 0x6c,
+            0x65, 0x73
+        ]
+    );
 }
