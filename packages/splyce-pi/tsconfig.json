@@ -41,6 +41,7 @@
     "src/node-child-process.d.ts",
     "src/workspace-tools-node.d.ts",
     "src/workspace-tools.ts",
-    "src/tool-dispatch.ts"
+    "src/tool-dispatch.ts",
+    "src/jobs.ts"
   ]
 }

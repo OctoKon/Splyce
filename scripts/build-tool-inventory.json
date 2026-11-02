@@ -46,7 +46,7 @@
         "typescript": "^5.0.0 || ^6.0.0"
       },
       "selectedPeerVersions": {
-        "svelte": "5.57.2",
+        "svelte": "5.57.3",
         "typescript": "6.0.3"
       },
       "transitivePackages": [

@@ -64,7 +64,7 @@
     "test:code-index": "node scripts/run-store.mjs --case CTX_code_index",
     "test:worktrees": "node scripts/run-store.mjs --case E1_worktrees",
     "test:subagents": "node scripts/run-store.mjs --case E1_readonly_subagents",
-    "test:release-gate": "npm run test:contracts && npm run check:vendor-types && npm run test:native-openai && npm run test:store && npm run test:store-contract && npm run test:credentials && npm run test:crash-matrix && npm run test:memory && npm run test:receipts-cursor && npm run test:desktop-bridge && npm run test:grants-store && npm run test:workspace-tools && npm run test:policy-grants && npm run test:config-transition && npm run test:setup-commit && npm run test:dirty-snapshot && npm run test:code-index && npm run test:worktrees && npm run test:subagents && npm run test:agent-context-tools && npm run test:engine-frames && npm run test:native-entrypoints && npm run test:native-admission && npm run test:native-owned-session && npm run test:native-session-factory && npm run test:native-persistence && npm run test:native-model-runtime && npm run test:native-host && npm run test:native-host-factory && npm run test:native-session-gateway && npm run test:native-control && npm run test:native-provider && npm run test:native-workspace && npm run test:native-setup && npm run test:native-provider-setup && npm run test:revision-fence && npm run test:gui-fixtures && npm run test:engine-store && npm run test:bootstrap-build-mode && npm run test:desktop && npm run test:desktop-release-smoke && npm run build:desktop:e2e && npm run test:session-map && npm run test:desktop-embedded && npm run test:recovery && npm run test:recovery-applier && npm run test:native-session-setup && npm run test:native-provider-callers && npm run test:tool-dispatch",
+    "test:release-gate": "npm run test:contracts && npm run test:jobs && npm run check:vendor-types && npm run test:native-openai && npm run test:store && npm run test:store-contract && npm run test:credentials && npm run test:crash-matrix && npm run test:memory && npm run test:receipts-cursor && npm run test:desktop-bridge && npm run test:grants-store && npm run test:workspace-tools && npm run test:policy-grants && npm run test:config-transition && npm run test:setup-commit && npm run test:dirty-snapshot && npm run test:code-index && npm run test:worktrees && npm run test:subagents && npm run test:agent-context-tools && npm run test:engine-frames && npm run test:native-entrypoints && npm run test:native-admission && npm run test:native-owned-session && npm run test:native-session-factory && npm run test:native-persistence && npm run test:native-model-runtime && npm run test:native-host && npm run test:native-host-factory && npm run test:native-session-gateway && npm run test:native-control && npm run test:native-provider && npm run test:native-workspace && npm run test:native-setup && npm run test:native-provider-setup && npm run test:revision-fence && npm run test:gui-fixtures && npm run test:engine-store && npm run test:bootstrap-build-mode && npm run test:desktop && npm run test:desktop-release-smoke && npm run build:desktop:e2e && npm run test:session-map && npm run test:desktop-embedded && npm run test:recovery && npm run test:recovery-applier && npm run test:native-session-setup && npm run test:native-provider-callers && npm run test:tool-dispatch",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "lint:markdown": "markdownlint-cli2 \"**/*.md\" \".skills/**/*.md\" \".github/**/*.md\" \"#node_modules\"",
@@ -81,7 +81,8 @@
     "test:native-provider-callers": "node --test --test-concurrency=1 --test-timeout=120000 tests/native-provider-callers.test.mjs tests/native-sdk-projection.test.mjs",
     "test:native-session-setup": "node --test --test-concurrency=1 tests/native-session-setup.test.mjs tests/integration/native-session-setup.ts tests/native-session-setup-producer.test.mjs tests/native-setup-read.test.mjs",
     "test:native-session-factory": "node --test --test-concurrency=1 tests/native-session-factory.test.mjs tests/native-session-writer.test.mjs tests/native-snapshots.test.mjs",
-    "test:native-session-gateway": "node --test tests/native-session-gateway.test.mjs"
+    "test:native-session-gateway": "node --test tests/native-session-gateway.test.mjs",
+    "test:jobs": "npm run build:contracts && node --test tests/jobs.test.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.5",
@@ -98,7 +99,7 @@
     "markdownlint-cli2": "0.24.0",
     "mocha": "file:patches/mocha/mocha-10.8.2.tgz",
     "prettier": "3.9.10",
-    "svelte": "5.57.2",
+    "svelte": "5.57.3",
     "svelte-check": "4.7.7",
     "typescript": "6.0.3",
     "vite": "8.3.5"

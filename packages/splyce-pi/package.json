@@ -66,6 +66,10 @@
     "./model-data": {
       "types": "./dist/model-data.d.ts",
       "import": "./dist/model-data.js"
+    },
+    "./jobs": {
+      "types": "./dist/jobs.d.ts",
+      "import": "./dist/jobs.js"
     }
   },
   "files": [
