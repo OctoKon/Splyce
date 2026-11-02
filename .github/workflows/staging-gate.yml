@@ -102,6 +102,12 @@ jobs:
           npm run prepare:runtime
           echo "$GITHUB_WORKSPACE/apps/desktop/src-tauri/resources/engine" >> "$GITHUB_PATH"
           echo "$GITHUB_WORKSPACE/apps/desktop/src-tauri/target/build-tools" >> "$GITHUB_PATH"
+      - name: Check standard desktop launcher guards
+        shell: pwsh
+        run: ./tests/bootstrap/run-standard-desktop.ps1 -SelfCheck
+      - name: Attest the standard worker token before building
+        shell: pwsh
+        run: ./tests/bootstrap/run-standard-desktop.ps1 -Mode Token
       - name: Install locked Node dependencies
         run: npm ci --ignore-scripts
       - name: Hydrate pinned Pi model data
@@ -116,11 +122,14 @@ jobs:
       - name: Build and qualify per-run release-smoke drivers
         shell: pwsh
         run: ./tests/bootstrap/prepare-release-drivers.ps1
+      - name: Probe release smoke in the standard user session
+        shell: pwsh
+        run: ./tests/bootstrap/run-standard-desktop.ps1 -Mode Smoke
       - name: Run release and embedded desktop gates
         run: |
           # Once defined, the release gate always runs; path detection only decides whether a missing script is an error.
           if node -e "process.exit(require('./package.json').scripts?.['test:release-gate'] ? 0 : 1)"; then
-            npm run test:release-gate
+            pwsh -NoProfile -NonInteractive -File ./tests/bootstrap/run-standard-desktop.ps1 -Mode Gate
             exit 0
           fi
           # UI prototypes under apps/desktop/prototype/ are non-product fixtures, not runtime source.
@@ -137,5 +146,8 @@ jobs:
           path: |
             apps/desktop/src-tauri/target/bootstrap-smoke/*/diagnostics/result.json
             apps/desktop/src-tauri/target/bootstrap-smoke/*/diagnostics/driver.log
+            apps/desktop/src-tauri/target/bootstrap-standard-ci/*/diagnostics/result.json
+            apps/desktop/src-tauri/target/bootstrap-standard-ci/*/diagnostics/self-access.json
+            apps/desktop/src-tauri/target/bootstrap-standard-ci/*/diagnostics/step-summary.md
           if-no-files-found: ignore
           retention-days: 7
