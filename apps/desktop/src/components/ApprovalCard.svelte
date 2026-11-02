@@ -6,11 +6,15 @@
 
   let {
     request,
+    target = undefined,
+    argsSummary = undefined,
     decision = null,
     pending = false,
     onRespond,
   }: {
     request: ApprovalRequestedPayload;
+    target?: string;
+    argsSummary?: string;
     decision?: "approve" | "deny" | null;
     pending?: boolean;
     onRespond?: (decision: "approve" | "deny") => void;
@@ -43,7 +47,7 @@
     <h3 id="approval-title">Approval Required: {request.capabilityId}</h3>
   </div>
 
-  <ApprovalSummary {request} riskId="approval-desc" />
+  <ApprovalSummary {request} {target} {argsSummary} riskId="approval-desc" />
 
   {#if decision === null}
     <div class="card-actions">
@@ -52,6 +56,7 @@
         class="btn-approve"
         data-testid="approval-allow-button"
         disabled={pending}
+        aria-keyshortcuts="y"
         onclick={() => onRespond?.("approve")}
       >
         Allow once
@@ -61,11 +66,13 @@
         class="btn-deny"
         data-testid="approval-deny-button"
         disabled={pending}
+        aria-keyshortcuts="n Escape"
         onclick={() => onRespond?.("deny")}
       >
         Deny
       </button>
     </div>
+    <p class="key-hint">Keyboard: Y allow once · N or Esc deny</p>
   {:else}
     <div class="resolution-banner" class:denied={decision === "deny"}>
       <span>Resolved: {decision === "approve" ? "Approved" : "Denied"}</span>
@@ -111,6 +118,11 @@
   .card-actions {
     display: flex;
     gap: 8px;
+  }
+  .key-hint {
+    margin: 8px 0 0;
+    color: var(--text-muted, #6b7280);
+    font-size: 0.75rem;
   }
   .btn-approve,
   .btn-deny {

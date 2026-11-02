@@ -78,11 +78,11 @@
     approvalError = false;
     try {
       const response = onApproval(
-      approval.approvalRequestId,
-      approval.runId,
-      action.actionId,
-      decision,
-    );
+        approval.approvalRequestId,
+        approval.runId,
+        action.actionId,
+        decision,
+      );
       if (response) await response;
       sending[approval.approvalRequestId] = decision;
     } catch {
@@ -205,6 +205,8 @@
         <ApprovalCard
           request={approvalRequest(action.approval)}
           {pending}
+          target={action.target}
+          argsSummary={action.argsSummary}
           decision={sending[action.approval.approvalRequestId] ?? null}
           onRespond={respond}
         />
