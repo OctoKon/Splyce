@@ -158,6 +158,34 @@ export function assertSafeLeasedGooglePayload(params: unknown): void {
 	}
 }
 
+/**
+ * The pinned `@google/genai` client sends every request through its own `ApiClient.apiCall(url, requestInit, ...)`,
+ * which spreads `requestInit` into the global `fetch` and cannot be handed a custom fetch. With a leased key, force
+ * `redirect: "error"` on that one client's requests so a redirect from the admitted endpoint never carries
+ * `x-goog-api-key` to another host. If the SDK no longer has that seam the send is refused rather than left unguarded.
+ */
+export function refuseGoogleClientRedirects<T extends object>(client: T): T {
+	const apiClient = (client as { apiClient?: { apiCall?: unknown } }).apiClient;
+	const apiCall = apiClient?.apiCall;
+	if (!apiClient || typeof apiCall !== "function") {
+		throw new CredentialPreflightError("the Google SDK client no longer exposes a request seam to refuse redirects");
+	}
+	apiClient.apiCall = function (
+		this: unknown,
+		url: unknown,
+		requestInit: RequestInit | undefined,
+		...rest: unknown[]
+	) {
+		return (apiCall as (...args: unknown[]) => unknown).call(
+			this,
+			url,
+			{ ...requestInit, redirect: "error" },
+			...rest,
+		);
+	};
+	return client;
+}
+
 /** Runs `consume` with a freshly leased secret; a denied or revoked lease throws and nothing runs. */
 export async function withLeasedSecret<T>(
 	credentials: SplyceCredentials,

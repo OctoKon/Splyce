@@ -127,9 +127,8 @@ core patch to `packages/ai`, recorded here per [core fusion](../../research/docs
   `httpOptions.baseUrl`, `headers`, `retryOptions`, `apiVersion` or `baseUrlResourceScope` (the endpoint, extra headers or SDK-level
   retries that would reuse one lease). `packages/ai/test/splyce-credentials-wire.test.ts` runs the pinned Anthropic and Google SDKs
   for real against local HTTP servers: exactly the leased key on the wire, a redirect is not followed on the Anthropic path, and a
-  lease revoked after the first send stops the SDK retry. **Unresolved:** the pinned `@google/genai` calls the global fetch with its
-  own options and follows redirects, so a redirect from the admitted Google/Vertex endpoint would carry `x-goog-api-key` along;
-  those APIs therefore stay behind the native transport's final per-send check (TD-13) and this is recorded as a `todo` test.
+  lease revoked after the first send stops the SDK retry. The pinned `@google/genai` calls the global fetch with its own options
+  and would follow redirects, carrying `x-goog-api-key` along; 0016 closes that for leased Google/Vertex sends (#138).
 - **Routing keeps the lease the only credential.** `buildBaseOptions` forwards `credentials` to the adapters (it used to drop
   it); `compat.ts` no longer injects an ambient env key beside a lease; `Models.applyAuth` skips stored, environment and
   provider-derived auth entirely when a lease is given (so no key, header or base URL from auth resolution can be mixed in or
@@ -245,6 +244,16 @@ no provider or grant.
 
 The [native option admission record](0014-native-runtime-options.md) covers
 the original-options boundary and its registered-runtime regression.
+
+## 0016: Google and Vertex leased sends refuse redirects (TD-13, #138)
+
+`0016-google-leased-redirect-refusal.patch` applies from the Splyce root to `vendor/pi/` after 0004. The pinned
+`@google/genai` 2.21.0 client sends every request through `ApiClient.apiCall(url, requestInit, ...)`, which spreads
+`requestInit` into the global fetch and cannot be handed the leased fetch. `refuseGoogleClientRedirects` in
+`splyce-credentials.ts` wraps that seam on the one client built per leased attempt to force `redirect: "error"`; a
+client without the seam is refused with `CredentialPreflightError`, so an SDK change fails closed instead of sending
+unguarded. Both `google-generative-ai.ts` and `google-vertex.ts` use it on the lease path only; the API-key path is
+unchanged. See [0016-google-leased-redirect-refusal.md](0016-google-leased-redirect-refusal.md) for evidence and limits.
 
 ## Library maintenance
 
