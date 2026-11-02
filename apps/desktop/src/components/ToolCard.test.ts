@@ -257,6 +257,119 @@ describe("tool activity card", () => {
     );
   });
 
+  describe.each(["y", "n", "Escape"])("approval shortcut %s", (key) => {
+    it.each([
+      { ctrlKey: true },
+      { altKey: true },
+      { metaKey: true },
+      { isComposing: true },
+      { keyCode: 229 },
+      { repeat: true },
+    ])("ignores modified, composing, or repeated input %j", (init) => {
+      const onApproval = render({
+        action: fixtureAction({
+          actionId: "act_1",
+          status: "pending",
+          approval: approval("requested"),
+        }),
+        canRespond: () => true,
+      });
+      const event = new KeyboardEvent("keydown", {
+        key,
+        ...init,
+        bubbles: true,
+        cancelable: true,
+      });
+      document.activeElement?.dispatchEvent(event);
+      expect(onApproval).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    });
+  });
+
+  it.each([
+    ["y", false, "approve"],
+    ["Y", true, "approve"],
+    ["n", false, "deny"],
+    ["N", true, "deny"],
+    ["Escape", false, "deny"],
+  ])("preserves the plain %s shortcut", (key, shiftKey, decision) => {
+    const onApproval = render({
+      action: fixtureAction({
+        actionId: "act_1",
+        status: "pending",
+        approval: approval("requested"),
+      }),
+      canRespond: () => true,
+    });
+    const event = new KeyboardEvent("keydown", {
+      key,
+      shiftKey,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.activeElement?.dispatchEvent(event);
+    expect(onApproval).toHaveBeenCalledExactlyOnceWith(
+      "apr_1",
+      "run_1",
+      "act_1",
+      decision,
+    );
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("describes each approval with its own rationale and keyboard hint", () => {
+    render({
+      action: fixtureAction({
+        approval: approval("requested"),
+      }),
+      canRespond: () => true,
+    });
+    const second = mount(ToolCard, {
+      target: document.body,
+      props: {
+        action: fixtureAction({
+          actionId: "act_2",
+          approval: {
+            ...approval("requested"),
+            approvalRequestId: "apr_2",
+            actionId: "act_2",
+            riskRationale: "Writes a second workspace file.",
+          },
+        }),
+        canRespond: () => true,
+        onApproval: vi.fn(),
+      },
+    });
+    flushSync();
+    try {
+      const prompts = document.querySelectorAll(
+        '[data-testid="approval-card"]',
+      );
+      expect(prompts).toHaveLength(2);
+      for (const prompt of prompts) {
+        const title = document.getElementById(
+          prompt.getAttribute("aria-labelledby")!,
+        );
+        expect(title).not.toBeNull();
+        expect(prompt.contains(title)).toBe(true);
+        const descriptions = prompt
+          .getAttribute("aria-describedby")!
+          .split(/\s+/)
+          .map((id) => document.getElementById(id));
+        expect(descriptions).toHaveLength(2);
+        for (const description of descriptions) {
+          expect(description).not.toBeNull();
+          expect(prompt.contains(description)).toBe(true);
+        }
+        expect(descriptions[0]?.textContent).toContain("workspace file.");
+        expect(descriptions[1]?.textContent).toContain("Y allow once");
+        expect(descriptions[1]?.textContent).toContain("N or Esc deny");
+      }
+    } finally {
+      unmount(second);
+    }
+  });
+
   it("keeps approval controls fail-closed unless the caller opts in", () => {
     render({
       action: {

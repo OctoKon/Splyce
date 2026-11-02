@@ -4,6 +4,8 @@
 
   type ApprovalRequestedPayload = EventPayloads["approval.requested"];
 
+  const id = $props.id();
+
   let {
     request,
     target = undefined,
@@ -25,8 +27,8 @@
   class="approval-card"
   class:resolved={decision !== null}
   role="dialog"
-  aria-labelledby="approval-title"
-  aria-describedby="approval-desc"
+  aria-labelledby={`${id}-title`}
+  aria-describedby={decision === null ? `${id}-desc ${id}-keys` : `${id}-desc`}
   data-testid="approval-card"
 >
   <div class="card-header">
@@ -44,10 +46,10 @@
         Approved · executing action
       {/if}
     </span>
-    <h3 id="approval-title">Approval Required: {request.capabilityId}</h3>
+    <h3 id={`${id}-title`}>Approval Required: {request.capabilityId}</h3>
   </div>
 
-  <ApprovalSummary {request} {target} {argsSummary} riskId="approval-desc" />
+  <ApprovalSummary {request} {target} {argsSummary} riskId={`${id}-desc`} />
 
   {#if decision === null}
     <div class="card-actions">
@@ -72,7 +74,9 @@
         Deny
       </button>
     </div>
-    <p class="key-hint">Keyboard: Y allow once · N or Esc deny</p>
+    <p id={`${id}-keys`} class="key-hint">
+      Keyboard: Y allow once · N or Esc deny
+    </p>
   {:else}
     <div class="resolution-banner" class:denied={decision === "deny"}>
       <span>Resolved: {decision === "approve" ? "Approved" : "Denied"}</span>

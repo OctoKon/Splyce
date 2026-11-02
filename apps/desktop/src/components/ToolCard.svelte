@@ -36,7 +36,9 @@
   let approvalError = $state(false);
   let stateView = $derived(toolState(action));
   let label = $derived(toolActionLabel(action.capabilityId));
-  let target = $derived(redactToolText(action.target) || "Target not reported.");
+  let target = $derived(
+    redactToolText(action.target) || "Target not reported.",
+  );
   let args = $derived(redactToolText(action.argsSummary));
   let error = $derived(toolErrorCopy(action.error));
   let outcomeRef = $derived(
@@ -93,7 +95,16 @@
   }
 
   function onApprovalKeydown(event: KeyboardEvent) {
-    if (event.repeat) return;
+    if (
+      event.repeat ||
+      event.isComposing ||
+      event.keyCode === 229 ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.metaKey
+    ) {
+      return;
+    }
     if (event.key === "Escape" || event.key === "n" || event.key === "N") {
       event.preventDefault();
       respond("deny");
