@@ -1,6 +1,6 @@
 // Splyce TD-26: atomic first-run setup commit on the real Store.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateSetupMetadata } from "../../packages/splyce-pi/dist/setup-metadata.js";
+import { ConfigAuthority } from "../../packages/splyce-pi/dist/config.js";
 import { Store, StoreError } from "../../packages/splyce-pi/dist/store.js";
 
 // Every setup targets a real admitted workspace; fixture() sets it.
@@ -152,6 +153,26 @@ if (process.argv[2] === "setup-child") {
   process.exit(0);
 }
 
+if (process.argv[2] === "config-child") {
+  const store = Store.open(process.argv[3]!);
+  try {
+    new ConfigAuthority(store).apply(
+      {
+        scopeId: process.argv[4]!,
+        transitionId: "competing-config",
+        expectedConfigRevision: "cfg-0",
+        acceptedConfigRevision: "cfg-1",
+        intentRef: "intent1",
+        changedValuesArtifactId: "changes1",
+      },
+      { ...base, resolveReference: () => true },
+    );
+  } finally {
+    store.close();
+  }
+  process.exit(0);
+}
+
 test("create path appends endpoint, connection and profile atomically", (t) => {
   const { store, caller } = fixture(t);
   const result = store.commitSetup(input(), caller);
@@ -164,6 +185,39 @@ test("create path appends endpoint, connection and profile atomically", (t) => {
     "providerConnection",
     "providerEndpoint",
   ]);
+});
+
+test("a competing process changing configuration before setup lock leaves no setup records", (t) => {
+  const { path, store, caller } = fixture(t);
+  let changed = false;
+  const racing = {
+    ...caller,
+    resolveReference: (id: string, scopeId: string) => {
+      if (!changed) {
+        changed = true;
+        const child = spawnSync(
+          process.execPath,
+          [fileURLToPath(import.meta.url), "config-child", path, W],
+          { encoding: "utf8", windowsHide: true },
+        );
+        assert.equal(child.status, 0, child.stderr);
+      }
+      return caller.resolveReference(id, scopeId);
+    },
+  };
+  assert.throws(
+    () => store.commitSetup(input(), racing),
+    code("CONFIG_STALE_REVISION"),
+  );
+  assert.equal(changed, true);
+  assert.equal(store.configRevision(W), "cfg-1");
+  assert.deepEqual(kinds(store), ["configurationTransition"]);
+  assert.equal(
+    store
+      .list(W)
+      .records.some(({ record }) => record.recordId.startsWith("setup:")),
+    false,
+  );
 });
 
 test("a failure mid-batch rolls back every record", (t) => {

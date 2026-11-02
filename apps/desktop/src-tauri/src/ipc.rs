@@ -2065,6 +2065,53 @@ mod tests {
             );
         }
         assert_eq!(attempts.get(), 2);
+
+        let (metadata, _) = setup_metadata(input.clone()).ok().unwrap();
+        let view = json!({
+            "requestId":metadata["requestId"], "workspaceId":metadata["workspaceId"],
+            "providerConnectionId":metadata["providerConnectionId"], "profileId":metadata["profileId"],
+            "apiFamily":metadata["apiFamily"], "locality":metadata["locality"],
+            "endpointOrigin":"https://example.test:443", "chat":metadata["chat"],
+            "connectionRevision":"c1", "profileRevision":"p1", "endpointRevision":"r1",
+            "configRevision":"cfg-0", "credentialState":"stored", "generationReady":false
+        });
+        let mut existing = reservation.clone();
+        existing["created"] = json!(false);
+        let rejected = configure_provider(input.clone(), |method, _| match method {
+            "native.provider.prepare" => Ok(
+                json!({"state":"prepared","credentialRef":reference.as_str(),"reservation":existing}),
+            ),
+            "native.provider.commit" => {
+                let winning = configure_provider(input.clone(), |method, _| match method {
+                    "native.provider.prepare" => Ok(
+                        json!({"state":"prepared","credentialRef":reference.as_str(),"reservation":existing}),
+                    ),
+                    "native.provider.commit" => Ok(json!({})),
+                    "native.provider.read" => Ok(
+                        json!({"state":"committed","credentialRef":reference.as_str(),"view":view}),
+                    ),
+                    _ => panic!("unexpected transport call"),
+                });
+                assert!(winning.is_ok());
+                Err(BridgeError::setup("SETUP_STALE_REVISION"))
+            }
+            _ => panic!("unexpected transport call"),
+        });
+        assert_eq!(rejected.err().unwrap().code, "SETUP_STALE_REVISION");
+        assert_eq!(
+            read_owned(&reference).unwrap().as_str(),
+            "synthetic-setup-value"
+        );
+        let retry = configure_provider(input, |method, _| match method {
+            "native.provider.prepare" => {
+                Ok(json!({"state":"replayed","credentialRef":reference.as_str(),"view":view}))
+            }
+            "native.provider.read" => {
+                Ok(json!({"state":"committed","credentialRef":reference.as_str(),"view":view}))
+            }
+            _ => panic!("unexpected transport call"),
+        });
+        assert!(retry.is_ok());
     }
 
     #[test]

@@ -1793,10 +1793,17 @@ pub(crate) mod windows {
                 "credential.redact",
                 json!({"text":oversized})
             )));
+            let _growth_cleanup = Cleanup(crate::credentials::write_generated("grow-key").unwrap());
+            let expansion = "grow-key".repeat(MAX_FRAME_BYTES / "[REDACTED:credential]".len() + 1);
+            assert!(redaction_frame_fits(&call(
+                "credential.redact",
+                json!({"text":expansion})
+            )));
             for text in [
                 oversized,
                 "x".repeat(crate::credentials::MAX_REDACTION_TEXT_BYTES + 1),
                 "redaction-private-lane".repeat(MAX_FRAME_BYTES / 21),
+                expansion,
             ] {
                 let value = reply(
                     native_reply(call("credential.redact", json!({"text":text})), &mut scopes)

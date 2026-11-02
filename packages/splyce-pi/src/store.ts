@@ -3141,6 +3141,7 @@ export class Store {
         [],
         batchCaller,
         {
+          expectedConfigRevision: { scopeId, revision: profile.configRevision },
           expectedSetup: {
             workspaceId: scopeId,
             ...(reservation ? { reservation } : {}),

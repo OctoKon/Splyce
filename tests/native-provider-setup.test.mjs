@@ -352,6 +352,17 @@ for (const [name, change] of [
       host.close();
       rmSync(directory, { recursive: true, force: true });
     });
+    const expectedFiles = [
+      "snapshots",
+      "store.db",
+      "store.db-shm",
+      "store.db-wal",
+      "store.db.restore-lock",
+    ];
+    assert.deepEqual(
+      readdirSync(join(directory, "splyce")).sort(),
+      expectedFiles,
+    );
     const input = valid();
     change(input);
     assert.throws(() => validateProviderSetup(input), code("SETUP_INVALID"));
@@ -365,12 +376,10 @@ for (const [name, change] of [
     } finally {
       independent.close();
     }
-    assert.deepEqual(readdirSync(join(directory, "splyce")).sort(), [
-      "snapshots",
-      "store.db",
-      "store.db-shm",
-      "store.db-wal",
-    ]);
+    assert.deepEqual(
+      readdirSync(join(directory, "splyce")).sort(),
+      expectedFiles,
+    );
   });
 }
 
