@@ -169,7 +169,10 @@ New-Item -ItemType Directory -Path $sourcePath -Force | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Could not extract the verified tauri-driver source archive." }
 $timingPatch = Join-Path $PSScriptRoot 'tauri-driver-session-timing.patch'
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$sourceRelative = [IO.Path]::GetRelativePath($repositoryRoot, $sourcePath).Replace('\', '/')
+$sourceResolved = (Resolve-Path $sourcePath).Path
+$repositoryPrefix = $repositoryRoot.TrimEnd([char[]]@('\', '/')) + [IO.Path]::DirectorySeparatorChar
+if (-not $sourceResolved.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Timing patch target is outside the worktree.' }
+$sourceRelative = [IO.Path]::GetRelativePath($repositoryRoot, $sourceResolved).Replace('\', '/')
 Push-Location $repositoryRoot
 try {
   & git apply --check "--directory=$sourceRelative" $timingPatch
