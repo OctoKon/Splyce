@@ -73,7 +73,7 @@ export function bindSelection(
 
   const unsubscribe = selectedSession.subscribe((selection) => {
     // Re-selecting the current session keeps its channel and subscription.
-    // Switching A -> B -> A restarts A deliberately: its channel was dropped.
+    // Switching A -> B -> A resumes A after its retained transcript cursor.
     if (
       selection &&
       selection.sessionId === current?.sessionId &&

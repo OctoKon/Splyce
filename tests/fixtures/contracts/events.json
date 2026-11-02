@@ -1,14 +1,26 @@
 [
-  { "kind": "turn.started", "payload": { "runId": "r1", "turnId": "turn1" } },
+  {
+    "kind": "turn.started",
+    "payload": {
+      "runId": "r1",
+      "turnId": "turn1"
+    }
+  },
   {
     "kind": "turn.stream_delta",
     "durable": false,
-    "payload": { "runId": "r1", "delta": "hello" }
+    "payload": {
+      "runId": "r1",
+      "delta": "hello"
+    }
   },
   {
     "kind": "turn.thought_delta",
     "durable": false,
-    "payload": { "runId": "r1", "delta": "thinking" }
+    "payload": {
+      "runId": "r1",
+      "delta": "thinking"
+    }
   },
   {
     "kind": "turn.tool_intent",
@@ -49,7 +61,13 @@
       }
     }
   },
-  { "kind": "turn.canceled", "payload": { "runId": "r1", "cleanedUp": true } },
+  {
+    "kind": "turn.canceled",
+    "payload": {
+      "runId": "r1",
+      "cleanedUp": true
+    }
+  },
   {
     "kind": "approval.requested",
     "payload": {
@@ -73,9 +91,11 @@
   },
   {
     "kind": "engine.status",
-    "payload": { "state": "ready", "activeWorkers": 0 }
+    "payload": {
+      "state": "ready",
+      "activeWorkers": 0
+    }
   },
-  { "kind": "stream.resync", "payload": { "fromSeq": 10 } },
   {
     "kind": "run.reconnect_snapshot",
     "payload": {
@@ -84,6 +104,103 @@
       "turnId": "turn1",
       "activeActionIds": ["a1"],
       "state": "waiting_approval"
+    }
+  },
+  {
+    "kind": "child.started",
+    "payload": {
+      "childId": "child1",
+      "parentRunId": "r1",
+      "team": "review",
+      "role": "scout",
+      "budget": {
+        "used": 0,
+        "limit": 200000
+      },
+      "summary": "",
+      "citations": [],
+      "status": "running"
+    }
+  },
+  {
+    "kind": "child.progress",
+    "payload": {
+      "childId": "child1",
+      "parentRunId": "r1",
+      "team": "review",
+      "role": "scout",
+      "budget": {
+        "used": 42,
+        "limit": 200000
+      },
+      "summary": "",
+      "citations": [],
+      "status": "running"
+    }
+  },
+  {
+    "kind": "child.completed",
+    "payload": {
+      "childId": "child1",
+      "parentRunId": "r1",
+      "team": "review",
+      "role": "scout",
+      "budget": {
+        "used": 84,
+        "limit": 200000
+      },
+      "summary": "Found the entrypoint.",
+      "citations": [
+        {
+          "path": "src/main.ts",
+          "line": 3
+        },
+        {
+          "path": "src/helper.ts"
+        }
+      ],
+      "status": "completed",
+      "diff": {
+        "files": [
+          {
+            "path": "src/main.ts",
+            "status": "modified"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "kind": "child.failed",
+    "payload": {
+      "childId": "child1",
+      "parentRunId": "r1",
+      "team": "review",
+      "role": "scout",
+      "budget": {
+        "used": 0,
+        "limit": 200000
+      },
+      "summary": "turn budget exhausted",
+      "citations": [],
+      "status": "failed",
+      "reason": "BUDGET_TURNS"
+    }
+  },
+  {
+    "kind": "child.cancelled",
+    "payload": {
+      "childId": "child1",
+      "parentRunId": "r1",
+      "team": "review",
+      "role": "scout",
+      "budget": {
+        "used": 0,
+        "limit": 200000
+      },
+      "summary": "",
+      "citations": [],
+      "status": "cancelled"
     }
   }
 ]

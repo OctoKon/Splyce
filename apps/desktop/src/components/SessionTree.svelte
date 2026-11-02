@@ -1,8 +1,5 @@
 <script lang="ts">
-  import {
-    visibleNodes,
-    type SessionNavState,
-  } from "../stores/sessions";
+  import { visibleNodes, type SessionNavState } from "../stores/sessions";
 
   let {
     nav,
@@ -10,12 +7,16 @@
     onFocus,
     onMove,
     onRetry,
+    canRetry = true,
+    unavailableReason,
   }: {
     nav: SessionNavState;
     onSelect: (key: string) => void;
     onFocus: (key: string) => void;
     onMove: (to: "next" | "prev" | "first" | "last") => void;
     onRetry: () => void;
+    canRetry?: boolean;
+    unavailableReason?: string;
   } = $props();
 
   const nodes = $derived(visibleNodes(nav));
@@ -26,7 +27,9 @@
     const key = nav.focusKey;
     if (!container || key === null) return;
     if (!container.contains(document.activeElement)) return;
-    const el = container.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`);
+    const el = container.querySelector<HTMLElement>(
+      `[data-key="${CSS.escape(key)}"]`,
+    );
     if (el && el !== document.activeElement) el.focus();
   });
 
@@ -61,8 +64,12 @@
   {#if nav.load === "error"}
     <div role="alert" class="state state-error">
       <p>Sessions could not be loaded{nav.error ? `: ${nav.error}` : "."}</p>
-      <button type="button" onclick={onRetry}>Retry</button>
+      {#if canRetry}
+        <button type="button" onclick={onRetry}>Retry</button>
+      {/if}
     </div>
+  {:else if unavailableReason && nodes.length === 0}
+    <p role="status" class="state">{unavailableReason}</p>
   {:else if nav.load === "loading" && nodes.length === 0}
     <p role="status" class="state">Loading sessions…</p>
   {:else if nav.load === "empty"}
@@ -84,7 +91,11 @@
           onkeydown={(event) => onKeydown(event, node.key)}
         >
           <span class="name">{node.sessionId} / {node.branchAnchorId}</span>
-          <span class="meta">{node.leaves.length} leaf{node.leaves.length === 1 ? "" : "s"}</span>
+          <span class="meta"
+            >{node.leaves.length} leaf{node.leaves.length === 1
+              ? ""
+              : "s"}</span
+          >
           <span class="badge">{node.stateLabel}</span>
         </li>
       {/each}
@@ -94,7 +105,7 @@
 
 <style>
   .session-tree {
-    padding: 8px;
+    padding: 12px;
   }
   ul {
     list-style: none;

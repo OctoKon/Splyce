@@ -28,10 +28,12 @@
       runId: string,
       actionId: string,
       decision: ApprovalDecision,
-    ) => void;
+    ) => void | Promise<void>;
   } = $props();
 
   let sending = $state<Record<string, ApprovalDecision>>({});
+  let pending = $state(false);
+  let approvalError = $state(false);
   let stateView = $derived(toolState(action));
   let label = $derived(toolActionLabel(action.capabilityId));
   let target = $derived(redactToolText(action.target) || "Target not reported.");
@@ -60,24 +62,34 @@
     };
   }
 
-  function respond(decision: ApprovalDecision) {
+  async function respond(decision: ApprovalDecision) {
     const approval = action.approval;
     if (
       !approval ||
       approval.state !== "requested" ||
       stale ||
+      pending ||
       sending[approval.approvalRequestId] ||
       !canRespond(action.actionId)
     ) {
       return;
     }
-    sending[approval.approvalRequestId] = decision;
-    onApproval(
+    pending = true;
+    approvalError = false;
+    try {
+      const response = onApproval(
       approval.approvalRequestId,
       approval.runId,
       action.actionId,
       decision,
     );
+      if (response) await response;
+      sending[approval.approvalRequestId] = decision;
+    } catch {
+      approvalError = true;
+    } finally {
+      pending = false;
+    }
   }
 
   function onApprovalKeydown(event: KeyboardEvent) {
@@ -186,8 +198,13 @@
   {#if action.approval?.state === "requested" && showApprovalControls}
     {#if canRespond(action.actionId) && !stale}
       <div class="approval" use:approvalKeys use:focusDeny>
+        {#if approvalError}<p role="alert">
+            The approval response could not be confirmed. Try again if the
+            request is still open.
+          </p>{/if}
         <ApprovalCard
           request={approvalRequest(action.approval)}
+          {pending}
           decision={sending[action.approval.approvalRequestId] ?? null}
           onRespond={respond}
         />

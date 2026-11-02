@@ -1,0 +1,40 @@
+{
+  "engineEvents": [
+    {
+      "schemaVersion": 1,
+      "protocolVersion": 2,
+      "recordId": "rec-run-1",
+      "eventId": "evt-1",
+      "createdAt": "2026-10-26T00:00:00.000Z",
+      "sourceIds": [],
+      "durable": true,
+      "kind": "turn.started",
+      "payload": { "runId": "run-1", "turnId": "turn-1" }
+    },
+    {
+      "schemaVersion": 1,
+      "protocolVersion": 2,
+      "recordId": "rec-run-1",
+      "eventId": "evt-2",
+      "createdAt": "2026-10-26T00:00:00.000Z",
+      "sourceIds": [],
+      "durable": false,
+      "kind": "turn.stream_delta",
+      "payload": { "runId": "run-1", "delta": "hi" }
+    }
+  ],
+  "foreignEvent": {
+    "schemaVersion": 1,
+    "protocolVersion": 2,
+    "recordId": "evt-rec-3",
+    "eventId": "evt-3",
+    "createdAt": "2026-10-26T00:00:00.000Z",
+    "sourceIds": [],
+    "scopeId": "w-other",
+    "sessionId": "s-other",
+    "seq": 3,
+    "durable": true,
+    "kind": "turn.started",
+    "payload": { "runId": "run-1", "turnId": "turn-2" }
+  }
+}

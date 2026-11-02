@@ -1,3 +1,4 @@
+import { engine } from "./engine";
 import type { MemoryObservationRecord } from "@splyce/pi/contracts";
 
 /**
@@ -41,3 +42,15 @@ export function emptyMessage(status: MemoryStatus, stale = false): string {
 
 export const localityLabel = (l: MemoryEntry["locality"]): string =>
   l === "local" ? "Local" : "Cloud (hosted)";
+
+export async function listMemory(workspaceId: string, requestId: string) {
+  return engine.readPage("memory.list", requestId, { workspaceId });
+}
+
+export async function searchMemory(
+  workspaceId: string,
+  query: string,
+  requestId: string,
+) {
+  return engine.readPage("memory.search", requestId, { workspaceId, query });
+}

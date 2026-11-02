@@ -341,19 +341,28 @@
               </span>
             </header>
             <dl>
-              <dt>Requested</dt><dd>{row.requestedLabel}</dd>
-              <dt>Effective</dt><dd data-testid="row-effective">{row.effectiveLabel}</dd>
+              <dt>Requested</dt>
+              <dd>{row.requestedLabel}</dd>
+              <dt>Effective</dt>
+              <dd data-testid="row-effective">{row.effectiveLabel}</dd>
               <dt>Readiness</dt>
               <dd data-testid="row-readiness">
                 {row.readinessReason ?? "No readiness problem reported."}
               </dd>
-              <dt>Revision</dt><dd>{row.revisionLabel}</dd>
-              <dt>Source</dt><dd>{row.sourceLabel}</dd>
-              <dt>Digest</dt><dd><code>{row.digestLabel}</code></dd>
-              <dt>License</dt><dd>{row.licenseLabel}</dd>
-              <dt>Dependencies</dt><dd>{row.dependenciesLabel}</dd>
-              <dt>Dependants</dt><dd>{row.requiredByLabel}</dd>
-              <dt>Shared owners</dt><dd data-testid="shared-deps">{row.sharedLabel}</dd>
+              <dt>Revision</dt>
+              <dd>{row.revisionLabel}</dd>
+              <dt>Source</dt>
+              <dd>{row.sourceLabel}</dd>
+              <dt>Digest</dt>
+              <dd><code>{row.digestLabel}</code></dd>
+              <dt>License</dt>
+              <dd>{row.licenseLabel}</dd>
+              <dt>Dependencies</dt>
+              <dd>{row.dependenciesLabel}</dd>
+              <dt>Dependants</dt>
+              <dd>{row.requiredByLabel}</dd>
+              <dt>Shared owners</dt>
+              <dd data-testid="shared-deps">{row.sharedLabel}</dd>
               <dt>Retained data</dt>
               <dd data-testid="retained-data">{row.retainedLabel}</dd>
             </dl>
@@ -370,7 +379,8 @@
                 type="button"
                 disabled={!row.enable.enabled}
                 title={row.enable.reason ?? undefined}
-                onclick={() => openDialog({ kind: "enable", packageId: row.packageId })}
+                onclick={() =>
+                  openDialog({ kind: "enable", packageId: row.packageId })}
                 data-testid="enable-module"
               >
                 Enable
@@ -379,7 +389,8 @@
                 type="button"
                 disabled={!row.disable.enabled}
                 title={row.disable.reason ?? undefined}
-                onclick={() => openDialog({ kind: "disable", packageId: row.packageId })}
+                onclick={() =>
+                  openDialog({ kind: "disable", packageId: row.packageId })}
                 data-testid="disable-module"
               >
                 Disable
@@ -388,7 +399,8 @@
                 type="button"
                 disabled={!row.uninstall.enabled}
                 title={row.uninstall.reason ?? undefined}
-                onclick={() => openDialog({ kind: "uninstall", packageId: row.packageId })}
+                onclick={() =>
+                  openDialog({ kind: "uninstall", packageId: row.packageId })}
                 data-testid="uninstall-module"
               >
                 Uninstall
@@ -397,7 +409,8 @@
                 type="button"
                 disabled={!row.deleteData.enabled}
                 title={row.deleteData.reason ?? undefined}
-                onclick={() => openDialog({ kind: "delete-data", packageId: row.packageId })}
+                onclick={() =>
+                  openDialog({ kind: "delete-data", packageId: row.packageId })}
                 data-testid="delete-data"
               >
                 Delete retained data
@@ -410,10 +423,14 @@
               <p class="reason">Disable unavailable: {row.disable.reason}</p>
             {/if}
             {#if row.uninstall.reason}
-              <p class="reason">Uninstall unavailable: {row.uninstall.reason}</p>
+              <p class="reason">
+                Uninstall unavailable: {row.uninstall.reason}
+              </p>
             {/if}
             {#if row.deleteData.reason}
-              <p class="reason">Delete data unavailable: {row.deleteData.reason}</p>
+              <p class="reason">
+                Delete data unavailable: {row.deleteData.reason}
+              </p>
             {/if}
           </li>
         {/each}
@@ -423,10 +440,14 @@
 
   {#if snapshot.generation.state === "unconfigured"}
     <p class="panel note" data-testid="modules-generation-note">
-      <strong>{view.generationLabel}.</strong> {view.generationReason} Installing
-      or enabling a module does not configure generation, download weights or
-      choose a fallback.
-      <button type="button" onclick={onConfigureProvider} data-testid="modules-configure-provider">
+      <strong>{view.generationLabel}.</strong>
+      {view.generationReason} Installing or enabling a module does not configure generation,
+      download weights or choose a fallback.
+      <button
+        type="button"
+        onclick={onConfigureProvider}
+        data-testid="modules-configure-provider"
+      >
         Configure a provider or model
       </button>
     </p>
@@ -482,19 +503,31 @@
                   </span>
                 </label>
                 {#if option.selectBlockedReason}
-                  <p class="blocker" role="alert">{option.selectBlockedReason}</p>
+                  <p class="blocker" role="alert">
+                    {option.selectBlockedReason}
+                  </p>
                 {/if}
                 {#if !option.selectable}
-                  <OptionalStateHelp state="unsupported" feature={option.title} />
+                  <OptionalStateHelp
+                    state="unsupported"
+                    feature={option.title}
+                  />
                 {/if}
                 <dl>
-                  <dt>Source</dt><dd>{option.sourceLabel}</dd>
-                  <dt>Digest</dt><dd><code>{option.digestLabel}</code></dd>
-                  <dt>License</dt><dd>{option.licenseLabel}</dd>
-                  <dt>Compatibility</dt><dd>{option.compatibilityLabel}</dd>
-                  <dt>Download</dt><dd>{option.downloadLabel}</dd>
-                  <dt>Installed size</dt><dd>{option.installedLabel}</dd>
-                  <dt>Dependencies</dt><dd>{option.dependencyLabel}</dd>
+                  <dt>Source</dt>
+                  <dd>{option.sourceLabel}</dd>
+                  <dt>Digest</dt>
+                  <dd><code>{option.digestLabel}</code></dd>
+                  <dt>License</dt>
+                  <dd>{option.licenseLabel}</dd>
+                  <dt>Compatibility</dt>
+                  <dd>{option.compatibilityLabel}</dd>
+                  <dt>Download</dt>
+                  <dd>{option.downloadLabel}</dd>
+                  <dt>Installed size</dt>
+                  <dd>{option.installedLabel}</dd>
+                  <dt>Dependencies</dt>
+                  <dd>{option.dependencyLabel}</dd>
                 </dl>
                 {#if option.setupExecutionLabel}
                   <p>{option.setupExecutionLabel}</p>
@@ -509,11 +542,16 @@
         </p>
       {:else if installedTarget && targetRow}
         <dl class="facts">
-          <dt>Package</dt><dd>{targetRow.packageStateLabel}</dd>
-          <dt>Requested</dt><dd>{targetRow.requestedLabel}</dd>
-          <dt>Effective</dt><dd>{targetRow.effectiveLabel}</dd>
+          <dt>Package</dt>
+          <dd>{targetRow.packageStateLabel}</dd>
+          <dt>Requested</dt>
+          <dd>{targetRow.requestedLabel}</dd>
+          <dt>Effective</dt>
+          <dd>{targetRow.effectiveLabel}</dd>
           <dt>Readiness</dt>
-          <dd>{targetRow.readinessReason ?? "No readiness problem reported."}</dd>
+          <dd>
+            {targetRow.readinessReason ?? "No readiness problem reported."}
+          </dd>
         </dl>
 
         {#if dialog.kind === "enable"}
@@ -525,28 +563,30 @@
             <div class="banner" role="alert" data-testid="dialog-blocker">
               <p>Enable is blocked until these dependencies are enabled:</p>
               <ul>
-                {#each dialogBlockers as blocker (blocker)}<li>{blocker}</li>{/each}
+                {#each dialogBlockers as blocker (blocker)}<li>
+                    {blocker}
+                  </li>{/each}
               </ul>
             </div>
           {/if}
           {#if targetEntry?.model}
             <p data-testid="dialog-model">
               Required model <strong>{targetEntry.model}</strong> is not provided
-              by this action. The module stays unconfigured until you select or
-              provision it separately; no weights are downloaded and no fallback
-              is chosen.
+              by this action. The module stays unconfigured until you select or provision
+              it separately; no weights are downloaded and no fallback is chosen.
             </p>
           {/if}
         {:else if dialog.kind === "disable"}
           <p>
             Disable fences new admission and drains owned work before effective
-            off. It does not uninstall the package, remove shared dependencies or
-            delete retained data.
+            off. It does not uninstall the package, remove shared dependencies
+            or delete retained data.
           </p>
         {:else if dialog.kind === "uninstall"}
           <p>
             Uninstall removes owned package code only. It does not delete
-            retained data, remove shared dependencies or delete external sources.
+            retained data, remove shared dependencies or delete external
+            sources.
           </p>
           <p data-testid="dialog-shared">
             {targetRow.sharedLabel}. {targetRow.requiredByLabel}.
@@ -634,7 +674,7 @@
     margin: 0 auto;
     padding: 24px;
     box-sizing: border-box;
-    color: #111827;
+    color: var(--on-surface, #111827);
   }
   h1 {
     margin: 4px 0 8px;
@@ -650,18 +690,18 @@
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
   }
   .generation {
     margin: 0 0 12px;
     font-size: 0.875rem;
   }
   .panel {
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border, #e5e7eb);
     border-radius: 8px;
     padding: 16px;
     margin-top: 16px;
-    background: #ffffff;
+    background: var(--neutral, #ffffff);
   }
   .panel h2 {
     margin-top: 0;
@@ -669,15 +709,15 @@
   }
   .detail {
     display: block;
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
     font-size: 0.875rem;
   }
   .banner {
     padding: 8px 12px;
     border-radius: 6px;
-    background: #fffbeb;
-    border: 1px solid #fcd34d;
-    color: #78350f;
+    background: var(--warning-soft, #fffbeb);
+    border: 1px solid var(--warning-border, #fcd34d);
+    color: var(--status-warning, #78350f);
     font-size: 0.875rem;
   }
   .actions {
@@ -689,9 +729,9 @@
   button {
     font: inherit;
     padding: 6px 12px;
-    border: 1px solid #9ca3af;
+    border: 1px solid var(--hover-border, #9ca3af);
     border-radius: 6px;
-    background: #ffffff;
+    background: var(--neutral, #ffffff);
     color: inherit;
     cursor: pointer;
   }
@@ -713,7 +753,7 @@
     gap: 12px;
   }
   .module-rows > li {
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border, #e5e7eb);
     border-radius: 8px;
     padding: 12px;
   }
@@ -732,8 +772,8 @@
   .badge {
     padding: 2px 8px;
     border-radius: 9999px;
-    background: #f3f4f6;
-    color: #374151;
+    background: var(--surface, #f3f4f6);
+    color: var(--text-soft, #374151);
     font-size: 0.75rem;
     font-weight: 700;
     text-transform: uppercase;
@@ -746,7 +786,7 @@
     font-size: 0.8125rem;
   }
   dt {
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
     font-weight: 600;
   }
   dd {
@@ -758,7 +798,7 @@
   }
   .reason,
   .blocker {
-    color: #991b1b;
+    color: var(--error, #991b1b);
     font-size: 0.8125rem;
     margin: 8px 0 0;
   }
@@ -777,8 +817,8 @@
     box-sizing: border-box;
   }
   .dialog {
-    background: #ffffff;
-    color: #111827;
+    background: var(--neutral, #ffffff);
+    color: var(--on-surface, #111827);
     border-radius: 8px;
     padding: 20px;
     width: min(720px, 100%);
@@ -795,7 +835,7 @@
     gap: 12px;
   }
   .add-list > li {
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border, #e5e7eb);
     border-radius: 8px;
     padding: 12px;
   }

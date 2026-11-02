@@ -16,7 +16,7 @@
       "delayMs": 0,
       "event": {
         "schemaVersion": 1,
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "recordId": "rec_w3_01",
         "eventId": "evt_01W3_01",
         "createdAt": "2026-10-26T12:00:00.000Z",
@@ -36,7 +36,7 @@
       "delayMs": 10,
       "event": {
         "schemaVersion": 1,
-        "protocolVersion": 1,
+        "protocolVersion": 2,
         "recordId": "rec_w3_02",
         "eventId": "evt_01W3_02",
         "createdAt": "2026-10-26T12:00:00.010Z",

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "e2e",
+  "description": "Embedded WebDriver access in E2E builds only",
+  "windows": ["main"],
+  "permissions": ["wdio-webdriver:default"]
+}

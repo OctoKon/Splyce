@@ -1,0 +1,37 @@
+diff --git a/scripts/update-model-catalog-pin.mjs b/scripts/update-model-catalog-pin.mjs
+index efec2af..e342fc0 100644
+--- a/scripts/update-model-catalog-pin.mjs
++++ b/scripts/update-model-catalog-pin.mjs
+@@ -126,12 +126,27 @@ export async function updateModelCatalogPin(root, { ifStale = false } = {}) {
+ 	return { revision, updated: revision !== current, bytes };
+ }
+ 
++/** Hydrate build data from the catalog revision already pinned in nix/model-catalog.json. */
++export async function hydratePinnedModelCatalog(root) {
++	const pinPath = join(root, "nix/model-catalog.json");
++	const revision = JSON.parse(readFileSync(pinPath, "utf8")).revision;
++	if (typeof revision !== "string" || !REVISION_RE.test(revision)) throw new Error(`Invalid pin in ${pinPath}`);
++	const bytes = await fetchRevision(revision);
++	hydrateModelCatalogBytes(root, bytes);
++	return revision;
++}
++
+ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+ 	const args = process.argv.slice(2);
+-	if (args.length > 1 || (args.length === 1 && args[0] !== "--if-stale")) {
+-		throw new Error("Usage: node scripts/update-model-catalog-pin.mjs [--if-stale]");
+-	}
+ 	const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+-	const { revision, updated } = await updateModelCatalogPin(root, { ifStale: args[0] === "--if-stale" });
+-	console.log(`${updated ? "Pinned" : "Kept"} model catalog ${revision}`);
++	if (args.length === 1 && args[0] === "--hydrate-pinned") {
++		const revision = await hydratePinnedModelCatalog(root);
++		console.log(`Hydrated pinned model catalog ${revision}`);
++	} else {
++		if (args.length > 1 || (args.length === 1 && args[0] !== "--if-stale")) {
++			throw new Error("Usage: node scripts/update-model-catalog-pin.mjs [--if-stale|--hydrate-pinned]");
++		}
++		const { revision, updated } = await updateModelCatalogPin(root, { ifStale: args[0] === "--if-stale" });
++		console.log(`${updated ? "Pinned" : "Kept"} model catalog ${revision}`);
++	}
+ }

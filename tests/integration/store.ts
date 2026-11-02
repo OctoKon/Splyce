@@ -7,6 +7,9 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import {
   chmodSync,
   copyFileSync,
@@ -73,12 +76,18 @@ const waitFor = (file: string, timeoutMs = 15000) => {
   }
 };
 
-const killTree = (pid: number) => {
+const killTree = async (child: ReturnType<typeof spawn>) => {
+  const { pid } = child;
   const result = spawnSync("taskkill", ["/PID", String(pid), "/F", "/T"], {
     stdio: "ignore",
   });
   if (result.status !== 0)
     throw new Error(`taskkill failed for ${String(pid)}`);
+  await once(child, "close", { signal: AbortSignal.timeout(15000) });
+  assert.ok(
+    child.exitCode !== null || child.signalCode !== null,
+    "child must exit before SQLite recovery",
+  );
 };
 
 const spawnChild = (mode: string, dir: string) =>
@@ -109,7 +118,7 @@ test("S1 fresh commit and reopen", () => {
   console.log(`S1 n=${String(trials)} pass`);
 });
 
-test("S2 forced kill mid-transaction (child processes)", () => {
+test("S2 forced kill mid-transaction (child processes)", async () => {
   for (let i = 0; i < trials; i += 1) {
     // killed after acknowledged commit: the record must be present.
     {
@@ -119,7 +128,7 @@ test("S2 forced kill mid-transaction (child processes)", () => {
       const ack = JSON.parse(readFileSync(join(dir, "ack.json"), "utf8")) as {
         seq: number;
       };
-      killTree(child.pid as number);
+      await killTree(child);
       const reopened = Store.open(join(dir, "store.db"));
       assert.ok(reopened.cursor() >= ack.seq);
       const got = reopened.get("rec-child-ack");
@@ -132,7 +141,7 @@ test("S2 forced kill mid-transaction (child processes)", () => {
       const dir = freshDir();
       const child = spawnChild("mid-transaction", dir);
       waitFor(join(dir, "mid.json"));
-      killTree(child.pid as number);
+      await killTree(child);
       const reopened = Store.open(join(dir, "store.db"));
       // the acknowledged first append survives; the uncommitted one must not.
       assert.ok(reopened.get("rec-child-open"));
@@ -1052,6 +1061,134 @@ test("appendBatch can require a same-commit ownership epoch", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("appendBatch scope/session cursor preconditions fail closed atomically", () => {
+  const dir = freshDir();
+  const path = join(dir, "store.db");
+  const store = Store.open(path);
+  const fixtures = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/contracts/records.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, Record<string, unknown>>;
+  const artifact = (recordId: string) =>
+    ({
+      ...structuredClone(fixtures.artifact),
+      recordId,
+      scopeId: "w-demo",
+    }) as Record<string, unknown>;
+
+  // Baseline commit advances both the scope and the session cursor.
+  store.appendBatch(
+    [{ kind: "artifact", record: artifact("rec-base") }],
+    caller,
+  );
+  const scopeCursor = store.cursor("w-demo");
+  const sessionCursor = store.sessionCursor("w-demo", "s1");
+  assert.ok(scopeCursor > 0 && sessionCursor > 0);
+
+  // Matching preconditions commit normally.
+  const ok = store.appendBatch(
+    [{ kind: "artifact", record: artifact("rec-matched") }],
+    caller,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      expectedScopeCursor: { scopeId: "w-demo", seq: store.cursor("w-demo") },
+      expectedSessionCursor: {
+        scopeId: "w-demo",
+        sessionId: "s1",
+        seq: store.sessionCursor("w-demo", "s1"),
+      },
+    },
+  );
+  assert.equal(ok.seqs.length, 1);
+
+  // A stale scope cursor (another committer appended first) is refused under
+  // the same BEGIN IMMEDIATE: nothing is appended.
+  const beforeScope = store.cursor();
+  assert.throws(
+    () =>
+      store.appendBatch(
+        [{ kind: "artifact", record: artifact("rec-stale-scope") }],
+        caller,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { expectedScopeCursor: { scopeId: "w-demo", seq: scopeCursor } },
+      ),
+    (error: unknown) =>
+      error instanceof StoreError && error.code === "SCOPE_CURSOR_STALE",
+  );
+  assert.equal(store.cursor(), beforeScope);
+
+  // A stale session cursor (this session appended elsewhere) is refused too.
+  assert.throws(
+    () =>
+      store.appendBatch(
+        [{ kind: "artifact", record: artifact("rec-stale-session") }],
+        caller,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          expectedSessionCursor: {
+            scopeId: "w-demo",
+            sessionId: "s1",
+            seq: sessionCursor,
+          },
+        },
+      ),
+    (error: unknown) =>
+      error instanceof StoreError && error.code === "SESSION_CURSOR_STALE",
+  );
+  assert.equal(store.cursor(), beforeScope);
+
+  // Malformed precondition values are rejected, never treated as matching.
+  assert.throws(
+    () =>
+      store.appendBatch(
+        [{ kind: "artifact", record: artifact("rec-bad-scope") }],
+        caller,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { expectedScopeCursor: { scopeId: "w-demo", seq: -1 } },
+      ),
+    (error: unknown) =>
+      error instanceof StoreError && error.code === "SCOPE_CURSOR_STALE",
+  );
+  assert.equal(store.cursor(), beforeScope);
+  assert.throws(
+    () =>
+      store.appendBatch(
+        [{ kind: "artifact", record: artifact("rec-bad-session") }],
+        caller,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          expectedSessionCursor: {
+            scopeId: "w-demo",
+            sessionId: "s1",
+            seq: Number.NaN,
+          },
+        },
+      ),
+    (error: unknown) =>
+      error instanceof StoreError && error.code === "SESSION_CURSOR_STALE",
+  );
+  assert.equal(store.cursor(), beforeScope);
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("appendBatch precondition rejects an existing actionId with a new key", () => {
   const dir = freshDir();
   const path = join(dir, "store.db");
@@ -1174,4 +1311,251 @@ test("migrateV1 decides attribution inside its write transaction (no check-then-
   assert.equal(layout.value, "1");
   check.close();
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("action reservation fence rejects competing terminal history atomically", () => {
+  const dir = freshDir();
+  const path = join(dir, "store.db");
+  const first = Store.open(path);
+  const second = Store.open(path);
+  const fixtures = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/contracts/records.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, Record<string, unknown>>;
+  const proposal = {
+    ...structuredClone(fixtures.action),
+    recordId: "reservation",
+    state: "proposed",
+  };
+  const expected = {
+    scopeId: String(proposal.scopeId),
+    actionId: String(proposal.actionId),
+    idempotencyKey: String(proposal.idempotencyKey),
+    recordId: "reservation",
+  };
+  try {
+    first.appendBatch([{ kind: "action", record: proposal }], caller, expected);
+    second.append(
+      {
+        kind: "action",
+        record: { ...proposal, recordId: "competing", state: "canceled" },
+      },
+      caller,
+    );
+    const cursor = first.cursor();
+    assert.throws(
+      () =>
+        first.appendBatch(
+          [
+            {
+              kind: "action",
+              record: { ...proposal, recordId: "attempt", state: "running" },
+            },
+          ],
+          caller,
+          undefined,
+          undefined,
+          undefined,
+          expected,
+        ),
+      (error: unknown) =>
+        error instanceof StoreError &&
+        error.code === "ACTION_RESERVATION_CHANGED",
+    );
+    assert.equal(first.cursor(), cursor);
+  } finally {
+    second.close();
+    first.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("restore excludes existing writers and preserves their committed shell intent", () => {
+  const dir = freshDir(),
+    path = join(dir, "store.db"),
+    backup = join(dir, "backup.db");
+  const first = Store.open(path, { busyTimeoutMs: 0 }),
+    second = Store.open(path);
+  try {
+    const ownershipEpoch = first.acquireWorkspace(
+      "w-demo",
+      caller.sessionId,
+    ).epoch;
+    first.backup(backup);
+    assert.throws(() => first.restore(backup), { code: "STORE_BUSY" });
+    const intent = record("action", {
+      capabilityId: "workspace.powershell",
+      state: "running",
+      ownershipEpoch,
+    });
+    second.append({ kind: "action", record: intent }, caller);
+    second.close();
+    assert.throws(() => first.restore(backup), { code: "OWNERSHIP_CONFLICT" });
+    assert.equal(first.get(String(intent.recordId)).record.state, "running");
+  } finally {
+    second.close();
+    first.close();
+  }
+});
+
+test("restore denies writers through staging across processes while read and export remain available", () => {
+  const dir = freshDir(),
+    path = join(dir, "store.db"),
+    backup = join(dir, "backup.db"),
+    exported = join(dir, "exported.db");
+  const store = Store.open(path);
+  const ownershipEpoch = store.acquireWorkspace(
+    "w-demo",
+    caller.sessionId,
+  ).epoch;
+  const intent = record("action", {
+    capabilityId: "workspace.powershell",
+    state: "running",
+    ownershipEpoch,
+  });
+  store.backup(backup);
+  let checked = false;
+  const copy = fs.copyFileSync;
+  try {
+    fs.copyFileSync = (src, dest, ...args) => {
+      if (dest === path + ".restore-staging") {
+        const reader = Store.open(path, { readOnly: true });
+        try {
+          reader.backup(exported);
+        } finally {
+          reader.close();
+        }
+        const write = () => {
+          const concurrent = Store.open(path, { busyTimeoutMs: 0 });
+          try {
+            concurrent.append({ kind: "action", record: intent }, caller);
+          } finally {
+            concurrent.close();
+          }
+        };
+        assert.throws(write, { code: "STORE_BUSY" });
+        const child = spawnSync(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            "import {Store} from " +
+              JSON.stringify(
+                new URL(
+                  "../../packages/splyce-pi/dist/store.js",
+                  import.meta.url,
+                ).href,
+              ) +
+              '; try { const writer=Store.open(process.argv[1],{busyTimeoutMs:0}); writer.close(); process.stdout.write("admitted"); } catch(e) { process.stdout.write(String(e.code)); }',
+            path,
+          ],
+          { windowsHide: true, encoding: "utf8" },
+        );
+        assert.equal(child.status, 0, child.stderr);
+        assert.equal(child.stdout, "STORE_BUSY");
+        checked = true;
+      }
+      return copy(src, dest, ...args);
+    };
+    syncBuiltinESMExports();
+    store.restore(backup);
+    assert.equal(checked, true);
+    const reader = Store.open(exported, { readOnly: true });
+    try {
+      assert.equal(reader.workspaceOwner("w-demo")?.epoch, ownershipEpoch);
+    } finally {
+      reader.close();
+    }
+    const after = Store.open(path, { busyTimeoutMs: 0 });
+    try {
+      after.append({ kind: "action", record: intent }, caller);
+    } finally {
+      after.close();
+    }
+    assert.throws(() => store.restore(backup), { code: "OWNERSHIP_CONFLICT" });
+  } finally {
+    fs.copyFileSync = copy;
+    syncBuiltinESMExports();
+    store.close();
+  }
+});
+
+test("shell ownership survives incomplete and legacy cleanup, reopen and backup", () => {
+  const dir = freshDir(),
+    path = join(dir, "store.db"),
+    scope = "w-demo";
+  let store = Store.open(path);
+  const denied = { code: "OWNERSHIP_CONFLICT" };
+  try {
+    const owner = store.acquireWorkspace(scope, caller.sessionId);
+    const shell = {
+      capabilityId: "workspace.powershell",
+      ownershipEpoch: owner.epoch,
+    };
+    const proposal = record("action", { ...shell, state: "proposed" });
+    store.append({ kind: "action", record: proposal }, caller);
+    assert.equal(
+      store.acquireWorkspace(scope, caller.sessionId).epoch,
+      owner.epoch,
+    );
+    const before = join(dir, "before.db");
+    store.backup(before);
+    const intent = record("action", { ...shell, state: "running" });
+    store.append({ kind: "action", record: intent }, caller);
+    const outcome = (cleanupState: string, effectState = "uncertain") =>
+      store.append(
+        {
+          kind: "outcome",
+          record: record("outcome", {
+            sourceIds: [intent.recordId],
+            cleanupState,
+            effectState,
+          }),
+        },
+        caller,
+      );
+    const assertFenced = () => {
+      assert.throws(
+        () => store.releaseWorkspace(scope, caller.sessionId, owner.epoch),
+        denied,
+      );
+      assert.throws(
+        () => store.renewWorkspace(scope, caller.sessionId, owner.epoch),
+        denied,
+      );
+      for (const session of [caller.sessionId, "other"])
+        assert.throws(() => store.acquireWorkspace(scope, session), denied);
+    };
+    assertFenced();
+    assert.throws(() => store.restore(before), denied);
+    outcome("uncertain");
+    assertFenced();
+    outcome("not-required", "observed-success");
+    // Simulate the old release by removing the row from an isolated copy, after closing SQLite.
+    const legacy = join(dir, "legacy.db");
+    store.backup(legacy);
+    const db = new DatabaseSync(legacy);
+    db.prepare("DELETE FROM workspace_ownership WHERE workspace_id=?").run(
+      scope,
+    );
+    db.close();
+    const old = Store.open(legacy);
+    try {
+      assert.equal(old.workspaceOwner(scope), undefined);
+      assert.throws(() => old.acquireWorkspace(scope, "new"), denied);
+      assert.ok(old.list(scope).records.length >= 4);
+    } finally {
+      old.close();
+    }
+    store.close();
+    store = Store.open(path);
+    assertFenced();
+    outcome("complete");
+    store.releaseWorkspace(scope, caller.sessionId, owner.epoch);
+    assert.ok(store.acquireWorkspace(scope, "other").epoch > owner.epoch);
+  } finally {
+    store.close();
+  }
 });

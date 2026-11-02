@@ -20,33 +20,39 @@ export interface ComposerAvailability {
    * Fail closed: anything but `true` blocks sending.
    */
   generationReady?: boolean;
+  /** A project was chosen and admitted; fail closed when absent. */
+  workspaceSelected?: boolean;
+  profileSelected?: boolean;
+  sessionReadiness?: "ready" | "unavailable";
   /** Sending is not wired for this session yet; shown as the blocked reason. */
   unavailable?: string;
 }
 
-const CONNECTION_REASONS: Partial<Record<EngineConnectionState, string>> = {
-  disconnected: "Engine is not connected.",
-  connecting: "Engine is still connecting.",
-  unavailable: "Engine is unavailable.",
-  error: "Engine reported an error.",
-  busy: "A turn is running. Press Esc to cancel it.",
-};
-
 /** Honest reason sending is blocked, or null when allowed. */
 export function sendBlockedReason(a: ComposerAvailability): string | null {
   if (a.pending) return "Sending the previous message.";
-  const connection = CONNECTION_REASONS[a.connection];
-  if (connection) return connection;
-  if (!a.sessionId) return "No session is selected.";
+  if (a.connection === "disconnected") return "Engine is not connected.";
+  if (a.connection === "connecting") return "Engine is still connecting.";
+  if (a.connection === "error") return "Engine reported an error.";
+  if (a.connection === "busy")
+    return "A turn is running. Press Esc to cancel it.";
   // Contract (commons/backend-frontend-contracts.md): generation=false must read
   // "Generation unconfigured" and keep send disabled, so the generation gate
   // wins over the wiring gap. Once generation is true, the wiring gap is shown.
   if (a.generationReady === false)
     return "Generation unconfigured. Connect a provider and select a model.";
+  if (a.connection === "unavailable") return "Engine is unavailable.";
   // Unreported is its own state: the engine has not said whether generation is
   // configured, so claiming it is unconfigured would be a false statement.
   if (a.generationReady !== true)
     return "Generation readiness has not been reported yet. Sending stays blocked.";
+  if (!a.workspaceSelected)
+    return "No project is selected. Choose a project first.";
+  if (!a.profileSelected)
+    return "No profile is selected. Use a configured profile first.";
+  if (!a.sessionId) return "No session is selected.";
+  if (a.sessionReadiness !== "ready")
+    return "The session is not ready. Sending stays blocked.";
   if (a.unavailable) return a.unavailable;
   if (a.stale) return "Session state is out of date. Refresh before sending.";
   return null;

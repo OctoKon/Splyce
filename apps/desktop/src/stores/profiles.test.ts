@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
 import type { ProviderConnectionRecord } from "@splyce/pi/contracts";
+import { describe, expect, it } from "vitest";
 import {
-  toConnectionView,
   type ConnectionInput,
   type CredentialStatus,
+  providerConfigurePayload,
+  toConnectionView,
+  validateProviderSetup,
 } from "./profiles";
 
 function input(
@@ -107,5 +109,54 @@ describe("TD-17 provider view hardening", () => {
       endpointHost: "http://127.0.0.1:11434",
     });
     expect(local.egress).toBe("Local: requests stay on this device");
+  });
+});
+
+describe("provider setup token limits", () => {
+  const draft = (contextWindow: string, maxOutputTokens: string) => ({
+    endpoint: "https://api.example.test/v1",
+    apiFamily: "openai-completions" as const,
+    modelId: "gpt-test",
+    contextWindow,
+    maxOutputTokens,
+    reasoning: false,
+    image: false,
+    apiKey: "k",
+  });
+
+  it("accepts both blank and omits chat.model, never inventing limits", () => {
+    expect(validateProviderSetup(draft("", ""))).toEqual({});
+    const payload = providerConfigurePayload(draft("", ""), "ws", "req-1");
+    expect(payload.requestId).toBe("req-1");
+    expect(payload.chat).toStrictEqual({ modelId: "gpt-test" });
+  });
+
+  it("uses the native loopback locality in setup", () => {
+    expect(
+      providerConfigurePayload(
+        { ...draft("", ""), endpoint: "http://127.0.0.1:11434/v1" },
+        "ws",
+        "req",
+      ).locality,
+    ).toBe("loopback");
+  });
+
+  it("requires both limits once either is entered", () => {
+    expect(Object.keys(validateProviderSetup(draft("4096", "")))).toEqual([
+      "maxOutputTokens",
+    ]);
+    expect(Object.keys(validateProviderSetup(draft("", "512")))).toEqual([
+      "contextWindow",
+    ]);
+  });
+
+  it("sends explicit limits for a custom model", () => {
+    const payload = providerConfigurePayload(draft("8192", "1024"), "ws", "r");
+    expect(payload.chat.model).toStrictEqual({
+      contextWindow: 8192,
+      maxOutputTokens: 1024,
+      reasoning: false,
+      input: ["text"],
+    });
   });
 });

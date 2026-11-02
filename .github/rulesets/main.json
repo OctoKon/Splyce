@@ -21,6 +21,7 @@
           { "context": "Analyze Python", "integration_id": 15368 },
           { "context": "Analyze Actions", "integration_id": 15368 },
           { "context": "Analyze JavaScript", "integration_id": 15368 },
+          { "context": "Analyze Rust", "integration_id": 15368 },
           { "context": "Staging release gate", "integration_id": 15368 }
         ],
         "strict_required_status_checks_policy": false,

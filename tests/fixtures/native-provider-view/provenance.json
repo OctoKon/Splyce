@@ -1,0 +1,8 @@
+{
+  "commit": "2c997666d83b65b2bc33ce66df7ac2e21dbd87ef",
+  "path": "apps/desktop/src/stores/profiles.ts",
+  "sourceSha256": "4ba020f6d9f7f205aa926ea880ea221210a0dbc8f2c1de101b6b944d5afbdfce",
+  "excerptSha256": "c168b556c3ea6f6f1f07f0385e3656c1d522dfceccf470ba78513fad62505170",
+  "excerpt": "Exact production prefix through sessionStartPayload; no edits.",
+  "boundary": "Frozen GUI consumer contract, not current renderer or installed-app qualification."
+}

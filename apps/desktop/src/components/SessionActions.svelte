@@ -242,7 +242,12 @@
       previousPhase === "requesting" ||
       previousPhase === "canceling" ||
       previousPhase === "confirming";
-    if (busy && phase !== "requesting" && phase !== "confirming" && phase !== "canceling") {
+    if (
+      busy &&
+      phase !== "requesting" &&
+      phase !== "confirming" &&
+      phase !== "canceling"
+    ) {
       lastTrigger?.focus();
     }
     previousPhase = phase;
@@ -264,9 +269,7 @@
   </p>
   {#if target}
     <p class="leaves" data-testid="fork-leaves">
-      Leaves: {target.leaves.length === 0
-        ? "none"
-        : target.leaves.join(", ")}
+      Leaves: {target.leaves.length === 0 ? "none" : target.leaves.join(", ")}
     </p>
   {/if}
 
@@ -303,7 +306,8 @@
   <ul class="reasons" data-testid="action-reasons">
     {#each reasons as { kind, entry } (kind)}
       <li id={reasonId(kind)} data-reason={kind}>
-        {kind === "resume" ? "Resume" : kind === "fork" ? "Fork" : "Rewind"} unavailable: {entry.reason}
+        {kind === "resume" ? "Resume" : kind === "fork" ? "Fork" : "Rewind"} unavailable:
+        {entry.reason}
       </li>
     {/each}
   </ul>
@@ -331,8 +335,8 @@
     >
       <p>
         Cancel requested. The {label} request was already sent and the engine has
-        been asked to stop it; the source is not guaranteed unchanged until the
-        engine confirms it stopped. Your draft is preserved.
+        been asked to stop it; the source is not guaranteed unchanged until the engine
+        confirms it stopped. Your draft is preserved.
       </p>
     </div>
   {:else if current.phase === "stopped"}
@@ -343,9 +347,13 @@
     </p>
   {:else if current.phase === "canceled"}
     <p class="outcome" role="status" data-testid="action-canceled">
-      {label === "the rewind" ? "Rewind" : label === "the fork" ? "Fork" : "Resume"}
-      canceled before anything was requested. The source was left unchanged and
-      your draft is preserved.
+      {label === "the rewind"
+        ? "Rewind"
+        : label === "the fork"
+          ? "Fork"
+          : "Resume"}
+      canceled before anything was requested. The source was left unchanged and your
+      draft is preserved.
     </p>
   {:else if current.phase === "succeeded"}
     <p class="outcome" role="status" data-testid="action-succeeded">
@@ -363,8 +371,13 @@
     </p>
   {:else if current.phase === "failed"}
     <p class="outcome outcome-error" role="alert" data-testid="action-failed">
-      {label === "the rewind" ? "Rewind" : label === "the fork" ? "Fork" : "Resume"}
-      failed{#if current.canceledWhileRequesting} after your cancel request{/if}:
+      {label === "the rewind"
+        ? "Rewind"
+        : label === "the fork"
+          ? "Fork"
+          : "Resume"}
+      failed{#if current.canceledWhileRequesting}
+        after your cancel request{/if}:
       {current.error} Your draft is preserved.
     </p>
   {/if}
@@ -405,7 +418,7 @@
           <input
             type="radio"
             name="rewind-choice"
-            value={value}
+            {value}
             checked={choice === value}
             disabled={!availabilityOf.enabled}
             data-testid={`rewind-choice-${value}`}
@@ -425,9 +438,7 @@
     </fieldset>
 
     <p id="rewind-choice-reason" data-testid="rewind-choice-reason">
-      {choiceAvailability.enabled
-        ? ""
-        : (choiceAvailability.reason ?? "")}
+      {choiceAvailability.enabled ? "" : (choiceAvailability.reason ?? "")}
     </p>
 
     {#if current.blocked}
@@ -480,7 +491,7 @@
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
   }
   .target,
   .leaves {
@@ -488,7 +499,7 @@
     font-size: 0.8125rem;
   }
   .leaves {
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
   }
   .buttons {
     display: flex;
@@ -497,13 +508,13 @@
   }
   button:focus-visible,
   input:focus-visible {
-    outline: 2px solid #2563eb;
+    outline: 2px solid var(--primary, #2563eb);
     outline-offset: 1px;
   }
   .reasons {
     margin: 0;
     padding-left: 18px;
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
     font-size: 0.75rem;
   }
   .outcome {
@@ -511,11 +522,11 @@
     font-size: 0.8125rem;
   }
   .outcome-error {
-    color: #b91c1c;
+    color: var(--error, #b91c1c);
   }
   dialog.rewind {
     max-width: 32rem;
-    border: 1px solid #9ca3af;
+    border: 1px solid var(--hover-border, #9ca3af);
     border-radius: 8px;
     padding: 16px;
   }
@@ -526,7 +537,7 @@
   }
   .choice-reason {
     display: block;
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
     font-size: 0.75rem;
   }
   .dialog-actions {

@@ -1,0 +1,57 @@
+[
+  {
+    "op": "permission.set",
+    "request": {
+      "requestId": "mode-manual",
+      "workspaceId": "workspace-1",
+      "sessionId": "session-1",
+      "mode": "manual"
+    },
+    "result": {
+      "workspaceId": "workspace-1",
+      "sessionId": "session-1",
+      "mode": "manual"
+    }
+  },
+  {
+    "op": "permission.set",
+    "request": {
+      "requestId": "mode-auto",
+      "workspaceId": "workspace-1",
+      "sessionId": "session-1",
+      "mode": "auto"
+    },
+    "result": {
+      "workspaceId": "workspace-1",
+      "sessionId": "session-1",
+      "mode": "auto"
+    }
+  },
+  {
+    "op": "permission.set",
+    "request": {
+      "requestId": "mode-bypass",
+      "workspaceId": "workspace-1",
+      "sessionId": "session-1",
+      "mode": "bypass"
+    },
+    "result": {
+      "workspaceId": "workspace-1",
+      "sessionId": "session-1",
+      "mode": "bypass"
+    }
+  },
+  {
+    "op": "permission.read",
+    "request": {
+      "requestId": "mode-read",
+      "workspaceId": "workspace-1",
+      "sessionId": "session-1"
+    },
+    "result": {
+      "workspaceId": "workspace-1",
+      "sessionId": "session-1",
+      "mode": "auto"
+    }
+  }
+]

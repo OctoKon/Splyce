@@ -1,0 +1,36 @@
+[package]
+name = "splyce-desktop"
+version = "0.1.0"
+description = "Splyce Windows desktop shell"
+edition = "2024"
+rust-version = "1.90"
+license = "AGPL-3.0-only"
+
+[lib]
+name = "splyce_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+e2e = ["dep:tauri-plugin-wdio-webdriver"]
+
+[build-dependencies]
+sha2 = "=0.11.1"
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.11.1"
+tauri = { version = "=2.12.5", features = [] }
+tauri-plugin-wdio-webdriver = { version = "=1.5.1", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+
+[patch.crates-io]
+glib = { path = '../../../vendor/glib' }
+
+[[test]]
+name = "shell_control_fixture"
+path = "tests/fixtures/shell_control.rs"
+harness = false

@@ -1,10 +1,11 @@
 import {
-  validateEvent,
   type ContractContext,
   type EventKind,
   type EventPayloads,
   type SplyceErrorPayload,
   type SplyceEventEnvelope,
+  validateControlFrame,
+  validateEvent,
 } from "@splyce/pi/contracts";
 
 export type ApprovalState = "requested" | "allowed" | "denied" | "canceled";
@@ -59,6 +60,7 @@ export type TurnBlock =
 
 export interface TurnView {
   runId: string;
+  userPrompt?: string;
   turnId?: string;
   status: TurnStatus;
   text: string;
@@ -337,9 +339,11 @@ export function reduceTurns(
   const isSnapshot = envelope.kind === "run.reconnect_snapshot";
   if (
     state.seenEventIds.has(envelope.eventId) ||
-    (envelope.durable
-      ? envelope.seq <= state.lastDurableSeq
-      : envelope.seq <= state.lastSeq)
+    (isSnapshot && state.needsResync
+      ? envelope.seq < state.lastDurableSeq
+      : envelope.durable
+        ? envelope.seq <= state.lastDurableSeq
+        : envelope.seq <= state.lastSeq)
   ) {
     return { ...state, duplicateCount: state.duplicateCount + 1 };
   }
@@ -387,6 +391,9 @@ export function reduceTurns(
       return updateRun(next, payload.runId, (turn) => ({
         ...turn,
         turnId: turn.turnId ?? payload.turnId,
+        ...(payload.userPrompt !== undefined
+          ? { userPrompt: payload.userPrompt }
+          : {}),
       }));
     }
 
@@ -568,15 +575,6 @@ export function reduceTurns(
       });
     }
 
-    case "stream.resync": {
-      const payload = payloadOf(envelope, "stream.resync");
-      if (!payload) return missingPayload(next);
-      next.needsResync = true;
-      next.resyncFromSeq = payload.fromSeq;
-      next.resyncAfterSeq = payload.fromSeq;
-      return next;
-    }
-
     case "engine.status": {
       const payload = payloadOf(envelope, "engine.status");
       if (!payload) return missingPayload(next);
@@ -642,6 +640,8 @@ interface SessionChannel {
   transientFrames: number;
   transientBytes: number;
   resyncNotified: boolean;
+  /** While recovering: the one durable seq whose replay completes recovery. */
+  recoverNext: number | undefined;
   durableSeq: number;
   replayUntil: number;
   seenEventIds: Set<string>;
@@ -771,6 +771,7 @@ export function createTurnStreamTransport(
       transientFrames: 0,
       transientBytes: 0,
       resyncNotified: false,
+      recoverNext: undefined,
       durableSeq: initial.lastDurableSeq,
       replayUntil: 0,
       seenEventIds: new Set(),
@@ -790,13 +791,53 @@ export function createTurnStreamTransport(
     }
   }
 
-  function notifyResync(channel: SessionChannel) {
+  function notifyResync(
+    channel: SessionChannel,
+    afterSeq = channel.state.lastDurableSeq,
+  ) {
     if (!channel.state.needsResync || channel.resyncNotified) return;
     channel.resyncNotified = true;
-    options.onResync?.(
-      channel.state.lastDurableSeq,
-      channel.state.sessionId ?? "",
-    );
+    // Replay after afterSeq may be plain contiguous durable history (no
+    // snapshot): its first unapplied frame completes recovery.
+    channel.recoverNext = Math.max(afterSeq, channel.acceptedSeq) + 1;
+    options.onResync?.(afterSeq, channel.state.sessionId ?? "");
+  }
+
+  // Unsequenced engine control. It is not data, so no seq, duplicate, applied
+  // or durable cursor moves; replay is requested after
+  // min(fromSeq, applied durable cursor) so no unseen seq is ever skipped.
+  function applyControl(event: unknown) {
+    const named = (event as { sessionId?: unknown }).sessionId;
+    const scopeId = typeof named === "string" ? followed.get(named) : undefined;
+    if (scopeId === undefined) {
+      rejected += 1;
+      return;
+    }
+    const channel = channelFor(scopeId, named as string);
+    let control;
+    try {
+      control = validateControlFrame(event);
+    } catch {
+      channel.state = {
+        ...channel.state,
+        protocolErrors: channel.state.protocolErrors + 1,
+      };
+      emit(channel);
+      return;
+    }
+    // Reduce queued frames first so the clamp sees the true applied cursor.
+    applyPending(channel);
+    const afterSeq = Math.min(control.fromSeq, channel.state.lastDurableSeq);
+    channel.state = {
+      ...channel.state,
+      needsResync: true,
+      resyncFromSeq: control.fromSeq,
+      resyncAfterSeq: afterSeq,
+    };
+    // Each engine resync is its own replay request.
+    channel.resyncNotified = false;
+    notifyResync(channel, afterSeq);
+    emit(channel);
   }
 
   function clearQueue(channel: SessionChannel) {
@@ -841,7 +882,10 @@ export function createTurnStreamTransport(
       );
     }
     if (channel.state.needsResync && !hadResync) notifyResync(channel);
-    if (!channel.state.needsResync) channel.resyncNotified = false;
+    if (!channel.state.needsResync) {
+      channel.resyncNotified = false;
+      channel.recoverNext = undefined;
+    }
   }
 
   function pauseForResync(channel: SessionChannel) {
@@ -910,6 +954,11 @@ export function createTurnStreamTransport(
 
   function enqueue(event: SplyceEventEnvelope) {
     if (disposed) return;
+    // Control frames are dispatched before any data scope/shape/seq check.
+    if ((event as { frame?: unknown } | null)?.frame === "control") {
+      applyControl(event);
+      return;
+    }
     const claim = event as { sessionId?: unknown; scopeId?: unknown } | null;
     if (
       typeof claim?.sessionId === "string" &&
@@ -957,11 +1006,33 @@ export function createTurnStreamTransport(
     }
     const channel = channelFor(validated.scopeId, validated.sessionId);
 
-    if (
-      channel.state.needsResync &&
-      validated.kind !== "run.reconnect_snapshot"
-    ) {
-      return;
+    const isSnapshot = validated.kind === "run.reconnect_snapshot";
+    const recovering = channel.state.needsResync;
+    if (recovering && !isSnapshot) {
+      if (!validated.durable || validated.seq !== channel.recoverNext) {
+        if (validated.seq <= channel.acceptedSeq) {
+          channel.state = {
+            ...channel.state,
+            duplicateCount: channel.state.duplicateCount + 1,
+          };
+          emit(channel);
+        }
+        // Beyond recoverNext: keep waiting for the requested replay.
+        return;
+      }
+      // The first contiguous durable replay frame completes recovery.
+      const {
+        resyncFromSeq: _from,
+        resyncAfterSeq: _after,
+        ...rest
+      } = channel.state;
+      channel.state = {
+        ...rest,
+        needsResync: false,
+        resyncCount: channel.state.resyncCount + 1,
+      };
+      channel.recoverNext = undefined;
+      channel.resyncNotified = false;
     }
 
     if (channel.seenEventIds.has(validated.eventId)) {
@@ -980,7 +1051,12 @@ export function createTurnStreamTransport(
       validated.seq <= channel.replayUntil &&
       validated.seq > channel.durableSeq;
 
-    if (!replay && validated.seq <= channel.acceptedSeq) {
+    // A recovering snapshot at the applied cursor completes recovery.
+    const duplicate =
+      recovering && isSnapshot
+        ? validated.seq < channel.acceptedSeq
+        : validated.seq <= channel.acceptedSeq;
+    if (!replay && duplicate) {
       channel.state = {
         ...channel.state,
         duplicateCount: channel.state.duplicateCount + 1,
@@ -989,7 +1065,6 @@ export function createTurnStreamTransport(
       return;
     }
 
-    const isSnapshot = validated.kind === "run.reconnect_snapshot";
     if (!isSnapshot && !replay && validated.seq !== channel.acceptedSeq + 1) {
       pauseForResync(channel);
       return;
@@ -1067,16 +1142,17 @@ export function createTurnStreamTransport(
     follow(sessionId: string, scopeId: string) {
       followed.set(sessionId, scopeId);
       selectedSessionId ??= sessionId;
+      emit(channelFor(scopeId, sessionId));
     },
     unfollow(sessionId: string) {
       const key = keyOf(sessionId);
       const channel = key ? channels.get(key) : undefined;
-      if (channel) clearQueue(channel);
-      if (key) channels.delete(key);
+      // Keep applied transcript blocks: replay cannot restore transient replies.
+      if (channel) applyPending(channel);
       followed.delete(sessionId);
       if (selectedSessionId === sessionId) {
         selectedSessionId = undefined;
-        options.onState?.(options.state ?? fallbackState);
+        options.onState?.(createTurnsState());
       }
     },
     rejectedCount: () => rejected,

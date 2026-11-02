@@ -1,0 +1,18 @@
+export type IconName =
+  | "arrow-up"
+  | "chevron-down"
+  | "chevron-left"
+  | "chevron-right"
+  | "clock"
+  | "cpu"
+  | "database"
+  | "folder"
+  | "layers"
+  | "lock"
+  | "menu"
+  | "moon"
+  | "settings"
+  | "shield"
+  | "sun"
+  | "terminal"
+  | "x";

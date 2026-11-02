@@ -5,7 +5,7 @@ Splyce-authored code, documentation and original assets are offered under **AGPL
 ## Retained third-party terms
 
 - `.skills/ponytail/` contains Ponytail 5.3.2 by Dietrich Gebert under its [MIT license](.skills/ponytail/LICENSE). Its notice is retained; Markdown formatting may differ from upstream.
-- The selected Pi base is MIT-licensed upstream. Pi source is not vendored in this research snapshot. Any later fork, dependency bundle or redistribution must preserve its actual upstream copyright and license notices. The same applies to OMP or other components if adopted.
+- The selected Pi base is MIT-licensed upstream. Its pinned source snapshot is retained under [vendor/pi/UPSTREAM.md](vendor/pi/UPSTREAM.md) with the original [MIT license](vendor/pi/LICENSE). Any fork, dependency bundle or redistribution must preserve these actual upstream copyright and license notices. The same applies to OMP or other components if adopted.
 - `research/imports/ai-coding-harnesses-and-scaffolds.pdf` and the supplied body of `research/site/index.html` are imported materials. Their original rights and any embedded third-party terms remain applicable; the root license does not grant additional rights over them.
 - Cited repositories, papers, models, datasets, fonts and external services retain their own licenses and terms. A citation or public URL is not a redistribution grant.
 

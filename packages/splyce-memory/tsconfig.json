@@ -1,0 +1,12 @@
+{
+  "extends": "../splyce-pi/tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": [
+    "src/memory.ts",
+    "../splyce-pi/src/node-sqlite.d.ts",
+    "../splyce-pi/src/policy-node.d.ts"
+  ]
+}

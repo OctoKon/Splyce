@@ -78,3 +78,33 @@ export interface CredentialResolver {
 
 /** Replace every active secret in `text` before it reaches logs, errors or artifacts. */
 export type Redactor = (text: string) => string;
+
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  [
+    /-----BEGIN [A-Z ]{0,40}KEY-----[\s\S]*?(?:-----END [A-Z ]{0,40}KEY-----|$)/g,
+    "[REDACTED]",
+  ],
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]"],
+  [
+    /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+    "[REDACTED]",
+  ],
+  [/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, "[REDACTED]"],
+  [/\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}/g, "[REDACTED]"],
+  [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, "[REDACTED]"],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED]"],
+  [/\bxox[abposr]-[A-Za-z0-9-]{8,}/g, "[REDACTED]"],
+  [/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[REDACTED]"],
+  [
+    // No `.` in the key: `token.ts: summary` is a file path, not a credential.
+    /\b([A-Za-z0-9_-]{0,40}(?:key|secret|token|password|passwd|pwd)[A-Za-z0-9_-]{0,40}|(?:[A-Za-z0-9]+[_-])*pass)(\s{0,4}[:=]\s{0,4})("(?:\\[^\r\n]|[^"\\\r\n])*"?|'(?:\\[^\r\n]|[^'\\\r\n])*'?|[^\s,;&]+)/gi,
+    "$1$2[REDACTED]",
+  ],
+];
+/** Built-in redaction of common secret shapes (tokens, keys, PEM blocks, key=value credentials). */
+export function redactSecrets(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of SECRET_PATTERNS)
+    out = out.replace(pattern, replacement);
+  return out;
+}

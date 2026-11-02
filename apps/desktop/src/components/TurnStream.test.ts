@@ -55,6 +55,18 @@ const closedNotice = () =>
   );
 
 describe("TurnStream approval controls", () => {
+  it("shows the escaped user prompt before the agent and tool cards", () => {
+    render({ run: { ...run, userPrompt: "<b>My name is Itachi.</b>" } });
+    const user = document.querySelector('[data-testid="turn-user"]')!;
+    expect(user.textContent).toContain("<b>My name is Itachi.</b>");
+    expect(user.querySelector("b")).toBeNull();
+    expect(
+      user.compareDocumentPosition(
+        document.querySelector('[data-testid="turn-stream"]')!,
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("keeps approvals closed when no canRespond predicate is supplied", () => {
     const onApproval = render({});
 

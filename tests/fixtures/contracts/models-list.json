@@ -1,0 +1,19 @@
+{
+  "request": {
+    "requestId": "catalog-1",
+    "workspaceId": "workspace-1",
+    "profileId": "profile-1"
+  },
+  "result": {
+    "models": [
+      {
+        "modelId": "provider/model",
+        "title": "Example",
+        "contextWindow": 8192,
+        "tools": true,
+        "paidOnly": false
+      }
+    ],
+    "truncated": false
+  }
+}

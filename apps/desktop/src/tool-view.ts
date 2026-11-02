@@ -61,6 +61,8 @@ const ERROR_COPY: Readonly<Record<string, string>> = Object.freeze({
   GRANT_REVOKED: "That approval is no longer valid.",
   WORKSPACE_ESCAPE: "Blocked: the target is outside the admitted workspace.",
   SHELL_TIMEOUT: "The command timed out and was stopped.",
+  SHELL_START_FAILED:
+    "The shell could not start. Check the system shell installation.",
   PATTERN_REJECTED: "The search pattern was rejected.",
   GREP_BUDGET: "The search stopped at its safety limit.",
   EDIT_NOT_FOUND: "The text to replace was not found.",

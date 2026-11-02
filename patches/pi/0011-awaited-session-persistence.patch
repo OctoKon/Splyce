@@ -1,0 +1,2659 @@
+diff --git a/vendor/pi/packages/agent/src/agent-loop.ts b/vendor/pi/packages/agent/src/agent-loop.ts
+index 32cea3885d97990313276fddf5d960ba8b764df2..4734d4ac3c948e24db7cf7704d516954c858ce29 100644
+--- a/vendor/pi/packages/agent/src/agent-loop.ts
++++ b/vendor/pi/packages/agent/src/agent-loop.ts
+@@ -26,6 +26,7 @@ import {
+ 	assertSplyceToolCurrent,
+ 	getSplyceToolImplementation,
+ 	inheritSplyceLoopConfig,
++	rethrowSplycePersistenceError,
+ } from "./splyce-readiness.ts";
+ import { getDefaultStreamFn } from "./stream-fn.ts";
+ import type {
+@@ -841,6 +842,7 @@ async function prepareToolCall(
+ 		validatedArgs = validateToolArguments(tool, preparedToolCall);
+ 	} catch (error) {
+ 		requireSplyceToolAdmission(tool).discard(toolCall.id, signal?.aborted ? "canceled" : "denied");
++		rethrowSplycePersistenceError(error);
+ 		return {
+ 			kind: "immediate",
+ 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+@@ -907,6 +909,7 @@ async function prepareToolCall(
+ 		}
+ 		hooksCompleted = true;
+ 	} catch (error) {
++		rethrowSplycePersistenceError(error);
+ 		return {
+ 			kind: "immediate",
+ 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+@@ -1016,6 +1019,7 @@ async function executePreparedToolCall(
+ 				const durationMs = elapsed();
+ 				acceptingUpdates = false;
+ 				await Promise.all(updateEvents);
++				rethrowSplycePersistenceError(error);
+ 				return {
+ 					result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+ 					isError: true,
+@@ -1071,6 +1075,7 @@ async function finalizeExecutedToolCall(
+ 				isError = executed.isError || (afterResult.isError ?? isError);
+ 			}
+ 		} catch (error) {
++			rethrowSplycePersistenceError(error);
+ 			result = createErrorToolResult(error instanceof Error ? error.message : String(error));
+ 			isError = true;
+ 		}
+diff --git a/vendor/pi/packages/agent/src/agent.ts b/vendor/pi/packages/agent/src/agent.ts
+index 565761376eabcd8b21c211632c148adbadd50ea0..59a553abb7b14a4e7f1c9de92928abaa91d3f5a4 100644
+--- a/vendor/pi/packages/agent/src/agent.ts
++++ b/vendor/pi/packages/agent/src/agent.ts
+@@ -18,6 +18,7 @@ import {
+ 	getSplyceAgentCallbacks,
+ 	inheritSplyceLoopConfig,
+ 	inheritSplyceOwner,
++	rethrowSplycePersistenceError,
+ } from "./splyce-readiness.ts";
+ import { getDefaultStreamFn } from "./stream-fn.ts";
+ import type {
+@@ -571,6 +572,7 @@ export class Agent {
+ 	}
+ 
+ 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
++		rethrowSplycePersistenceError(error);
+ 		this._state.errorMessage = error instanceof Error ? error.message : String(error);
+ 		if (aborted) return;
+ 		try {
+diff --git a/vendor/pi/packages/agent/src/index.ts b/vendor/pi/packages/agent/src/index.ts
+index 02dd8ca0ffe38eb498760843b93369a268b6d6d2..d5cedb796986f4e7c34ec215ffb537f13378d178 100644
+--- a/vendor/pi/packages/agent/src/index.ts
++++ b/vendor/pi/packages/agent/src/index.ts
+@@ -4,9 +4,13 @@ export * from "./proxy.ts";
+ export { bindSplyceToolAdmission, type SplyceToolAdmission } from "./splyce-admission.ts";
+ export {
+ 	assertSameSplyceOwner,
++	assertSplycePersistence,
+ 	assertSplyceReady,
+ 	disposeSplyceOwner,
+ 	inheritSplyceOwner,
++	isSplyceOwned,
++	type SplycePersistenceSanitizer,
++	sanitizeSplycePersistence,
+ 	sealSplyceAgentCallbacks,
+ } from "./splyce-readiness.ts";
+ export { setDefaultStreamFn } from "./stream-fn.ts";
+diff --git a/vendor/pi/packages/agent/src/splyce-readiness.ts b/vendor/pi/packages/agent/src/splyce-readiness.ts
+index 8fc5a9dbcfad782dd5cbb2a805d5975a29753437..7e3bbce3bb8b340cb30bcaf77397709e476ea8c5 100644
+--- a/vendor/pi/packages/agent/src/splyce-readiness.ts
++++ b/vendor/pi/packages/agent/src/splyce-readiness.ts
+@@ -27,6 +27,56 @@ interface Binding {
+ 	role: SplyceRole;
+ }
+ const bindings = new WeakMap<object, Binding>();
++export type SplycePersistenceSanitizer = (serialized: string, signal?: AbortSignal) => Promise<string>;
++const persistence = new WeakMap<object, { owner: Owner; sanitize: SplycePersistenceSanitizer }>();
++
++function persistenceUnavailable(
++	code: "PERSIST_REDACTION_UNAVAILABLE" | "PERSIST_ENTRY_TOO_LARGE" = "PERSIST_REDACTION_UNAVAILABLE",
++): never {
++	throw Object.assign(new Error(code), { code });
++}
++
++/** Persistence refusal must not become an ordinary model/tool fallback response. */
++export function rethrowSplycePersistenceError(error: unknown): void {
++	const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
++	if (code === "PERSIST_REDACTION_UNAVAILABLE" || code === "PERSIST_ENTRY_TOO_LARGE") persistenceUnavailable(code);
++}
++
++/** A disposed identity stays owned: it must never fall back to donor synchronous writes. */
++export function isSplyceOwned(subject: object): boolean {
++	return bindings.has(subject);
++}
++
++export function assertSplycePersistence(subject: object): void {
++	try {
++		const binding = current(subject);
++		if (binding.role !== "session-manager" || persistence.get(subject)?.owner !== binding.owner)
++			persistenceUnavailable();
++	} catch {
++		persistenceUnavailable();
++	}
++}
++
++/** The native closure owns the existing redaction lane; Pi never obtains matcher secrets. */
++export async function sanitizeSplycePersistence(
++	subject: object,
++	serialized: string,
++	signal?: AbortSignal,
++): Promise<string> {
++	try {
++		assertSplycePersistence(subject);
++		signal?.throwIfAborted();
++		if (typeof serialized !== "string") persistenceUnavailable();
++		const sanitized = await persistence.get(subject)!.sanitize(serialized, signal);
++		signal?.throwIfAborted();
++		assertSplycePersistence(subject);
++		if (typeof sanitized !== "string") persistenceUnavailable();
++		return sanitized;
++	} catch (error) {
++		rethrowSplycePersistenceError(error);
++		return persistenceUnavailable();
++	}
++}
+ const callbackKeys = [
+ 	"convertToLlm",
+ 	"transformContext",
+@@ -121,11 +171,22 @@ function bind(owner: Owner, subject: object, role: SplyceRole): void {
+ /** Private native composition entrypoint; deliberately absent from the package index. */
+ export function createSplyceOwner(checkCurrent: () => void): {
+ 	bind: (subject: object, role: SplyceRole) => void;
++	bindPersistence: (subject: object, sanitizer: SplycePersistenceSanitizer) => void;
+ 	dispose: () => void;
+ } {
+ 	const owner: Owner = { checkCurrent, disposed: false };
+ 	return {
+ 		bind: (subject, role) => bind(owner, subject, role),
++		bindPersistence: (subject, sanitize) => {
++			try {
++				if (typeof sanitize !== "function" || persistence.has(subject)) persistenceUnavailable();
++				bind(owner, subject, "session-manager");
++				persistence.set(subject, { owner, sanitize });
++				assertSplycePersistence(subject);
++			} catch {
++				persistenceUnavailable();
++			}
++		},
+ 		dispose: () => {
+ 			owner.disposed = true;
+ 		},
+diff --git a/vendor/pi/packages/coding-agent/src/core/agent-session-runtime.ts b/vendor/pi/packages/coding-agent/src/core/agent-session-runtime.ts
+index c1d7655dcc9888fd0bbb70304e6a62b84d3b22fc..42f960376a11b21f2093eb25fe314e115ae47dd8 100644
+--- a/vendor/pi/packages/coding-agent/src/core/agent-session-runtime.ts
++++ b/vendor/pi/packages/coding-agent/src/core/agent-session-runtime.ts
+@@ -12,7 +12,7 @@ import type {
+ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+ import type { CreateAgentSessionResult } from "./sdk.ts";
+ import { assertSessionCwdExists } from "./session-cwd.ts";
+-import { SessionManager } from "./session-manager.ts";
++import { assertUnownedSessionExport, SessionManager } from "./session-manager.ts";
+ 
+ /**
+  * Result returned by runtime creation.
+@@ -201,6 +201,7 @@ export class AgentSessionRuntime {
+ 			projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
+ 		},
+ 	): Promise<{ cancelled: boolean }> {
++		assertUnownedSessionExport(this.session.sessionManager);
+ 		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
+ 		if (beforeResult.cancelled) {
+ 			return beforeResult;
+@@ -228,6 +229,7 @@ export class AgentSessionRuntime {
+ 		setup?: (sessionManager: SessionManager) => Promise<void>;
+ 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+ 	}): Promise<{ cancelled: boolean }> {
++		assertUnownedSessionExport(this.session.sessionManager);
+ 		const beforeResult = await this.emitBeforeSwitch("new");
+ 		if (beforeResult.cancelled) {
+ 			return beforeResult;
+@@ -263,6 +265,7 @@ export class AgentSessionRuntime {
+ 		entryId: string,
+ 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+ 	): Promise<{ cancelled: boolean; selectedText?: string }> {
++		assertUnownedSessionExport(this.session.sessionManager);
+ 		const position = options?.position ?? "before";
+ 		const beforeResult = await this.emitBeforeFork(entryId, { position });
+ 		if (beforeResult.cancelled) {
+@@ -357,6 +360,7 @@ export class AgentSessionRuntime {
+ 	 * @throws {MissingSessionCwdError} When the imported session cwd cannot be resolved and no override is provided.
+ 	 */
+ 	async importFromJsonl(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }> {
++		assertUnownedSessionExport(this.session.sessionManager);
+ 		const resolvedPath = resolvePath(inputPath);
+ 		if (!existsSync(resolvedPath)) {
+ 			throw new SessionImportFileNotFoundError(resolvedPath);
+diff --git a/vendor/pi/packages/coding-agent/src/core/agent-session.ts b/vendor/pi/packages/coding-agent/src/core/agent-session.ts
+index 267a2a1c882fbad5b0cd63a0e165eec83c23c550..9716f16ca7198cc00e3b9661c69aae7f444d6d69 100644
+--- a/vendor/pi/packages/coding-agent/src/core/agent-session.ts
++++ b/vendor/pi/packages/coding-agent/src/core/agent-session.ts
+@@ -26,6 +26,7 @@ import {
+ 	type AgentTool,
+ 	type AgentToolCallOutcome,
+ 	assertSameSplyceOwner,
++	assertSplycePersistence,
+ 	assertSplyceReady,
+ 	type BeforeToolCallContext,
+ 	type BeforeToolCallResult,
+@@ -128,7 +129,6 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.t
+ import { exportSessionToJsonl } from "./session-export.ts";
+ import {
+ 	type BranchSummaryEntry,
+-	type CompactionEntry,
+ 	type ContextEditEntry,
+ 	getLatestCompactionEntry,
+ 	type SessionEntry,
+@@ -404,6 +404,7 @@ export class AgentSession {
+ 	private _pendingNextTurnMessages: CustomMessage[] = [];
+ 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
+ 	private _pendingCustomMessages: CustomMessage[] = [];
++	private _pendingCustomFlush: Promise<void> | undefined;
+ 
+ 	// Compaction state
+ 	private _compactionAbortController: AbortController | undefined = undefined;
+@@ -425,6 +426,7 @@ export class AgentSession {
+ 	// Bash execution state
+ 	private readonly _bashAbortControllers = new Set<AbortController>();
+ 	private _pendingBashMessages: BashExecutionMessage[] = [];
++	private _pendingBashFlush: Promise<void> | undefined;
+ 
+ 	// Extension system
+ 	private _extensionRunner!: ExtensionRunner;
+@@ -489,6 +491,7 @@ export class AgentSession {
+ 
+ 	constructor(config: AgentSessionConfig) {
+ 		if (inheritSplyceOwner(config, this, "session")) {
++			assertSplycePersistence(config.sessionManager);
+ 			assertSameSplyceOwner(this, config.agent, "agent");
+ 			assertSameSplyceOwner(this, config.sessionManager, "session-manager");
+ 			assertSameSplyceOwner(this, config.settingsManager, "settings-manager");
+@@ -638,7 +641,7 @@ export class AgentSession {
+ 	 * physical selection unless the branch holds a virtual one; checking a physical selection against
+ 	 * responses would record it on every prompt while `prepareRequest` redirects to another model.
+ 	 */
+-	private _recordSelection(): void {
++	private async _recordSelection(): Promise<void> {
+ 		const model = this.model;
+ 		if (!model) return;
+ 		const getModel = (provider: string, modelId: string) => this._modelRuntime.getModel(provider, modelId);
+@@ -646,7 +649,7 @@ export class AgentSession {
+ 		if (!recorded || (recorded.provider === model.provider && recorded.modelId === model.id)) return;
+ 		const recordedModel = getModel(recorded.provider, recorded.modelId);
+ 		if (!isVirtualModel(model) && !(recordedModel && isVirtualModel(recordedModel))) return;
+-		this.sessionManager.appendModelChange(model.provider, model.id);
++		await this.sessionManager.withPersistence((manager) => manager.appendModelChange(model.provider, model.id));
+ 	}
+ 
+ 	/** The model whose limits apply to the conversation. */
+@@ -859,9 +862,11 @@ export class AgentSession {
+ 			});
+ 			if (route.state !== undefined && route.state !== state) {
+ 				const data: VirtualModelStateData = { provider: model.provider, modelId: model.id, state: route.state };
+-				const entry = this.sessionManager.getEntry(
+-					this.sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, data),
++				const entryId = await this.sessionManager.withPersistence(
++					(manager) => manager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, data),
++					signal,
+ 				);
++				const entry = this.sessionManager.getEntry(entryId);
+ 				if (entry) this._emit({ type: "entry_appended", entry });
+ 			}
+ 			// The route stands: the router already decided this request. The state entry does not change
+@@ -878,10 +883,13 @@ export class AgentSession {
+ 		message: AssistantMessage,
+ 		toolResults: ToolResultMessage[],
+ 	): Promise<boolean> {
+-		this._lastActivityOutcome =
++		const outcome =
+ 			message.stopReason === "aborted" ? "aborted" : message.stopReason === "error" ? "error" : "completed";
+ 		const messageEntryId = this._findPersistedMessageEntryId(message);
+-		if (!this._extensionRunner.hasHandlers("turn_end")) return false;
++		if (!this._extensionRunner.hasHandlers("turn_end")) {
++			this._lastActivityOutcome = outcome;
++			return false;
++		}
+ 		if (!messageEntryId) {
+ 			this._extensionRunner.emitError({
+ 				extensionPath: "<boundary>",
+@@ -902,11 +910,12 @@ export class AgentSession {
+ 				toolResults,
+ 				messageEntryId,
+ 				toolResultEntryIds,
+-				outcome: this._lastActivityOutcome,
++				outcome,
+ 			},
+ 			(entries) => this._buildBoundaryContext(entries, "turn_end"),
+ 		);
+-		this._commitBoundaryDrafts(boundary.entries);
++		await this._commitBoundaryDrafts(boundary.entries);
++		this._lastActivityOutcome = outcome;
+ 		if (boundary.continue && !this._buildBoundaryContext([], "turn_end").canContinue) {
+ 			this._reportInvalidBoundaryContinuation("turn_end");
+ 			return false;
+@@ -1061,11 +1070,17 @@ export class AgentSession {
+ 		};
+ 	}
+ 
+-	private _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): void {
++	private async _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): Promise<void> {
+ 		assertSplyceReady(this);
+-		const appended = this._applyBoundaryDrafts(this.sessionManager, drafts);
++		if (drafts.length === 0) return;
++		const appended = await this.sessionManager.withPersistence((manager) =>
++			this._applyBoundaryDrafts(manager, drafts).map((entry) => entry.id),
++		);
+ 		this._refreshFinalizedContext();
+-		for (const entry of appended) this._emit({ type: "entry_appended", entry });
++		for (const id of appended) {
++			const entry = this.sessionManager.getEntry(id);
++			if (entry) this._emit({ type: "entry_appended", entry });
++		}
+ 	}
+ 
+ 	private _reportInvalidBoundaryContinuation(event: "turn_end" | "agent_before_settle"): void {
+@@ -1118,6 +1133,10 @@ export class AgentSession {
+ 
+ 	private async _emitAgentSettled(): Promise<void> {
+ 		this._cacheWarmer?.onAgentSettled();
++		// Close the queue window in the same synchronous step as the final empty check.
++		while (this._pendingBashMessages.length > 0 || this._pendingCustomMessages.length > 0) {
++			await this._flushPendingRunMessages();
++		}
+ 		this._isAgentRunActive = false;
+ 		this._isEmittingAgentSettled = true;
+ 		try {
+@@ -1140,6 +1159,72 @@ export class AgentSession {
+ 		this._resolveIdleWaitIfIdle();
+ 	}
+ 
++	private async _persistFinalizedMessage(message: AgentMessage, existingId?: string): Promise<string | undefined> {
++		const detached = structuredClone(message);
++		return this.sessionManager.withPersistence((manager) => {
++			const payload =
++				detached.role === "custom"
++					? {
++							type: "custom_message",
++							customType: detached.customType,
++							content: detached.content,
++							display: detached.display,
++							details: detached.details,
++						}
++					: detached.role === "system" ||
++							detached.role === "user" ||
++							detached.role === "assistant" ||
++							detached.role === "toolResult"
++						? { type: "message", message: detached }
++						: undefined;
++			if (!payload) {
++				if (existingId) throw new Error("A finalized message replacement must remain persistable");
++				return undefined;
++			}
++			if (existingId) {
++				const entry = manager.getEntry(existingId);
++				if (!entry) throw new Error("Persisted message is missing");
++				const { id, parentId, timestamp } = entry;
++				for (const key of Object.keys(entry)) delete (entry as unknown as Record<string, unknown>)[key];
++				Object.assign(entry, { id, parentId, timestamp, ...payload });
++				return existingId;
++			}
++			if (detached.role === "custom") {
++				return manager.appendCustomMessageEntry(
++					detached.customType,
++					detached.content,
++					detached.display,
++					detached.details,
++				);
++			}
++			if (
++				detached.role === "system" ||
++				detached.role === "user" ||
++				detached.role === "assistant" ||
++				detached.role === "toolResult"
++			) {
++				return manager.appendMessage(detached);
++			}
++			return undefined;
++		});
++	}
++
++	private _readPersistedMessage(entryId: string, original: AgentMessage): AgentMessage {
++		const entry = this.sessionManager.getEntry(entryId);
++		if (entry?.type === "message") return structuredClone(entry.message);
++		if (entry?.type === "custom_message") {
++			return structuredClone({
++				role: "custom",
++				customType: entry.customType,
++				content: entry.content,
++				display: entry.display,
++				details: entry.details,
++				timestamp: original.timestamp,
++			});
++		}
++		throw new Error("Persisted message is missing");
++	}
++
+ 	/** Internal handler for agent events - shared by subscribe and reconnect */
+ 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+ 		assertSplyceReady(this);
+@@ -1181,33 +1266,31 @@ export class AgentSession {
+ 			}
+ 		}
+ 
+-		// Emit to extensions first, then notify public listeners.
+-		await this._emitExtensionEvent(event);
++		let entryId: string | undefined;
++		let extensionEvent = event;
++		let committedMessage: string | undefined;
++		if (event.type === "message_end") {
++			entryId = await this._persistFinalizedMessage(event.message);
++			if (entryId) {
++				const message = this._readPersistedMessage(entryId, event.message);
++				committedMessage = JSON.stringify(message);
++				extensionEvent = { ...event, message };
++			}
++		}
++		// Extensions observe a detached committed message; their replacement is a second commit.
++		await this._emitExtensionEvent(extensionEvent);
++		if (event.type === "message_end" && extensionEvent.type === "message_end" && entryId) {
++			if (JSON.stringify(extensionEvent.message) !== committedMessage) {
++				await this._persistFinalizedMessage(extensionEvent.message, entryId);
++			}
++			this._replaceMessageInPlace(event.message, this._readPersistedMessage(entryId, event.message));
++			this._entryIdsByMessage.set(event.message, entryId);
++		}
+ 		assertSplyceReady(this);
+ 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+ 
+ 		// Handle session persistence
+ 		if (event.type === "message_end") {
+-			let entryId: string | undefined;
+-			// Check if this is a custom message from extensions
+-			if (event.message.role === "custom") {
+-				// Persist as CustomMessageEntry
+-				entryId = this.sessionManager.appendCustomMessageEntry(
+-					event.message.customType,
+-					event.message.content,
+-					event.message.display,
+-					event.message.details,
+-				);
+-			} else if (
+-				event.message.role === "system" ||
+-				event.message.role === "user" ||
+-				event.message.role === "assistant" ||
+-				event.message.role === "toolResult"
+-			) {
+-				// Regular LLM message - persist as SessionMessageEntry
+-				entryId = this.sessionManager.appendMessage(event.message);
+-			}
+-			if (entryId) this._entryIdsByMessage.set(event.message, entryId);
+ 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
+ 
+ 			if (event.message.role === "assistant") {
+@@ -1236,7 +1319,7 @@ export class AgentSession {
+ 		// extension and listener dispatch above also picks up messages that turn_end
+ 		// handlers queued.
+ 		if (event.type === "turn_end") {
+-			this._flushPendingCustomMessages();
++			await this._flushPendingCustomMessages();
+ 		}
+ 	};
+ 
+@@ -1284,7 +1367,7 @@ export class AgentSession {
+ 	 * found in the projected context, so the pair stays together whether the attempt comes from
+ 	 * the current run or a resumed session. An unpaired result fails the next request (#11227).
+ 	 */
+-	private _omitRecoveryAttempt(message: AssistantMessage): void {
++	private async _omitRecoveryAttempt(message: AssistantMessage): Promise<void> {
+ 		const toolCallIds = new Set(message.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
+ 		// A context edit replaces the projected copy, so match it by source entry as well.
+ 		const entryId = this._findPersistedMessageEntryId(message);
+@@ -1305,9 +1388,10 @@ export class AgentSession {
+ 		if (unresolvedProjectedTarget) {
+ 			throw new Error("Cannot persist recovery omission because a projected message has no source entry");
+ 		}
+-		for (const targetId of targetIds) {
+-			if (!targetId) continue;
+-			const editId = this.sessionManager.appendContextEdit(targetId, null);
++		const editIds = await this.sessionManager.withPersistence((manager) =>
++			targetIds.flatMap((targetId) => (targetId ? [manager.appendContextEdit(targetId, null)] : [])),
++		);
++		for (const editId of editIds) {
+ 			const entry = this.sessionManager.getEntry(editId);
+ 			if (entry) this._emit({ type: "entry_appended", entry });
+ 		}
+@@ -1931,21 +2015,29 @@ export class AgentSession {
+ 			messages = await this._prepareRun(trigger);
+ 		} catch (error) {
+ 			this._isAgentRunActive = false;
+-			this._flushPendingBashMessages();
+-			this._flushPendingCustomMessages();
+-			this._resolveIdleWaitIfIdle();
++			try {
++				await this._flushPendingRunMessages();
++			} finally {
++				this._resolveIdleWaitIfIdle();
++			}
+ 			throw error;
+ 		}
+ 		assertSplyceReady(this);
+ 		// Messages held while the run was starting go before its starting messages, as they would
+ 		// have while idle. No run exists yet, so they cannot split a tool call from its result.
+-		this._flushPendingBashMessages();
+-		this._flushPendingCustomMessages();
++		try {
++			await this._flushPendingBashMessages();
++			await this._flushPendingCustomMessages();
++			await this._recordSelection();
++		} catch (error) {
++			this._isAgentRunActive = false;
++			this._resolveIdleWaitIfIdle();
++			throw error;
++		}
+ 		onStarted?.();
+ 
+ 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
+ 		this._failedResponse = undefined;
+-		this._recordSelection();
+ 		// The run records the loadout in the transcript; restored tools that did not register by now
+ 		// are dropped, so a tool that never registers does not stay pending.
+ 		this._pendingToolNames.clear();
+@@ -1965,8 +2057,7 @@ export class AgentSession {
+ 			if (this._agentRunAbortRequested) this._finishCancelledRetry();
+ 			this._failedResponse = undefined;
+ 			this._runSystemPromptOptions = undefined;
+-			this._flushPendingBashMessages();
+-			this._flushPendingCustomMessages();
++			await this._flushPendingRunMessages();
+ 			await this._emitAgentSettled();
+ 		}
+ 	}
+@@ -2077,8 +2168,8 @@ export class AgentSession {
+ 				{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
+ 				(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
+ 			);
+-			this._commitBoundaryDrafts(result.entries);
+-			this._flushPendingCustomMessages();
++			await this._commitBoundaryDrafts(result.entries);
++			await this._flushPendingCustomMessages();
+ 			const finalContext = this._buildBoundaryContext([], "agent_before_settle");
+ 			if (this._abortDuringBeforeSettle) return false;
+ 			const shouldContinue = result.continue || this.agent.hasQueuedMessages();
+@@ -2447,34 +2538,60 @@ export class AgentSession {
+ 			// describe messages the session tree does not contain.
+ 			this._pendingCustomMessages.push(appMessage);
+ 		} else {
+-			this._appendCustomMessage(appMessage);
++			await this._appendCustomMessage(appMessage);
+ 		}
+ 	}
+ 
+-	private _appendCustomMessage(appMessage: CustomMessage): void {
++	private async _appendCustomMessage(appMessage: CustomMessage): Promise<void> {
+ 		assertSplyceReady(this);
+-		this.sessionManager.appendCustomMessageEntry(
+-			appMessage.customType,
+-			appMessage.content,
+-			appMessage.display,
+-			appMessage.details,
++		const entryId = await this.sessionManager.withPersistence((manager) =>
++			manager.appendCustomMessageEntry(
++				appMessage.customType,
++				appMessage.content,
++				appMessage.display,
++				appMessage.details,
++			),
+ 		);
++		const committed = this._readPersistedMessage(entryId, appMessage);
+ 		this._refreshFinalizedContext();
+-		this._emit({ type: "message_start", message: appMessage });
+-		this._emit({ type: "message_end", message: appMessage });
++		this._emit({ type: "message_start", message: committed });
++		this._emit({ type: "message_end", message: committed });
+ 	}
+ 
+ 	/**
+ 	 * Append custom messages queued while the agent was running.
+ 	 * Called once the current turn's tool results are in agent state and session history.
+ 	 */
+-	private _flushPendingCustomMessages(): void {
++	private async _flushPendingCustomMessages(): Promise<void> {
++		if (this._pendingCustomFlush) return this._pendingCustomFlush;
+ 		if (this._pendingCustomMessages.length === 0) return;
+-
+-		const pending = this._pendingCustomMessages;
+-		this._pendingCustomMessages = [];
+-		for (const appMessage of pending) {
+-			this._appendCustomMessage(appMessage);
++		const drain = (async () => {
++			while (this._pendingCustomMessages.length > 0) {
++				const pending = this._pendingCustomMessages.slice();
++				const entryIds = await this.sessionManager.withPersistence((manager) =>
++					pending.map((message) =>
++						manager.appendCustomMessageEntry(
++							message.customType,
++							message.content,
++							message.display,
++							message.details,
++						),
++					),
++				);
++				this._pendingCustomMessages.splice(0, pending.length);
++				this._refreshFinalizedContext();
++				for (let i = 0; i < entryIds.length; i++) {
++					const message = this._readPersistedMessage(entryIds[i], pending[i]);
++					this._emit({ type: "message_start", message });
++					this._emit({ type: "message_end", message });
++				}
++			}
++		})();
++		this._pendingCustomFlush = drain;
++		try {
++			await drain;
++		} finally {
++			this._pendingCustomFlush = undefined;
+ 		}
+ 	}
+ 
+@@ -2606,17 +2723,7 @@ export class AgentSession {
+ 
+ 		const previousModel = this.model;
+ 		const thinkingLevel = this._getThinkingLevelForModelSwitch(model);
+-		this.agent.state.model = model;
+-		this.sessionManager.appendModelChange(model.provider, model.id);
+-		if (options.persist) {
+-			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+-			this._addPersistedDefaultToNonEmptyScope(model);
+-		}
+-
+-		// Apply thinking level for the new model.
+-		// Per-model thinking level overrides take priority over the global default.
+-		// Model persistence does not implicitly rewrite the global thinking default.
+-		this.setThinkingLevel(thinkingLevel);
++		await this._applyModelSelection(model, thinkingLevel, options);
+ 
+ 		await this._emitModelSelect(model, previousModel, "set");
+ 	}
+@@ -2672,20 +2779,7 @@ export class AgentSession {
+ 		const next = scopedModels[nextIndex];
+ 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.model, next.thinkingLevel);
+ 
+-		// Apply model
+-		this.agent.state.model = next.model;
+-		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
+-		if (options.persist) {
+-			this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
+-			this._addPersistedDefaultToNonEmptyScope(next.model);
+-		}
+-
+-		// Apply thinking level for the new model.
+-		// - Explicit scoped model thinking level overrides defaults
+-		// - Per-model thinking level overrides take priority over the global default
+-		// setThinkingLevel clamps to model capabilities.
+-		// Model persistence does not implicitly rewrite the global thinking default.
+-		this.setThinkingLevel(thinkingLevel);
++		await this._applyModelSelection(next.model, thinkingLevel, options);
+ 
+ 		await this._emitModelSelect(next.model, currentModel, "cycle");
+ 
+@@ -2708,16 +2802,7 @@ export class AgentSession {
+ 		const nextModel = availableModels[nextIndex];
+ 
+ 		const thinkingLevel = this._getThinkingLevelForModelSwitch(nextModel);
+-		this.agent.state.model = nextModel;
+-		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
+-		if (options.persist) {
+-			this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
+-			this._addPersistedDefaultToNonEmptyScope(nextModel);
+-		}
+-
+-		// Apply thinking level for the new model.
+-		// Model persistence does not implicitly rewrite the global thinking default.
+-		this.setThinkingLevel(thinkingLevel);
++		await this._applyModelSelection(nextModel, thinkingLevel, options);
+ 
+ 		await this._emitModelSelect(nextModel, currentModel, "cycle");
+ 
+@@ -2728,6 +2813,29 @@ export class AgentSession {
+ 	// Thinking Level Management
+ 	// =========================================================================
+ 
++	private async _applyModelSelection(
++		model: Model<any>,
++		level: ThinkingLevel,
++		options: ModelMutationOptions,
++	): Promise<void> {
++		const effectiveLevel = clampThinkingLevel(model, level) as ThinkingLevel;
++		const previousLevel = this.agent.state.thinkingLevel;
++		await this.sessionManager.withPersistence((manager) => {
++			manager.appendModelChange(model.provider, model.id);
++			if (effectiveLevel !== previousLevel) manager.appendThinkingLevelChange(effectiveLevel);
++		});
++		this.agent.state.model = model;
++		this.agent.state.thinkingLevel = effectiveLevel;
++		if (options.persist) {
++			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
++			this._addPersistedDefaultToNonEmptyScope(model);
++		}
++		if (effectiveLevel !== previousLevel) {
++			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
++			await this._extensionRunner.emit({ type: "thinking_level_select", level: effectiveLevel, previousLevel });
++		}
++	}
++
+ 	/**
+ 	 * Set thinking level.
+ 	 * Clamps to model capabilities based on available thinking levels.
+@@ -2743,6 +2851,7 @@ export class AgentSession {
+ 		const previousLevel = this.agent.state.thinkingLevel;
+ 		const isChanging = effectiveLevel !== previousLevel;
+ 
++		if (isChanging) this.sessionManager.appendThinkingLevelChange(effectiveLevel);
+ 		this.agent.state.thinkingLevel = effectiveLevel;
+ 
+ 		if (options.persist) {
+@@ -2750,7 +2859,6 @@ export class AgentSession {
+ 		}
+ 
+ 		if (isChanging) {
+-			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
+ 			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
+ 			void this._extensionRunner.emit({
+ 				type: "thinking_level_select",
+@@ -2760,6 +2868,22 @@ export class AgentSession {
+ 		}
+ 	}
+ 
++	async setThinkingLevelAsync(level: ThinkingLevel, options: ModelMutationOptions = {}): Promise<void> {
++		assertSplyceReady(this);
++		const availableLevels = this.getAvailableThinkingLevels();
++		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
++		const previousLevel = this.agent.state.thinkingLevel;
++		if (effectiveLevel !== previousLevel) {
++			await this.sessionManager.withPersistence((manager) => manager.appendThinkingLevelChange(effectiveLevel));
++		}
++		this.agent.state.thinkingLevel = effectiveLevel;
++		if (options.persist) this.settingsManager.setDefaultThinkingLevel(level);
++		if (effectiveLevel !== previousLevel) {
++			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
++			await this._extensionRunner.emit({ type: "thinking_level_select", level: effectiveLevel, previousLevel });
++		}
++	}
++
+ 	/**
+ 	 * Cycle to next thinking level.
+ 	 * @returns New level, or undefined if model doesn't support thinking
+@@ -2776,6 +2900,14 @@ export class AgentSession {
+ 		return nextLevel;
+ 	}
+ 
++	async cycleThinkingLevelAsync(options: ModelMutationOptions = {}): Promise<ThinkingLevel | undefined> {
++		if (!this.supportsThinking()) return undefined;
++		const levels = this.getAvailableThinkingLevels();
++		const nextLevel = levels[(levels.indexOf(this.thinkingLevel) + 1) % levels.length];
++		await this.setThinkingLevelAsync(nextLevel, options);
++		return nextLevel;
++	}
++
+ 	/**
+ 	 * Get available thinking levels for current model.
+ 	 * The provider will clamp to what the specific model supports internally.
+@@ -2973,15 +3105,17 @@ export class AgentSession {
+ 				throw new Error("Compaction cancelled");
+ 			}
+ 
+-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+-			const newEntries = this.sessionManager.getEntries();
++			const compactionId = await this.sessionManager.withPersistence(
++				(manager) =>
++					manager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage),
++				this._compactionAbortController.signal,
++			);
+ 			this._refreshFinalizedContext();
+ 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
+ 
+ 			// Get the saved compaction entry for the extension event
+-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
+-				| CompactionEntry
+-				| undefined;
++			const savedCompactionEntry = this.sessionManager.getEntry(compactionId);
++			if (savedCompactionEntry?.type !== "compaction") throw new Error("Persisted compaction is missing");
+ 
+ 			if (this._extensionRunner && savedCompactionEntry) {
+ 				await this._extensionRunner.emit({
+@@ -2994,12 +3128,12 @@ export class AgentSession {
+ 			}
+ 
+ 			const compactionResult: CompactionResult = {
+-				summary,
+-				firstKeptEntryId,
+-				tokensBefore,
++				summary: savedCompactionEntry.summary,
++				firstKeptEntryId: savedCompactionEntry.firstKeptEntryId,
++				tokensBefore: savedCompactionEntry.tokensBefore,
+ 				estimatedTokensAfter,
+-				usage,
+-				details,
++				usage: savedCompactionEntry.usage,
++				details: savedCompactionEntry.details,
+ 			};
+ 			// compaction_end listeners may submit queued prompts, so expose idle state before notifying them.
+ 			this._clearManualCompactionState();
+@@ -3164,8 +3298,8 @@ export class AgentSession {
+ 			}
+ 
+ 			// Persistently omit the selected final attempt before post-run recovery compaction.
++			await this._omitRecoveryAttempt(assistantMessage);
+ 			this._overflowRecoveryAttempted = true;
+-			this._omitRecoveryAttempt(assistantMessage);
+ 			const retry = await this._runAutoCompaction("overflow", willRetry);
+ 			if (retry) this._failedResponse = assistantMessage;
+ 			return retry;
+@@ -3299,15 +3433,17 @@ export class AgentSession {
+ 			}
+ 			abortController.signal.throwIfAborted();
+ 
+-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+-			const newEntries = this.sessionManager.getEntries();
++			const compactionId = await this.sessionManager.withPersistence(
++				(manager) =>
++					manager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage),
++				abortController.signal,
++			);
+ 			this._refreshFinalizedContext();
+ 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
+ 
+ 			// Get the saved compaction entry for the extension event
+-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
+-				| CompactionEntry
+-				| undefined;
++			const savedCompactionEntry = this.sessionManager.getEntry(compactionId);
++			if (savedCompactionEntry?.type !== "compaction") throw new Error("Persisted compaction is missing");
+ 
+ 			if (this._extensionRunner && savedCompactionEntry) {
+ 				await this._extensionRunner.emit({
+@@ -3320,12 +3456,12 @@ export class AgentSession {
+ 			}
+ 
+ 			const result: CompactionResult = {
+-				summary,
+-				firstKeptEntryId,
+-				tokensBefore,
++				summary: savedCompactionEntry.summary,
++				firstKeptEntryId: savedCompactionEntry.firstKeptEntryId,
++				tokensBefore: savedCompactionEntry.tokensBefore,
+ 				estimatedTokensAfter,
+-				usage,
+-				details,
++				usage: savedCompactionEntry.usage,
++				details: savedCompactionEntry.details,
+ 			};
+ 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+ 
+@@ -3335,6 +3471,12 @@ export class AgentSession {
+ 			// Continue once so queued messages are delivered.
+ 			return this.agent.hasQueuedMessages();
+ 		} catch (error) {
++			if (
++				error instanceof Error &&
++				"code" in error &&
++				(error.code === "PERSIST_REDACTION_UNAVAILABLE" || error.code === "PERSIST_ENTRY_TOO_LARGE")
++			)
++				throw error;
+ 			const message = error instanceof Error ? error.message : "compaction failed";
+ 			const aborted = abortController?.signal.aborted === true || cancelledByExtension;
+ 			if (started) {
+@@ -3516,41 +3658,25 @@ export class AgentSession {
+ 
+ 		runner.bindCore(
+ 			{
+-				sendMessage: (message, options) => {
+-					this.sendCustomMessage(message, options).catch((err) => {
+-						runner.emitError({
+-							extensionPath: "<runtime>",
+-							event: "send_message",
+-							error: err instanceof Error ? err.message : String(err),
+-						});
+-					});
+-				},
+-				sendUserMessage: (content, options) => {
+-					this.sendUserMessage(content, options).catch((err) => {
+-						runner.emitError({
+-							extensionPath: "<runtime>",
+-							event: "send_user_message",
+-							error: err instanceof Error ? err.message : String(err),
+-						});
+-					});
+-				},
+-				appendEntry: (customType, data) => {
++				sendMessage: (message, options) => this.sendCustomMessage(message, options),
++				sendUserMessage: (content, options) => this.sendUserMessage(content, options),
++				appendEntry: async (customType, data) => {
+ 					assertSameSplyceOwner(this, runner, "runner");
+-					const entryId = this.sessionManager.appendCustomEntry(customType, data);
++					const entryId = await this.sessionManager.withPersistence((manager) =>
++						manager.appendCustomEntry(customType, data),
++					);
+ 					const entry = this.sessionManager.getEntry(entryId);
+ 					if (entry) {
+ 						this._emit({ type: "entry_appended", entry });
+ 					}
+ 				},
+-				setSessionName: (name) => {
+-					this.setSessionName(name);
+-				},
++				setSessionName: (name) => this.setSessionNameAsync(name),
+ 				getSessionName: () => {
+ 					return this.sessionManager.getSessionName();
+ 				},
+-				setLabel: (entryId, label) => {
++				setLabel: async (entryId, label) => {
+ 					assertSameSplyceOwner(this, runner, "runner");
+-					this.sessionManager.appendLabelChange(entryId, label);
++					await this.sessionManager.withPersistence((manager) => manager.appendLabelChange(entryId, label));
+ 				},
+ 				getActiveTools: () => this.getActiveToolNames(),
+ 				getAllTools: () => this.getAllTools(),
+@@ -3564,7 +3690,7 @@ export class AgentSession {
+ 					return true;
+ 				},
+ 				getThinkingLevel: () => this.thinkingLevel,
+-				setThinkingLevel: (level) => this.setThinkingLevel(level),
++				setThinkingLevel: (level) => this.setThinkingLevelAsync(level),
+ 			},
+ 			{
+ 				getModel: () => this.model,
+@@ -3902,13 +4028,12 @@ export class AgentSession {
+ 			return false;
+ 		}
+ 
+-		this._retryAttempt++;
++		const attempt = this._retryAttempt + 1;
++		if (attempt > settings.maxRetries) return false;
+ 
+-		if (this._retryAttempt > settings.maxRetries) {
+-			// Preserve the completed attempt count so post-run handling can emit the final failure.
+-			this._retryAttempt--;
+-			return false;
+-		}
++		// Omission must commit before a retry is announced or its counter advances.
++		await this._omitRecoveryAttempt(message);
++		this._retryAttempt = attempt;
+ 
+ 		const delayMs = retryDelayMs(settings, this._retryAttempt);
+ 
+@@ -3920,9 +4045,6 @@ export class AgentSession {
+ 			errorMessage: message.errorMessage || "Unknown error",
+ 		});
+ 
+-		// Keep the failed attempt in raw history while durably omitting it from model projection.
+-		this._omitRecoveryAttempt(message);
+-
+ 		// Wait with exponential backoff (abortable)
+ 		this._retryAbortController = new AbortController();
+ 		try {
+@@ -4004,7 +4126,7 @@ export class AgentSession {
+ 				},
+ 			);
+ 
+-			this.recordBashResult(command, result, options);
++			await this.recordBashResultAsync(command, result, options);
+ 			return result;
+ 		} finally {
+ 			this._bashAbortControllers.delete(abortController);
+@@ -4039,6 +4161,31 @@ export class AgentSession {
+ 		}
+ 	}
+ 
++	async recordBashResultAsync(
++		command: string,
++		result: BashResult,
++		options?: { excludeFromContext?: boolean },
++	): Promise<void> {
++		assertSplyceReady(this);
++		const bashMessage: BashExecutionMessage = {
++			role: "bashExecution",
++			command,
++			output: result.output,
++			exitCode: result.exitCode,
++			cancelled: result.cancelled,
++			truncated: result.truncated,
++			fullOutputPath: result.fullOutputPath,
++			timestamp: Date.now(),
++			excludeFromContext: options?.excludeFromContext,
++		};
++		if (this.isStreaming) {
++			this._pendingBashMessages.push(bashMessage);
++		} else {
++			await this.sessionManager.withPersistence((manager) => manager.appendMessage(bashMessage));
++			this._refreshFinalizedContext();
++		}
++	}
++
+ 	/**
+ 	 * Cancel running bash command.
+ 	 */
+@@ -4062,14 +4209,38 @@ export class AgentSession {
+ 	 * Flush pending bash messages to agent state and session.
+ 	 * Called after agent turn completes to maintain proper message ordering.
+ 	 */
+-	private _flushPendingBashMessages(): void {
++	private async _flushPendingBashMessages(): Promise<void> {
++		if (this._pendingBashFlush) return this._pendingBashFlush;
+ 		if (this._pendingBashMessages.length === 0) return;
++		const drain = (async () => {
++			while (this._pendingBashMessages.length > 0) {
++				const pending = this._pendingBashMessages.slice();
++				await this.sessionManager.withPersistence((manager) => {
++					for (const bashMessage of pending) manager.appendMessage(bashMessage);
++				});
++				this._pendingBashMessages.splice(0, pending.length);
++				this._refreshFinalizedContext();
++			}
++		})();
++		this._pendingBashFlush = drain;
++		try {
++			await drain;
++		} finally {
++			this._pendingBashFlush = undefined;
++		}
++	}
+ 
+-		for (const bashMessage of this._pendingBashMessages) {
+-			this.sessionManager.appendMessage(bashMessage);
++	private async _flushPendingRunMessages(): Promise<void> {
++		try {
++			while (this._pendingBashMessages.length > 0 || this._pendingCustomMessages.length > 0) {
++				await this._flushPendingBashMessages();
++				await this._flushPendingCustomMessages();
++			}
++		} catch (error) {
++			this._isAgentRunActive = false;
++			this._resolveIdleWaitIfIdle();
++			throw error;
+ 		}
+-		this._pendingBashMessages = [];
+-		this._refreshFinalizedContext();
+ 	}
+ 
+ 	// =========================================================================
+@@ -4087,6 +4258,14 @@ export class AgentSession {
+ 		void this._extensionRunner.emit(event);
+ 	}
+ 
++	async setSessionNameAsync(name: string): Promise<void> {
++		assertSplyceReady(this);
++		await this.sessionManager.withPersistence((manager) => manager.appendSessionInfo(name));
++		const event = { type: "session_info_changed", name: this.sessionManager.getSessionName() } as const;
++		this._emit(event);
++		await this._extensionRunner.emit(event);
++	}
++
+ 	// =========================================================================
+ 	// Tree Navigation
+ 	// =========================================================================
+@@ -4246,34 +4425,24 @@ export class AgentSession {
+ 
+ 			// Switch leaf (with or without summary)
+ 			// Summary is attached at the navigation target position (newLeafId), not the old branch
+-			let summaryEntry: BranchSummaryEntry | undefined;
+-			if (summaryText) {
+-				// Create summary at target position (can be null for root)
+-				const summaryId = this.sessionManager.branchWithSummary(
+-					newLeafId,
+-					summaryText,
+-					summaryDetails,
+-					fromExtension,
+-					summaryUsage,
+-				);
+-				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
+-
+-				// Attach label to the summary entry
+-				if (label) {
+-					this.sessionManager.appendLabelChange(summaryId, label);
++			const summaryId = await this.sessionManager.withPersistence((manager) => {
++				if (summaryText) {
++					const id = manager.branchWithSummary(
++						newLeafId,
++						summaryText,
++						summaryDetails,
++						fromExtension,
++						summaryUsage,
++					);
++					if (label) manager.appendLabelChange(id, label);
++					return id;
+ 				}
+-			} else if (newLeafId === null) {
+-				// No summary, navigating to root - reset leaf
+-				this.sessionManager.resetLeaf();
+-			} else {
+-				// No summary, navigating to non-root
+-				this.sessionManager.branch(newLeafId);
+-			}
+-
+-			// Attach label to target entry when not summarizing (no summary entry to label)
+-			if (label && !summaryText) {
+-				this.sessionManager.appendLabelChange(targetId, label);
+-			}
++				if (newLeafId === null) manager.resetLeaf();
++				else manager.branch(newLeafId);
++				if (label) manager.appendLabelChange(targetId, label);
++				return undefined;
++			});
++			const summaryEntry = summaryId ? (this.sessionManager.getEntry(summaryId) as BranchSummaryEntry) : undefined;
+ 
+ 			// Update finalized context from the canonical session projection.
+ 			this._refreshFinalizedContext();
+diff --git a/vendor/pi/packages/coding-agent/src/core/cache-warmer.ts b/vendor/pi/packages/coding-agent/src/core/cache-warmer.ts
+index f4f885f23fc4acbab0f0bc607d7b34d11e2f0d6b..299077b0d71cffee2a0f00573d2809eb448e3171 100644
+--- a/vendor/pi/packages/coding-agent/src/core/cache-warmer.ts
++++ b/vendor/pi/packages/coding-agent/src/core/cache-warmer.ts
+@@ -1,3 +1,4 @@
++import { isSplyceOwned } from "@earendil-works/pi-agent-core";
+ import {
+ 	type Api,
+ 	type Context,
+@@ -154,6 +155,19 @@ interface ActiveRun extends CacheWarmRequest {
+ 	timer?: ReturnType<typeof setTimeout>;
+ }
+ 
++type CacheWarmingSessionManager = Pick<SessionManager, "appendUsage" | "getBranch"> &
++	Partial<Pick<SessionManager, "withPersistence">>;
++
++function persistenceUnavailable(): never {
++	throw Object.assign(new Error("PERSIST_REDACTION_UNAVAILABLE"), { code: "PERSIST_REDACTION_UNAVAILABLE" });
++}
++
++function rethrowPersistenceError(error: unknown): void {
++	const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
++	if (code === "PERSIST_REDACTION_UNAVAILABLE" || code === "PERSIST_ENTRY_TOO_LARGE")
++		throw Object.assign(new Error(code), { code });
++}
++
+ /**
+  * Keeps one prompt cache entry alive by re-sending its request with a
+  * one-token output cap before the entry expires. `start` replaces any
+@@ -163,7 +177,7 @@ export class CacheWarmer {
+ 	private run?: ActiveRun;
+ 	private inactive: CacheWarmingStatus;
+ 	private readonly models: Pick<ModelRuntime, "streamSimple">;
+-	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">;
++	private readonly sessionManager: CacheWarmingSessionManager;
+ 	private readonly getMode: () => CacheWarmingMode;
+ 	/** Lets extensions override `event.action`; failures fall back to pi's decision. */
+ 	private readonly decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction>;
+@@ -172,7 +186,7 @@ export class CacheWarmer {
+ 
+ 	constructor(
+ 		models: Pick<ModelRuntime, "streamSimple">,
+-		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">,
++		sessionManager: CacheWarmingSessionManager,
+ 		getMode: () => CacheWarmingMode,
+ 		decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction> = async (event) => event.action,
+ 	) {
+@@ -209,6 +223,8 @@ export class CacheWarmer {
+ 			this.stop("cache warming disabled");
+ 			return;
+ 		}
++		// Native background warming has no awaited host failure channel yet.
++		if (isSplyceOwned(this.sessionManager)) persistenceUnavailable();
+ 		if (!isReplayable(request.model, request.options)) {
+ 			this.stop("request cannot be replayed safely");
+ 			return;
+@@ -293,7 +309,16 @@ export class CacheWarmer {
+ 			this.stop(run.phase === "idle" ? "30-minute idle safety limit reached" : "one-hour safety limit reached");
+ 			return;
+ 		}
+-		run.timer = setTimeout(() => void this.refresh(run), Math.max(0, run.nextWarmAt - Date.now()));
++		run.timer = setTimeout(
++			() => {
++				if (isSplyceOwned(this.sessionManager)) {
++					this.stop("PERSIST_REDACTION_UNAVAILABLE");
++					return;
++				}
++				void this.refresh(run).catch(() => this.stop("cache warming failed"));
++			},
++			Math.max(0, run.nextWarmAt - Date.now()),
++		);
+ 		run.timer.unref?.();
+ 	}
+ 
+@@ -312,7 +337,8 @@ export class CacheWarmer {
+ 				continuationProbability,
+ 				action,
+ 			});
+-		} catch {
++		} catch (error) {
++			rethrowPersistenceError(error);
+ 			// Extension failures fall back to pi's own decision.
+ 		}
+ 		if (!this.validateRun(run) || this.refreshDeadlineMissed(run)) return;
+@@ -339,16 +365,24 @@ export class CacheWarmer {
+ 				.result();
+ 			if (!this.validateRun(run)) return;
+ 			if (message.stopReason !== "error" && message.stopReason !== "aborted") {
+-				const entry = this.sessionManager.appendUsage(
+-					"cache_warm",
+-					message.provider,
+-					message.responseModel ?? message.model,
+-					message.usage,
+-					extensionOverride ? "extension override" : undefined,
+-				);
++				const appendUsage = (manager: Pick<SessionManager, "appendUsage">) =>
++					manager.appendUsage(
++						"cache_warm",
++						message.provider,
++						message.responseModel ?? message.model,
++						message.usage,
++						extensionOverride ? "extension override" : undefined,
++					);
++				if (isSplyceOwned(this.sessionManager) && typeof this.sessionManager.withPersistence !== "function")
++					persistenceUnavailable();
++				const entry = this.sessionManager.withPersistence
++					? await this.sessionManager.withPersistence(appendUsage, run.controller.signal)
++					: appendUsage(this.sessionManager);
++				if (!this.validateRun(run)) return;
+ 				this.onWarmed?.(entry);
+ 			}
+-		} catch {
++		} catch (error) {
++			rethrowPersistenceError(error);
+ 			// Cache warming is best-effort and must not affect the active agent run.
+ 		}
+ 		if (this.run === run) this.schedule(run);
+diff --git a/vendor/pi/packages/coding-agent/src/core/export-html/index.ts b/vendor/pi/packages/coding-agent/src/core/export-html/index.ts
+index 561e546b8e7cf3b5c7a8339d0c553f1185da3c76..ba717b25a8870119aad7c0e9f951000db69b569c 100644
+--- a/vendor/pi/packages/coding-agent/src/core/export-html/index.ts
++++ b/vendor/pi/packages/coding-agent/src/core/export-html/index.ts
+@@ -6,7 +6,7 @@ import { getResolvedThemeColors, getThemeExportColors } from "../../modes/intera
+ import { normalizePath, resolvePath } from "../../utils/paths.ts";
+ import type { ToolDefinition } from "../extensions/types.ts";
+ import type { SessionEntry } from "../session-manager.ts";
+-import { SessionManager } from "../session-manager.ts";
++import { assertUnownedSessionExport, SessionManager } from "../session-manager.ts";
+ 
+ /**
+  * Interface for rendering custom tools to HTML.
+@@ -240,6 +240,7 @@ export async function exportSessionToHtml(
+ 	state?: AgentState,
+ 	options?: ExportOptions | string,
+ ): Promise<string> {
++	assertUnownedSessionExport(sm);
+ 	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
+ 
+ 	const sessionFile = sm.getSessionFile();
+diff --git a/vendor/pi/packages/coding-agent/src/core/extensions/loader.ts b/vendor/pi/packages/coding-agent/src/core/extensions/loader.ts
+index cbc1100fc0000a0d44c05d4492cbb36b807d9527..f1c76e92d97f61cdab43c9b4232e2ad423212401 100644
+--- a/vendor/pi/packages/coding-agent/src/core/extensions/loader.ts
++++ b/vendor/pi/packages/coding-agent/src/core/extensions/loader.ts
+@@ -381,24 +381,24 @@ function createExtensionAPI(
+ 		},
+ 
+ 		// Action methods - delegate to shared runtime
+-		sendMessage(message, options): void {
++		sendMessage(message, options): Promise<void> {
+ 			assertActive();
+-			runtime.sendMessage(message, options);
++			return runtime.sendMessage(message, options);
+ 		},
+ 
+-		sendUserMessage(content, options): void {
++		sendUserMessage(content, options): Promise<void> {
+ 			assertActive();
+-			runtime.sendUserMessage(content, options);
++			return runtime.sendUserMessage(content, options);
+ 		},
+ 
+-		appendEntry(customType: string, data?: unknown): void {
++		appendEntry(customType: string, data?: unknown): Promise<void> {
+ 			assertActive();
+-			runtime.appendEntry(customType, data);
++			return runtime.appendEntry(customType, data);
+ 		},
+ 
+-		setSessionName(name: string): void {
++		setSessionName(name: string): Promise<void> {
+ 			assertActive();
+-			runtime.setSessionName(name);
++			return runtime.setSessionName(name);
+ 		},
+ 
+ 		getSessionName(): string | undefined {
+@@ -406,9 +406,9 @@ function createExtensionAPI(
+ 			return runtime.getSessionName();
+ 		},
+ 
+-		setLabel(entryId: string, label: string | undefined): void {
++		setLabel(entryId: string, label: string | undefined): Promise<void> {
+ 			assertActive();
+-			runtime.setLabel(entryId, label);
++			return runtime.setLabel(entryId, label);
+ 		},
+ 
+ 		exec(command: string, args: string[], options?: ExecOptions) {
+@@ -451,9 +451,9 @@ function createExtensionAPI(
+ 			return runtime.getThinkingLevel();
+ 		},
+ 
+-		setThinkingLevel(level) {
++		setThinkingLevel(level): Promise<void> {
+ 			assertActive();
+-			runtime.setThinkingLevel(level);
++			return runtime.setThinkingLevel(level);
+ 		},
+ 
+ 		registerProvider(providerOrName: Provider | string, config?: ProviderConfig) {
+diff --git a/vendor/pi/packages/coding-agent/src/core/extensions/runner.ts b/vendor/pi/packages/coding-agent/src/core/extensions/runner.ts
+index 77712e677f91dde65d4d4db906a26b16bbd9de9c..7b4e3507738727bd5a5d705c3ecd908d612b83a9 100644
+--- a/vendor/pi/packages/coding-agent/src/core/extensions/runner.ts
++++ b/vendor/pi/packages/coding-agent/src/core/extensions/runner.ts
+@@ -277,6 +277,12 @@ function snapshotEventHandlers(extensions: Extension[], event: ExtensionEvent["t
+ 	return extensions.map((ext) => ({ ext, handlers: ext.handlers.get(event)?.slice() ?? [] }));
+ }
+ 
++function rethrowPersistenceError(error: unknown): void {
++	const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
++	if (code === "PERSIST_REDACTION_UNAVAILABLE" || code === "PERSIST_ENTRY_TOO_LARGE")
++		throw Object.assign(new Error(code), { code });
++}
++
+ function sameMessages(left: AgentMessage[], right: AgentMessage[]): boolean {
+ 	return left.length === right.length && left.every((message, index) => message === right[index]);
+ }
+@@ -316,6 +322,7 @@ export async function emitProjectTrustEvent(
+ 				}
+ 				return { result: handlerResult, errors };
+ 			} catch (error) {
++				rethrowPersistenceError(error);
+ 				errors.push({
+ 					extensionPath: ext.path,
+ 					event: event.type,
+@@ -476,6 +483,7 @@ export class ExtensionRunner {
+ 					this.modelRegistry.registerProvider(name, config);
+ 				}
+ 			} catch (err) {
++				rethrowPersistenceError(err);
+ 				this.emitError({
+ 					extensionPath,
+ 					event: "register_provider",
+@@ -493,6 +501,7 @@ export class ExtensionRunner {
+ 					this.modelRegistry.registerProvider(provider);
+ 				}
+ 			} catch (err) {
++				rethrowPersistenceError(err);
+ 				this.emitError({
+ 					extensionPath,
+ 					event: "register_provider",
+@@ -510,6 +519,7 @@ export class ExtensionRunner {
+ 			try {
+ 				registerVirtualModel(definition);
+ 			} catch (err) {
++				rethrowPersistenceError(err);
+ 				this.emitError({
+ 					extensionPath,
+ 					event: "register_virtual_model",
+@@ -611,6 +621,7 @@ export class ExtensionRunner {
+ 			return run().finally(finish);
+ 		} catch (err) {
+ 			finish();
++			rethrowPersistenceError(err);
+ 			throw err;
+ 		}
+ 	}
+@@ -1056,6 +1067,7 @@ export class ExtensionRunner {
+ 					if (handlerResult?.entries !== undefined) entries = handlerResult.entries;
+ 					if (handlerResult?.continue !== undefined) shouldContinue = handlerResult.continue;
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					this.emitError({
+ 						extensionPath: ext.path,
+ 						event: baseEvent.type,
+@@ -1068,6 +1080,7 @@ export class ExtensionRunner {
+ 					context = await buildContext(entries);
+ 					valid = true;
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					valid = false;
+ 					this.emitError({
+ 						extensionPath: ext.path,
+@@ -1109,6 +1122,7 @@ export class ExtensionRunner {
+ 						}
+ 					}
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1135,6 +1149,7 @@ export class ExtensionRunner {
+ 					const result = (await handler(event, ctx)) as CacheWarmingDecisionEventResult | undefined;
+ 					if (result?.action !== undefined) action = result.action;
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					this.emitError({
+ 						extensionPath: ext.path,
+ 						event: event.type,
+@@ -1172,6 +1187,7 @@ export class ExtensionRunner {
+ 					currentMessage = handlerResult.message;
+ 					modified = true;
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1221,6 +1237,7 @@ export class ExtensionRunner {
+ 						modified = true;
+ 					}
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1281,6 +1298,7 @@ export class ExtensionRunner {
+ 					}
+ 					return handlerResult;
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1321,6 +1339,7 @@ export class ExtensionRunner {
+ 					if (!returned) continue;
+ 					currentMessages = restoreSystemMessages(currentMessages, visibleSnapshot, returned);
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1350,6 +1369,7 @@ export class ExtensionRunner {
+ 						});
+ 					}
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1381,6 +1401,7 @@ export class ExtensionRunner {
+ 						currentPayload = handlerResult;
+ 					}
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1409,6 +1430,7 @@ export class ExtensionRunner {
+ 					};
+ 					await handler(event, ctx);
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1461,6 +1483,7 @@ export class ExtensionRunner {
+ 						}
+ 					}
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1506,6 +1529,7 @@ export class ExtensionRunner {
+ 						themePaths.push(...result.themePaths.map((path) => ({ path, extensionPath: ext.path })));
+ 					}
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					const message = err instanceof Error ? err.message : String(err);
+ 					const stack = err instanceof Error ? err.stack : undefined;
+ 					this.emitError({
+@@ -1549,6 +1573,7 @@ export class ExtensionRunner {
+ 						currentImages = result.images ?? currentImages;
+ 					}
+ 				} catch (err) {
++					rethrowPersistenceError(err);
+ 					this.emitError({
+ 						extensionPath: ext.path,
+ 						event: "input",
+diff --git a/vendor/pi/packages/coding-agent/src/core/extensions/types.ts b/vendor/pi/packages/coding-agent/src/core/extensions/types.ts
+index b29e2d4b03dbc1e4f29552919dc90ab7253212c6..a1ebbc2b9e9c0a5a2d6640f2c44c88ac74001459 100644
+--- a/vendor/pi/packages/coding-agent/src/core/extensions/types.ts
++++ b/vendor/pi/packages/coding-agent/src/core/extensions/types.ts
+@@ -1735,7 +1735,7 @@ export interface ExtensionAPI {
+ 	sendMessage<T = unknown>(
+ 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+ 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+-	): void;
++	): Promise<void>;
+ 
+ 	/**
+ 	 * Send a user message to the agent. Always triggers a turn.
+@@ -1745,23 +1745,23 @@ export interface ExtensionAPI {
+ 	sendUserMessage(
+ 		content: string | (TextContent | ImageContent)[],
+ 		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
+-	): void;
++	): Promise<void>;
+ 
+ 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
+-	appendEntry<T = unknown>(customType: string, data?: T): void;
++	appendEntry<T = unknown>(customType: string, data?: T): Promise<void>;
+ 
+ 	// =========================================================================
+ 	// Session Metadata
+ 	// =========================================================================
+ 
+ 	/** Set the session display name (shown in session selector). */
+-	setSessionName(name: string): void;
++	setSessionName(name: string): Promise<void>;
+ 
+ 	/** Get the current session name, if set. */
+ 	getSessionName(): string | undefined;
+ 
+ 	/** Set or clear a label on an entry. Labels are user-defined markers for bookmarking/navigation. */
+-	setLabel(entryId: string, label: string | undefined): void;
++	setLabel(entryId: string, label: string | undefined): Promise<void>;
+ 
+ 	/** Execute a shell command. */
+ 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
+@@ -1801,7 +1801,7 @@ export interface ExtensionAPI {
+ 	 * Set the thinking level (clamped to model capabilities) for the current session without changing the configured default
+ 	 * for new sessions.
+ 	 */
+-	setThinkingLevel(level: ThinkingLevel): void;
++	setThinkingLevel(level: ThinkingLevel): Promise<void>;
+ 
+ 	// =========================================================================
+ 	// Provider Registration
+@@ -2107,16 +2107,16 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+ export type SendMessageHandler = <T = unknown>(
+ 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+ 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+-) => void;
++) => Promise<void>;
+ 
+ export type SendUserMessageHandler = (
+ 	content: string | (TextContent | ImageContent)[],
+ 	options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
+-) => void;
++) => Promise<void>;
+ 
+-export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
++export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => Promise<void>;
+ 
+-export type SetSessionNameHandler = (name: string) => void;
++export type SetSessionNameHandler = (name: string) => Promise<void>;
+ 
+ export type GetSessionNameHandler = () => string | undefined;
+ 
+@@ -2147,9 +2147,9 @@ export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
+ 
+ export type GetThinkingLevelHandler = () => ThinkingLevel;
+ 
+-export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
++export type SetThinkingLevelHandler = (level: ThinkingLevel) => Promise<void>;
+ 
+-export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
++export type SetLabelHandler = (entryId: string, label: string | undefined) => Promise<void>;
+ 
+ /**
+  * Shared state created by loader, used during registration and runtime.
+diff --git a/vendor/pi/packages/coding-agent/src/core/sdk.ts b/vendor/pi/packages/coding-agent/src/core/sdk.ts
+index 3be96ad1edc4c4b6b364a7f7e292de7b5baf6742..3d8ad8911acd9ec5c200746943bc842a2113a63f 100644
+--- a/vendor/pi/packages/coding-agent/src/core/sdk.ts
++++ b/vendor/pi/packages/coding-agent/src/core/sdk.ts
+@@ -3,6 +3,7 @@ import {
+ 	type AgentMessage,
+ 	type AgentOptions,
+ 	assertSameSplyceOwner,
++	assertSplycePersistence,
+ 	assertSplyceReady,
+ 	inheritSplyceOwner,
+ 	setDefaultStreamFn,
+@@ -200,6 +201,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 	assertSameSplyceOwner(options, modelRuntime, "model-runtime");
+ 	assertSameSplyceOwner(options, settingsManager, "settings-manager");
+ 	assertSameSplyceOwner(options, sessionManager, "session-manager");
++	assertSplycePersistence(sessionManager);
+ 	assertSameSplyceOwner(options, resourceLoader, "resource-loader");
+ 	for (const scoped of options.scopedModels ?? []) assertSameSplyceOwner(options, scoped.model, "model");
+ 	const cwd = resolvePath(options.cwd);
+@@ -390,20 +392,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
+ 	};
+ 	inheritSplyceOwner(options, agentOptions, "agent-options");
+-	const agent = new Agent(agentOptions);
+ 
+-	// Restore missing settings metadata for older sessions.
+-	if (hasExistingSession) {
+-		if (!hasThinkingEntry) {
+-			sessionManager.appendThinkingLevelChange(thinkingLevel);
+-		}
+-	} else {
+-		// Save initial model and thinking level for new sessions so they can be restored on resume
+-		if (model) {
+-			sessionManager.appendModelChange(model.provider, model.id);
++	// Commit setup metadata before exposing the session to callers or extensions.
++	await sessionManager.withPersistence((manager) => {
++		if (hasExistingSession) {
++			if (!hasThinkingEntry) manager.appendThinkingLevelChange(thinkingLevel);
++		} else {
++			if (model) manager.appendModelChange(model.provider, model.id);
++			manager.appendThinkingLevelChange(thinkingLevel);
+ 		}
+-		sessionManager.appendThinkingLevelChange(thinkingLevel);
+-	}
++	});
++	if (agentOptions.initialState) agentOptions.initialState.messages = sessionManager.buildSessionContext().messages;
++	const agent = new Agent(agentOptions);
+ 
+ 	const sessionOptions: AgentSessionConfig = {
+ 		agent,
+diff --git a/vendor/pi/packages/coding-agent/src/core/session-export.ts b/vendor/pi/packages/coding-agent/src/core/session-export.ts
+index 878446ae5b8b90974c10dca63b76b190b6ce5dab..36bc95919e6f0bffba1da6917fec65eed64614a8 100644
+--- a/vendor/pi/packages/coding-agent/src/core/session-export.ts
++++ b/vendor/pi/packages/coding-agent/src/core/session-export.ts
+@@ -1,7 +1,12 @@
+ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+ import { dirname } from "node:path";
+ import { resolvePath } from "../utils/paths.ts";
+-import { CURRENT_SESSION_VERSION, type SessionHeader, type SessionManager } from "./session-manager.ts";
++import {
++	assertUnownedSessionExport,
++	CURRENT_SESSION_VERSION,
++	type SessionHeader,
++	type SessionManager,
++} from "./session-manager.ts";
+ 
+ type TrailingEntries = (parentId: string | null, timestamp: string) => readonly object[];
+ 
+@@ -10,6 +15,7 @@ export function serializeSessionBranch(
+ 	sessionManager: SessionManager,
+ 	createTrailingEntries?: TrailingEntries,
+ ): string {
++	assertUnownedSessionExport(sessionManager);
+ 	const timestamp = new Date().toISOString();
+ 	const header: SessionHeader = {
+ 		type: "session",
+@@ -34,6 +40,7 @@ export function exportSessionToJsonl(
+ 	outputPath?: string,
+ 	createTrailingEntries?: TrailingEntries,
+ ): string {
++	assertUnownedSessionExport(sessionManager);
+ 	const filePath = resolvePath(
+ 		outputPath ?? `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
+ 		process.cwd(),
+diff --git a/vendor/pi/packages/coding-agent/src/core/session-manager.ts b/vendor/pi/packages/coding-agent/src/core/session-manager.ts
+index 57f9655baa2cfd84a2a0c152d424c62c6c75296d..2cf26be19ce6d5d9aa089a569a16f9b9210b9e6b 100644
+--- a/vendor/pi/packages/coding-agent/src/core/session-manager.ts
++++ b/vendor/pi/packages/coding-agent/src/core/session-manager.ts
+@@ -1,4 +1,10 @@
+-import type { AgentMessage } from "@earendil-works/pi-agent-core";
++import { AsyncLocalStorage } from "node:async_hooks";
++import {
++	type AgentMessage,
++	assertSplycePersistence,
++	isSplyceOwned,
++	sanitizeSplycePersistence,
++} from "@earendil-works/pi-agent-core";
+ import {
+ 	type AssistantMessage,
+ 	getCurrentSystemMessage,
+@@ -17,16 +23,21 @@ import {
+ 	closeSync,
+ 	createReadStream,
+ 	existsSync,
++	fstatSync,
+ 	mkdirSync,
+ 	openSync,
+ 	readdirSync,
++	readFileSync,
+ 	readSync,
++	realpathSync,
++	renameSync,
+ 	type Stats,
+ 	statSync,
++	unlinkSync,
+ 	writeFileSync,
+ } from "fs";
+ import { readdir, stat } from "fs/promises";
+-import { basename, join, resolve } from "path";
++import { basename, dirname, join, resolve } from "path";
+ import { createInterface } from "readline";
+ import { StringDecoder } from "string_decoder";
+ import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
+@@ -594,6 +605,7 @@ function getDefaultSessionDirPath(cwd: string, agentDir: string = getDefaultAgen
+ }
+ 
+ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
++	if (ownedPersistenceStageDepth > 0) persistenceUnavailable();
+ 	const sessionDir = getDefaultSessionDirPath(cwd, agentDir);
+ 	if (!existsSync(sessionDir)) {
+ 		mkdirSync(sessionDir, { recursive: true });
+@@ -625,6 +637,10 @@ function parseSessionEntryLine(line: string): FileEntry | null {
+ 
+ /** Exported for testing */
+ export function loadEntriesFromFile(filePath: string): FileEntry[] {
++	return readEntriesFromFile(filePath, true);
++}
++
++function readEntriesFromFile(filePath: string, repair: boolean): FileEntry[] {
+ 	const resolvedFilePath = normalizePath(filePath);
+ 	if (!existsSync(resolvedFilePath)) return [];
+ 
+@@ -665,7 +681,10 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
+ 		return [];
+ 	}
+ 
+-	if (pending) appendFileSync(resolvedFilePath, "\n");
++	if (pending && repair) {
++		if (ownedPersistenceStageDepth > 0) persistenceUnavailable();
++		appendFileSync(resolvedFilePath, "\n");
++	}
+ 	return entries;
+ }
+ 
+@@ -984,6 +1003,260 @@ async function listSessionsFromDir(
+  * Use buildSessionContext() to get the resolved message list for the LLM, which
+  * handles compaction summaries and follows the path from root to current leaf.
+  */
++interface PersistenceStage {
++	active: boolean;
++	write: "none" | "append" | "rewrite";
++	existingFile: boolean;
++	target?: string;
++	fileReadPath?: string;
++	fileVersion?: PersistenceFileVersion;
++}
++interface PersistenceFileVersion {
++	canonicalPath: string;
++	device: bigint;
++	inode: bigint;
++	size: bigint;
++	modified: bigint;
++	changed: bigint;
++	bytes: string;
++}
++const persistenceStages = new WeakMap<SessionManager, PersistenceStage>();
++const persistenceChains = new AsyncLocalStorage<ReadonlySet<SessionManager>>();
++let ownedPersistenceStageDepth = 0;
++
++function persistenceFileVersion(path: string): PersistenceFileVersion | undefined {
++	if (!existsSync(path)) return undefined;
++	const fd = openSync(path, "r");
++	try {
++		const before = fstatSync(fd, { bigint: true });
++		if (!before.isFile()) persistenceUnavailable();
++		const bytes = readFileSync(fd, "utf8");
++		const after = fstatSync(fd, { bigint: true });
++		const canonicalPath = realpathSync.native(path);
++		const current = statSync(canonicalPath, { bigint: true });
++		if (
++			before.dev !== after.dev ||
++			before.ino !== after.ino ||
++			before.size !== after.size ||
++			before.mtimeNs !== after.mtimeNs ||
++			before.ctimeNs !== after.ctimeNs ||
++			current.dev !== after.dev ||
++			current.ino !== after.ino
++		)
++			persistenceUnavailable();
++		return {
++			canonicalPath,
++			device: after.dev,
++			inode: after.ino,
++			size: after.size,
++			modified: after.mtimeNs,
++			changed: after.ctimeNs,
++			bytes,
++		};
++	} finally {
++		closeSync(fd);
++	}
++}
++
++function assertPersistenceFileVersion(path: string, expected: PersistenceFileVersion | undefined): void {
++	const actual = persistenceFileVersion(path);
++	if (
++		!expected ||
++		!actual ||
++		actual.canonicalPath !== expected.canonicalPath ||
++		actual.device !== expected.device ||
++		actual.inode !== expected.inode ||
++		actual.size !== expected.size ||
++		actual.modified !== expected.modified ||
++		actual.changed !== expected.changed ||
++		actual.bytes !== expected.bytes
++	)
++		persistenceUnavailable();
++}
++
++/** Donor exporters cannot publish either a native manager or a pending/revoked draft. */
++export function assertUnownedSessionExport(manager: SessionManager): void {
++	if (ownedPersistenceStageDepth > 0 || isSplyceOwned(manager) || persistenceStages.has(manager))
++		persistenceUnavailable();
++}
++
++function persistenceUnavailable(): never {
++	throw Object.assign(new Error("PERSIST_REDACTION_UNAVAILABLE"), { code: "PERSIST_REDACTION_UNAVAILABLE" });
++}
++
++function persistenceTooLarge(): never {
++	throw Object.assign(new Error("PERSIST_ENTRY_TOO_LARGE"), { code: "PERSIST_ENTRY_TOO_LARGE" });
++}
++
++function persistenceFailure(error: unknown): never {
++	let tooLarge = false;
++	try {
++		tooLarge =
++			!!error &&
++			typeof error === "object" &&
++			Object.getOwnPropertyDescriptor(error, "code")?.value === "PERSIST_ENTRY_TOO_LARGE";
++	} catch {
++		/* An error descriptor is untrusted data too. */
++	}
++	return tooLarge ? persistenceTooLarge() : persistenceUnavailable();
++}
++
++function assertPersistenceEntrySize(serialized: string): void {
++	// The native callback also checks its complete envelope; this is only a definite lower bound.
++	if (Buffer.byteLength(JSON.stringify(serialized), "utf8") > 256 * 1024) persistenceTooLarge();
++}
++
++/** Detach data without invoking accessors or serialization methods. */
++function persistenceSnapshot<T>(value: T): T {
++	const ancestors = new Set<object>();
++	const copy = (item: unknown, arrayItem = false): unknown => {
++		if (item === undefined) return arrayItem ? null : undefined;
++		if (item === null || typeof item === "string" || typeof item === "boolean") return item;
++		if (typeof item === "number") {
++			if (!Number.isFinite(item)) persistenceUnavailable();
++			return item;
++		}
++		if (typeof item !== "object" || ancestors.has(item)) persistenceUnavailable();
++		const array = Array.isArray(item);
++		const prototype = Object.getPrototypeOf(item);
++		if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null)
++			persistenceUnavailable();
++		ancestors.add(item);
++		const result: unknown[] | Record<string, unknown> = array ? [] : {};
++		for (const key of Reflect.ownKeys(item)) {
++			if (array && key === "length") continue;
++			if (typeof key !== "string") persistenceUnavailable();
++			const descriptor = Object.getOwnPropertyDescriptor(item, key);
++			if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) persistenceUnavailable();
++			if (array && (!/^(?:0|[1-9]\d*)$/.test(key) || Number(key) >= item.length)) persistenceUnavailable();
++			const child = copy(descriptor.value, array);
++			if (child !== undefined)
++				Object.defineProperty(result, key, { value: child, enumerable: true, writable: true, configurable: true });
++		}
++		if (array && Reflect.ownKeys(item).length !== item.length + 1) persistenceUnavailable();
++		ancestors.delete(item);
++		return result;
++	};
++	return copy(value) as T;
++}
++
++function serializePersistence(entries: readonly FileEntry[]): string {
++	return `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
++}
++
++function assertSanitizedShape(original: unknown, sanitized: unknown): void {
++	if (typeof original === "string") {
++		if (typeof sanitized !== "string") persistenceUnavailable();
++		return;
++	}
++	if (original === null || typeof original !== "object") {
++		if (original !== sanitized) persistenceUnavailable();
++		return;
++	}
++	if (!sanitized || typeof sanitized !== "object" || Array.isArray(original) !== Array.isArray(sanitized))
++		persistenceUnavailable();
++	const keys = Object.keys(original);
++	if (keys.length !== Object.keys(sanitized).length || !keys.every((key) => Object.hasOwn(sanitized, key)))
++		persistenceUnavailable();
++	for (const key of keys)
++		assertSanitizedShape((original as Record<string, unknown>)[key], (sanitized as Record<string, unknown>)[key]);
++}
++
++function assertMessageIdentity(original: unknown, sanitized: unknown): void {
++	if (!original || typeof original !== "object" || !sanitized || typeof sanitized !== "object") return;
++	const before = original as Record<string, unknown>;
++	const after = sanitized as Record<string, unknown>;
++	for (const key of ["role", "toolCallId", "toolName", "api", "provider", "model", "timestamp", "stopReason"])
++		if (before[key] !== after[key]) persistenceUnavailable();
++	if (Array.isArray(before.content) && Array.isArray(after.content)) {
++		for (const [index, block] of before.content.entries()) {
++			if (!block || typeof block !== "object") continue;
++			const replacement = after.content[index] as Record<string, unknown>;
++			if (block.type !== replacement?.type) persistenceUnavailable();
++			if (block.type === "toolCall" && (block.id !== replacement.id || block.name !== replacement.name))
++				persistenceUnavailable();
++		}
++	}
++}
++
++function mapPersistenceResult<T>(original: T, sanitized: T, entries: readonly FileEntry[]): T {
++	const byId = new Map(entries.map((entry) => [entry.id, entry]));
++	const copy = (before: unknown, after: unknown): unknown => {
++		if (typeof before === "string" && byId.has(before) && before !== after) persistenceUnavailable();
++		if (!before || typeof before !== "object") return after;
++		if (Array.isArray(before)) return before.map((child, index) => copy(child, (after as unknown[])[index]));
++		const record = before as Record<string, unknown>;
++		if (typeof record.id === "string") {
++			const entry = byId.get(record.id);
++			if (entry && entry.type === record.type) return persistenceSnapshot(entry);
++		}
++		return Object.fromEntries(
++			Object.keys(record).map((key) => [key, copy(record[key], (after as Record<string, unknown>)[key])]),
++		);
++	};
++	return copy(original, sanitized) as T;
++}
++
++/** Entry results use their committed rows, never an aggregate history-sized redaction frame. */
++function projectPersistenceResult<T>(result: T, entries: readonly FileEntry[]): T {
++	const byId = new Map(entries.map((entry) => [entry.id, entry]));
++	const project = (value: unknown): unknown => {
++		if (!value || typeof value !== "object") return value;
++		if (Array.isArray(value)) return value.map(project);
++		const record = value as Record<string, unknown>;
++		if (typeof record.id === "string" && byId.get(record.id)?.type === record.type) return null;
++		return Object.fromEntries(Object.keys(record).map((key) => [key, project(record[key])]));
++	};
++	return project(result) as T;
++}
++
++function isCommittedEntryResult(result: unknown, entries: readonly FileEntry[]): boolean {
++	const byId = new Map(entries.map((entry) => [entry.id, entry]));
++	const known = (value: unknown): boolean => {
++		if (Array.isArray(value)) return value.every(known);
++		if (!value || typeof value !== "object") return false;
++		const record = value as Record<string, unknown>;
++		return typeof record.id === "string" && byId.get(record.id)?.type === record.type;
++	};
++	return known(result);
++}
++
++function parseSanitizedPersistence(serialized: string, expected: readonly FileEntry[]): FileEntry[] {
++	if (typeof serialized !== "string" || !serialized.endsWith("\n")) persistenceUnavailable();
++	const lines = serialized.slice(0, -1).split("\n");
++	if (lines.length !== expected.length) persistenceUnavailable();
++	const entries = lines.map((line) => JSON.parse(line) as FileEntry);
++	assertSanitizedShape(expected, entries);
++	const ids = new Set<string>();
++	for (const [index, entry] of entries.entries()) {
++		const original = expected[index];
++		if (!entry || typeof entry !== "object" || Array.isArray(entry) || entry.type !== original.type)
++			persistenceUnavailable();
++		if (index === 0) {
++			if (entry.type !== "session" || original.type !== "session") persistenceUnavailable();
++			for (const key of ["type", "version", "id", "timestamp", "cwd", "parentSession"] as const)
++				if (entry[key] !== original[key]) persistenceUnavailable();
++		} else {
++			if (entry.type === "session" || original.type === "session") persistenceUnavailable();
++			if (typeof entry.id !== "string" || ids.has(entry.id)) persistenceUnavailable();
++			for (const key of ["id", "parentId", "timestamp"] as const)
++				if (entry[key] !== original[key]) persistenceUnavailable();
++			for (const key of ["targetId", "firstKeptEntryId", "fromId"] as const)
++				if (
++					(entry as unknown as Record<string, unknown>)[key] !==
++					(original as unknown as Record<string, unknown>)[key]
++				)
++					persistenceUnavailable();
++			if (entry.type === "message" && original.type === "message")
++				assertMessageIdentity(original.message, entry.message);
++			if (entry.type === "custom_message" && original.type === "custom_message")
++				assertMessageIdentity({ content: original.content }, { content: entry.content });
++			ids.add(entry.id);
++		}
++	}
++	return entries;
++}
++
+ export class SessionManager {
+ 	private sessionId: string = "";
+ 	private sessionFile: string | undefined;
+@@ -996,6 +1269,11 @@ export class SessionManager {
+ 	private labelsById: Map<string, string> = new Map();
+ 	private labelTimestampsById: Map<string, string> = new Map();
+ 	private leafId: string | null = null;
++	private _persistenceTail: Promise<void> = Promise.resolve();
++	private _persistenceUncertain = false;
++	private _persistenceQualified = false;
++	private _persistenceBytes: string | undefined;
++	private _persistenceFileVersion: PersistenceFileVersion | undefined;
+ 
+ 	private constructor(
+ 		cwd: string,
+@@ -1004,10 +1282,13 @@ export class SessionManager {
+ 		persist: boolean,
+ 		newSessionOptions?: NewSessionOptions,
+ 		preloadedFileEntries?: FileEntry[],
++		inert = false,
+ 	) {
+ 		this.cwd = resolvePath(cwd);
+ 		this.sessionDir = normalizePath(sessionDir);
+ 		this.persist = persist;
++		if (inert) return;
++		if (ownedPersistenceStageDepth > 0 && persist) persistenceUnavailable();
+ 		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
+ 			mkdirSync(this.sessionDir, { recursive: true });
+ 		}
+@@ -1021,15 +1302,263 @@ export class SessionManager {
+ 		}
+ 	}
+ 
++	private _assertMutationAllowed(): void {
++		const staged = persistenceStages.get(this);
++		if (this._persistenceUncertain || (staged ? !staged.active : isSplyceOwned(this))) persistenceUnavailable();
++	}
++
++	private _readSnapshot<T>(value: T): T {
++		return isSplyceOwned(this) ? persistenceSnapshot(value) : value;
++	}
++
++	private _planWrite(mode: "append" | "rewrite"): void {
++		const staged = persistenceStages.get(this);
++		if (!staged || !this.sessionFile) persistenceUnavailable();
++		if (staged.target !== undefined && staged.target !== this.sessionFile) persistenceUnavailable();
++		staged.target = this.sessionFile;
++		if (staged.write !== "rewrite") staged.write = mode;
++	}
++
++	/** Native persistence is awaited; the synchronous callback only edits a detached draft. */
++	withPersistence<T>(stage: (manager: SessionManager) => T, signal?: AbortSignal): Promise<T> {
++		if (persistenceStages.has(this) || persistenceChains.getStore()?.has(this)) persistenceUnavailable();
++		const chain = new Set(persistenceChains.getStore());
++		chain.add(this);
++		const operation = this._persistenceTail.then(() =>
++			persistenceChains.run(chain, () => this._withPersistence(stage, signal)),
++		);
++		this._persistenceTail = operation.then(
++			() => undefined,
++			() => undefined,
++		);
++		return operation;
++	}
++
++	private async _withPersistence<T>(stage: (manager: SessionManager) => T, signal?: AbortSignal): Promise<T> {
++		const owned = isSplyceOwned(this);
++		const check = () => {
++			if (this._persistenceUncertain) persistenceUnavailable();
++			signal?.throwIfAborted();
++			if (owned) assertSplycePersistence(this);
++		};
++		try {
++			check();
++			const previousFile = this.sessionFile;
++			const previousVersion = this._persistenceFileVersion;
++			const checkPreviousFile = () => {
++				if (owned && this.persist && this.flushed && previousFile)
++					assertPersistenceFileVersion(previousFile, previousVersion);
++			};
++			checkPreviousFile();
++			const previous = persistenceSnapshot(this.fileEntries);
++			const previousSerialized = previous.length ? serializePersistence(previous) : "";
++			const previousBytes = this._persistenceBytes ?? previousSerialized;
++			const draft = new SessionManager(
++				this.cwd,
++				this.sessionDir,
++				undefined,
++				this.persist,
++				undefined,
++				undefined,
++				true,
++			);
++			const plan: PersistenceStage = { active: true, write: "none", existingFile: false };
++			persistenceStages.set(draft, plan);
++			draft.fileEntries = persistenceSnapshot(previous);
++			draft.sessionId = this.sessionId;
++			draft.sessionFile = this.sessionFile;
++			draft.flushed = this.flushed;
++			draft._buildIndex();
++			draft.leafId = this.leafId;
++			const revocable = Proxy.revocable(draft, {});
++			persistenceStages.set(revocable.proxy, plan);
++			let result: T;
++			let entries: FileEntry[];
++			let resultSnapshot: T;
++			try {
++				if (owned) ownedPersistenceStageDepth++;
++				result = stage(revocable.proxy);
++				if (result && (typeof result === "object" || typeof result === "function") && "then" in result) {
++					if (result instanceof Promise) void Promise.prototype.then.call(result, undefined, () => undefined);
++					persistenceUnavailable();
++				}
++				entries = persistenceSnapshot(draft.fileEntries);
++				resultSnapshot = persistenceSnapshot(result);
++			} finally {
++				if (owned) ownedPersistenceStageDepth--;
++				plan.active = false;
++				revocable.revoke();
++			}
++			if (entries.length === 0 || entries[0]?.type !== "session") persistenceUnavailable();
++			const serialized = serializePersistence(entries);
++			const finalState = persistenceSnapshot({
++				sessionFile: draft.sessionFile,
++				sessionDir: draft.sessionDir,
++				sessionId: draft.sessionId,
++				cwd: draft.cwd,
++				persist: draft.persist,
++				leafId: draft.leafId,
++				flushed: draft.flushed,
++				write: plan.write,
++				existingFile: plan.existingFile,
++				target: plan.target,
++			});
++			const { sessionFile, sessionDir, sessionId, cwd, persist, leafId, existingFile } = finalState;
++			if (
++				(sessionFile !== undefined && typeof sessionFile !== "string") ||
++				typeof sessionDir !== "string" ||
++				typeof sessionId !== "string" ||
++				typeof cwd !== "string" ||
++				typeof persist !== "boolean" ||
++				typeof finalState.flushed !== "boolean" ||
++				(leafId !== null && !entries.some((entry) => entry.id === leafId)) ||
++				(finalState.target !== undefined && finalState.target !== sessionFile)
++			)
++				persistenceUnavailable();
++			let write = finalState.write;
++			let flushed = finalState.flushed;
++			if (persist && flushed && serialized !== previousSerialized && write === "none") write = "rewrite";
++			const appendOnly =
++				owned &&
++				this._persistenceQualified &&
++				this.flushed &&
++				write === "append" &&
++				sessionFile === this.sessionFile &&
++				entries.length > previous.length &&
++				serializePersistence(entries.slice(0, previous.length)) === previousSerialized;
++			const safeEntryLines = appendOnly ? previousBytes.slice(0, -1).split("\n") : [];
++			if (appendOnly && safeEntryLines.length !== previous.length) persistenceUnavailable();
++			for (const entry of entries.slice(appendOnly ? previous.length : 0)) {
++				const line = JSON.stringify(entry);
++				if (owned) assertPersistenceEntrySize(line);
++				safeEntryLines.push(owned ? await sanitizeSplycePersistence(this, line, signal) : line);
++				check();
++			}
++			const safe = `${safeEntryLines.join("\n")}\n`;
++			check();
++			const safeEntries = parseSanitizedPersistence(safe, entries);
++			if (persist && flushed && safe !== previousSerialized && write === "none") write = "rewrite";
++			if (owned && existingFile && plan.fileVersion?.bytes === safe) write = "none";
++			let safeResult = resultSnapshot;
++			if (resultSnapshot !== undefined) {
++				const projection = projectPersistenceResult(resultSnapshot, safeEntries);
++				if (isCommittedEntryResult(resultSnapshot, safeEntries)) {
++					safeResult = mapPersistenceResult(resultSnapshot, projection, safeEntries);
++				} else {
++					const resultJson = JSON.stringify(projection);
++					if (owned) assertPersistenceEntrySize(resultJson);
++					const safeResultJson = owned ? await sanitizeSplycePersistence(this, resultJson, signal) : resultJson;
++					check();
++					safeResult = JSON.parse(safeResultJson) as T;
++					assertSanitizedShape(projection, safeResult);
++					safeResult = mapPersistenceResult(resultSnapshot, safeResult, safeEntries);
++				}
++			}
++			const sameFile = sessionFile === this.sessionFile;
++			const safeLines = safe.split("\n");
++			const safePrefix = `${safeLines.slice(0, previous.length).join("\n")}\n`;
++			check();
++			const checkFiles = () => {
++				checkPreviousFile();
++				if (owned && existingFile && plan.fileReadPath)
++					assertPersistenceFileVersion(plan.fileReadPath, plan.fileVersion);
++			};
++			// This is optimistic validation, not a cross-process exclusive writer lease.
++			checkFiles();
++			if (persist && sessionDir && !existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
++			if (persist && sessionFile && write !== "none") {
++				if (write === "append" && sameFile && this.flushed && safePrefix === previousBytes) {
++					try {
++						appendFileSync(sessionFile, safeLines.slice(previous.length).join("\n"));
++					} catch {
++						// An append may have reached disk partially; never retry it on this state.
++						this._persistenceUncertain = true;
++						persistenceUnavailable();
++					}
++				} else if ((sameFile && this.flushed) || existingFile) {
++					const temporary = join(dirname(sessionFile), `.splyce-persistence-${randomUUID()}.tmp`);
++					let created = false;
++					let replacing = false;
++					try {
++						const fd = openSync(temporary, "wx");
++						created = true;
++						try {
++							writeFileSync(fd, safe);
++						} finally {
++							closeSync(fd);
++						}
++						check();
++						checkFiles();
++						replacing = true;
++						renameSync(temporary, sessionFile);
++						created = false;
++					} catch {
++						if (replacing) this._persistenceUncertain = true;
++						persistenceUnavailable();
++					} finally {
++						if (created) unlinkSync(temporary);
++					}
++				} else {
++					let fd: number | undefined;
++					try {
++						fd = openSync(sessionFile, "wx");
++						try {
++							writeFileSync(fd, safe);
++						} finally {
++							closeSync(fd);
++						}
++					} catch {
++						if (fd !== undefined) this._persistenceUncertain = true;
++						persistenceUnavailable();
++					}
++				}
++				flushed = true;
++			}
++			let committedVersion: PersistenceFileVersion | undefined;
++			if (owned && persist && flushed && sessionFile) {
++				committedVersion = persistenceFileVersion(sessionFile);
++				if (!committedVersion || committedVersion.bytes !== safe) {
++					this._persistenceUncertain = true;
++					persistenceUnavailable();
++				}
++			}
++			this.fileEntries = safeEntries;
++			this.sessionId = sessionId;
++			this.sessionFile = sessionFile;
++			this.sessionDir = sessionDir;
++			this.cwd = cwd;
++			this.persist = persist;
++			this.flushed = flushed;
++			this._persistenceQualified = owned;
++			this._persistenceBytes = safe;
++			this._persistenceFileVersion = committedVersion;
++			this._publishIndex();
++			this.leafId = leafId;
++			return safeResult;
++		} catch (error) {
++			return persistenceFailure(error);
++		}
++	}
++
+ 	/** Switch to a different session file (used for resume and branching) */
+ 	setSessionFile(sessionFile: string): void {
++		this._assertMutationAllowed();
+ 		this._setSessionFile(sessionFile);
+ 	}
+ 
+ 	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
++		this._assertMutationAllowed();
++		const staged = persistenceStages.get(this);
++		if (staged?.target !== undefined && staged.target !== resolvePath(sessionFile)) persistenceUnavailable();
+ 		this.sessionFile = resolvePath(sessionFile);
++		if (staged && staged.fileReadPath === undefined) {
++			staged.fileReadPath = this.sessionFile;
++			staged.fileVersion = persistenceFileVersion(this.sessionFile);
++		}
+ 		if (existsSync(this.sessionFile)) {
+-			const entries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
++			if (staged) staged.existingFile = true;
++			const entries = preloadedFileEntries ?? readEntriesFromFile(this.sessionFile, !staged);
++			if (staged) assertPersistenceFileVersion(this.sessionFile, staged.fileVersion);
+ 
+ 			// If file was empty, initialize it with a valid session header. If it was
+ 			// non-empty but did not parse as a pi session, fail without modifying it.
+@@ -1040,6 +1569,7 @@ export class SessionManager {
+ 				}
+ 				this.newSession();
+ 				this.sessionFile = explicitPath;
++				if (staged) staged.existingFile = true;
+ 				this._rewriteFile();
+ 				this.flushed = true;
+ 				return;
+@@ -1047,6 +1577,7 @@ export class SessionManager {
+ 
+ 			this._loadEntries(entries);
+ 			this.flushed = true;
++			if (staged) this._planWrite("rewrite");
+ 		} else {
+ 			const explicitPath = this.sessionFile;
+ 			this.newSession();
+@@ -1055,6 +1586,13 @@ export class SessionManager {
+ 	}
+ 
+ 	newSession(options?: NewSessionOptions): string | undefined {
++		this._assertMutationAllowed();
++		const staged = persistenceStages.get(this);
++		if (staged) {
++			if (staged.target !== undefined) persistenceUnavailable();
++			staged.write = "none";
++			staged.existingFile = false;
++		}
+ 		if (options?.id !== undefined) {
+ 			assertValidSessionId(options.id);
+ 		}
+@@ -1083,6 +1621,7 @@ export class SessionManager {
+ 	}
+ 
+ 	private _loadEntries(entries: FileEntry[], options?: NewSessionOptions): void {
++		this._assertMutationAllowed();
+ 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
+ 
+ 		if (header) {
+@@ -1101,6 +1640,11 @@ export class SessionManager {
+ 	}
+ 
+ 	private _buildIndex(): void {
++		this._assertMutationAllowed();
++		this._publishIndex();
++	}
++
++	private _publishIndex(): void {
+ 		this.byId.clear();
+ 		this.labelsById.clear();
+ 		this.labelTimestampsById.clear();
+@@ -1122,7 +1666,13 @@ export class SessionManager {
+ 	}
+ 
+ 	private _rewriteFile(): void {
++		this._assertMutationAllowed();
+ 		if (!this.persist || !this.sessionFile) return;
++		const staged = persistenceStages.get(this);
++		if (staged) {
++			this._planWrite("rewrite");
++			return;
++		}
+ 		const fd = openSync(this.sessionFile, "w");
+ 		try {
+ 			for (const entry of this.fileEntries) {
+@@ -1170,7 +1720,17 @@ export class SessionManager {
+ 	}
+ 
+ 	_persist(entry: SessionEntry): void {
++		this._assertMutationAllowed();
+ 		if (!this.persist || !this.sessionFile) return;
++		const staged = persistenceStages.get(this);
++		if (staged) {
++			if (!this.flushed) {
++				if (!this._hasConversation()) return;
++				this._planWrite("rewrite");
++				this.flushed = true;
++			} else this._planWrite("append");
++			return;
++		}
+ 
+ 		if (!this.flushed) {
+ 			if (!this._hasConversation()) return;
+@@ -1189,6 +1749,7 @@ export class SessionManager {
+ 	}
+ 
+ 	private _appendEntry(entry: SessionEntry): void {
++		this._assertMutationAllowed();
+ 		this.fileEntries.push(entry);
+ 		this.byId.set(entry.id, entry);
+ 		this.leafId = entry.id;
+@@ -1406,11 +1967,11 @@ export class SessionManager {
+ 	}
+ 
+ 	getLeafEntry(): SessionEntry | undefined {
+-		return this.leafId ? this.byId.get(this.leafId) : undefined;
++		return this._readSnapshot(this.leafId ? this.byId.get(this.leafId) : undefined);
+ 	}
+ 
+ 	getEntry(id: string): SessionEntry | undefined {
+-		return this.byId.get(id);
++		return this._readSnapshot(this.byId.get(id));
+ 	}
+ 
+ 	/**
+@@ -1423,7 +1984,7 @@ export class SessionManager {
+ 				children.push(entry);
+ 			}
+ 		}
+-		return children;
++		return this._readSnapshot(children);
+ 	}
+ 
+ 	/**
+@@ -1475,7 +2036,7 @@ export class SessionManager {
+ 			current = current.parentId ? this.byId.get(current.parentId) : undefined;
+ 		}
+ 		path.reverse();
+-		return path;
++		return this._readSnapshot(path);
+ 	}
+ 
+ 	/**
+@@ -1483,7 +2044,7 @@ export class SessionManager {
+ 	 * Uses tree traversal from current leaf.
+ 	 */
+ 	buildContextEntries(): SessionEntry[] {
+-		return buildContextEntries(this.getEntries(), this.leafId, this.byId);
++		return this._readSnapshot(buildContextEntries(this.getEntries(), this.leafId, this.byId));
+ 	}
+ 
+ 	/**
+@@ -1491,7 +2052,7 @@ export class SessionManager {
+ 	 * Uses tree traversal from current leaf.
+ 	 */
+ 	buildSessionProjection(): SessionProjection {
+-		return buildSessionProjection(this.getEntries(), this.leafId, this.byId);
++		return this._readSnapshot(buildSessionProjection(this.getEntries(), this.leafId, this.byId));
+ 	}
+ 
+ 	buildSessionContext(): SessionContext {
+@@ -1504,7 +2065,7 @@ export class SessionManager {
+ 	 */
+ 	getHeader(): SessionHeader | null {
+ 		const h = this.fileEntries.find((e) => e.type === "session");
+-		return h ? (h as SessionHeader) : null;
++		return this._readSnapshot(h ? (h as SessionHeader) : null);
+ 	}
+ 
+ 	/** Number of session entries (excludes header), without copying them like `getEntries()`. */
+@@ -1518,7 +2079,7 @@ export class SessionManager {
+ 	 * change the leaf pointer. Entries cannot be modified or deleted.
+ 	 */
+ 	getEntries(): SessionEntry[] {
+-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
++		return this._readSnapshot(this.fileEntries.filter((e): e is SessionEntry => e.type !== "session"));
+ 	}
+ 
+ 	/**
+@@ -1577,6 +2138,7 @@ export class SessionManager {
+ 	 * are not modified or deleted.
+ 	 */
+ 	branch(branchFromId: string): void {
++		this._assertMutationAllowed();
+ 		if (!this.byId.has(branchFromId)) {
+ 			throw new Error(`Entry ${branchFromId} not found`);
+ 		}
+@@ -1589,6 +2151,7 @@ export class SessionManager {
+ 	 * Use this when navigating to re-edit the first user message.
+ 	 */
+ 	resetLeaf(): void {
++		this._assertMutationAllowed();
+ 		this.leafId = null;
+ 	}
+ 
+@@ -1604,6 +2167,7 @@ export class SessionManager {
+ 		fromHook?: boolean,
+ 		usage?: Usage,
+ 	): string {
++		this._assertMutationAllowed();
+ 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
+ 			throw new Error(`Entry ${branchFromId} not found`);
+ 		}
+@@ -1630,6 +2194,8 @@ export class SessionManager {
+ 	 * Returns the new session file path, or undefined if not persisting.
+ 	 */
+ 	createBranchedSession(leafId: string): string | undefined {
++		this._assertMutationAllowed();
++		if (persistenceStages.get(this)?.target !== undefined) persistenceUnavailable();
+ 		const previousSessionFile = this.sessionFile;
+ 		const path = this.getBranch(leafId);
+ 		if (path.length === 0) {
+@@ -1712,6 +2278,11 @@ export class SessionManager {
+ 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+ 			this.sessionId = newSessionId;
+ 			this.sessionFile = newSessionFile;
++			const staged = persistenceStages.get(this);
++			if (staged) {
++				staged.write = "none";
++				staged.existingFile = false;
++			}
+ 			this._buildIndex();
+ 
+ 			// Use the same rule as _persist(): write now if the branched path already
+@@ -1752,7 +2323,65 @@ export class SessionManager {
+ 	 * @param cwd Working directory (stored in session header)
+ 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
+ 	 */
++	static async createOwned(
++		cwd: string,
++		bind: (manager: SessionManager) => void,
++		sessionDir?: string,
++		options?: NewSessionOptions,
++	): Promise<SessionManager> {
++		if (ownedPersistenceStageDepth > 0) persistenceUnavailable();
++		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDirPath(cwd);
++		const manager = new SessionManager(cwd, dir, undefined, true, undefined, undefined, true);
++		try {
++			bind(manager);
++			assertSplycePersistence(manager);
++			await manager.withPersistence((draft) => draft.newSession(options));
++			return manager;
++		} catch (error) {
++			return persistenceFailure(error);
++		}
++	}
++
++	/** Open and migrate only after native ownership is bound; loading never repairs ahead of redaction. */
++	static async openOwned(
++		path: string,
++		bind: (manager: SessionManager) => void,
++		sessionDir?: string,
++		cwdOverride?: string,
++	): Promise<SessionManager> {
++		if (ownedPersistenceStageDepth > 0) persistenceUnavailable();
++		const resolvedPath = resolvePath(path);
++		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
++		const manager = new SessionManager(
++			cwdOverride ?? process.cwd(),
++			dir,
++			undefined,
++			true,
++			undefined,
++			undefined,
++			true,
++		);
++		try {
++			bind(manager);
++			assertSplycePersistence(manager);
++			await manager.withPersistence((draft) => {
++				const plan = persistenceStages.get(draft);
++				if (!plan) persistenceUnavailable();
++				plan.fileReadPath = resolvedPath;
++				plan.fileVersion = persistenceFileVersion(resolvedPath);
++				const entries = readEntriesFromFile(resolvedPath, false);
++				const header = entries.find((entry): entry is SessionHeader => entry.type === "session");
++				draft.cwd = resolvePath(cwdOverride ?? (header ? getSessionHeaderCwd(header) : undefined) ?? process.cwd());
++				draft._setSessionFile(resolvedPath, entries);
++			});
++			return manager;
++		} catch (error) {
++			return persistenceFailure(error);
++		}
++	}
++
+ 	static create(cwd: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
++		if (ownedPersistenceStageDepth > 0) persistenceUnavailable();
+ 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
+ 		return new SessionManager(cwd, dir, undefined, true, options);
+ 	}
+@@ -1764,6 +2393,7 @@ export class SessionManager {
+ 	 * @param cwdOverride Optional cwd override instead of the session header cwd.
+ 	 */
+ 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
++		if (ownedPersistenceStageDepth > 0) persistenceUnavailable();
+ 		const resolvedPath = resolvePath(path);
+ 		let header: SessionHeader | null = null;
+ 		let preloadedFileEntries: FileEntry[] | undefined;
+@@ -1791,6 +2421,7 @@ export class SessionManager {
+ 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
+ 	 */
+ 	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
++		if (ownedPersistenceStageDepth > 0) persistenceUnavailable();
+ 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
+ 		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
+ 		const mostRecent = findMostRecentSession(dir, filterCwd ? cwd : undefined);
+@@ -1818,6 +2449,7 @@ export class SessionManager {
+ 		sessionDir?: string,
+ 		options?: NewSessionOptions,
+ 	): SessionManager {
++		if (ownedPersistenceStageDepth > 0) persistenceUnavailable();
+ 		const resolvedSourcePath = resolvePath(sourcePath);
+ 		const resolvedTargetCwd = resolvePath(targetCwd);
+ 		const sourceEntries = loadEntriesFromFile(resolvedSourcePath);
+diff --git a/vendor/pi/packages/coding-agent/src/extensions/codemode/execute.ts b/vendor/pi/packages/coding-agent/src/extensions/codemode/execute.ts
+index b3635999f7c8bcd73253f3813149ee18a5cea8a7..d79941811e320fbe91a8b2bd03a52744ca522438 100644
+--- a/vendor/pi/packages/coding-agent/src/extensions/codemode/execute.ts
++++ b/vendor/pi/packages/coding-agent/src/extensions/codemode/execute.ts
+@@ -618,7 +618,7 @@ export async function executeCodemode(
+ 	if (result.ok) {
+ 		const { set, delete: deleted } = result.storeWrites;
+ 		if (Object.keys(set).length > 0 || deleted.length > 0) {
+-			options.appendEntry?.(CODEMODE_STORE_ENTRY_TYPE, { set, delete: deleted });
++			await options.appendEntry?.(CODEMODE_STORE_ENTRY_TYPE, { set, delete: deleted });
+ 		}
+ 		// pi extension: a returned value is appended like text().
+ 		if (result.value !== undefined) scriptOutput.push({ type: "text", text: valueText(result.value) });
+diff --git a/vendor/pi/packages/coding-agent/src/extensions/codemode/tool.ts b/vendor/pi/packages/coding-agent/src/extensions/codemode/tool.ts
+index b55a117a7d2ec38d882439f0a16ad59676d46530..a938cc39aba3de7f0620619ab11e34b3dfa83841 100644
+--- a/vendor/pi/packages/coding-agent/src/extensions/codemode/tool.ts
++++ b/vendor/pi/packages/coding-agent/src/extensions/codemode/tool.ts
+@@ -66,7 +66,7 @@ export interface CodemodeToolOptions {
+ 	 * Persists `store()` writes as a session custom entry. Without it, writes last only for the
+ 	 * current script; `load()` still reads entries already on the branch.
+ 	 */
+-	appendEntry?: (customType: string, data: CodemodeStoreEntryData) => void;
++	appendEntry?: (customType: string, data: CodemodeStoreEntryData) => Promise<void>;
+ 	/** How the tool presents the loadout while active (the `codemode.mode` setting). Default: `on`. */
+ 	getMode?: () => CodemodeMode;
+ 	/** Token budget for tool declarations in the description. Default: {@link DEFAULT_CODEMODE_INLINE_BUDGET}. */
+diff --git a/vendor/pi/packages/coding-agent/src/modes/interactive/bug-report.ts b/vendor/pi/packages/coding-agent/src/modes/interactive/bug-report.ts
+index 51034e0e30a4a91803732ec351d806fa1ae13bcc..c2fbbff3e838e5e8cacced9f7f760d703a513a21 100644
+--- a/vendor/pi/packages/coding-agent/src/modes/interactive/bug-report.ts
++++ b/vendor/pi/packages/coding-agent/src/modes/interactive/bug-report.ts
+@@ -16,6 +16,7 @@ import { clearCrashLog, readCrashLog } from "../../core/crash-log.ts";
+ import type { KeybindingsManager } from "../../core/keybindings.ts";
+ import { getRadiusGatewayUrl, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
+ import { serializeSessionBranch } from "../../core/session-export.ts";
++import { assertUnownedSessionExport } from "../../core/session-manager.ts";
+ import { BorderedLoader } from "./components/bordered-loader.ts";
+ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
+ import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
+@@ -48,6 +49,7 @@ const TRANSCRIPT_NOTE =
+ 
+ /** Run the `/bug` flow: consent, optional summary, then upload or export. */
+ export async function reportBug(context: BugReportContext, initialHint?: string): Promise<void> {
++	assertUnownedSessionExport(context.session.sessionManager);
+ 	const options = await promptForOptions(context, initialHint);
+ 	if (!options) {
+ 		context.showStatus("Bug report cancelled");
+diff --git a/vendor/pi/packages/coding-agent/test/extensions-runner.test.ts b/vendor/pi/packages/coding-agent/test/extensions-runner.test.ts
+index 7c4a5f4289d25274c1cec97b2ccab2c674776763..2b0f340cc61ada5c407ad4552c504ec17e6be0ff 100644
+--- a/vendor/pi/packages/coding-agent/test/extensions-runner.test.ts
++++ b/vendor/pi/packages/coding-agent/test/extensions-runner.test.ts
+@@ -80,12 +80,12 @@ describe("ExtensionRunner", () => {
+ 	};
+ 
+ 	const extensionActions: ExtensionActions = {
+-		sendMessage: () => {},
+-		sendUserMessage: () => {},
+-		appendEntry: () => {},
+-		setSessionName: () => {},
++		sendMessage: async () => {},
++		sendUserMessage: async () => {},
++		appendEntry: async () => {},
++		setSessionName: async () => {},
+ 		getSessionName: () => undefined,
+-		setLabel: () => {},
++		setLabel: async () => {},
+ 		getActiveTools: () => [],
+ 		getAllTools: () => [],
+ 		getSettings: () => ({}),
+@@ -94,7 +94,7 @@ describe("ExtensionRunner", () => {
+ 		getCommands: () => [],
+ 		setModel: async () => false,
+ 		getThinkingLevel: () => "off",
+-		setThinkingLevel: () => {},
++		setThinkingLevel: async () => {},
+ 	};
+ 
+ 	const extensionContextActions: ExtensionContextActions = {

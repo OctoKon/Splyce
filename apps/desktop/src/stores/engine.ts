@@ -1,3 +1,16 @@
+import {
+  ModelsListError,
+  validateModelsListRequest,
+  validateModelsListResult,
+  type ModelsListResult,
+} from "@splyce/pi/model-data";
+import {
+  PageReadError,
+  type PageReadOp,
+  type PageReadResults,
+  validatePageReadRequest,
+  validatePageReadResult,
+} from "@splyce/pi/page-data";
 /**
  * TD-08: Desktop Engine Store and Native Bridge
  *
@@ -13,14 +26,25 @@
  */
 
 import {
-  PROTOCOL_VERSION,
   type CommandOp,
   type CommandPayloads,
   type Handshake,
+  type PortAvailability,
+  PROTOCOL_VERSION,
   type SplyceCommand,
   type SplyceEvent,
   validateHandshake,
+  validatePortAvailability,
 } from "@splyce/pi/contracts";
+import { Channel, invoke as invokeNative } from "@tauri-apps/api/core";
+
+interface EngineLifecycleEvent {
+  protocolVersion: number;
+  kind: "engine_exited";
+  expected: boolean;
+  exitCode: number | null;
+  cleanupComplete: boolean;
+}
 
 export type EngineConnectionState =
   "disconnected" | "connecting" | "unavailable" | "ready" | "busy" | "error";
@@ -49,6 +73,16 @@ export interface EngineStore {
     payload: CommandPayloads[O],
     context: CommandContext,
   ) => Promise<unknown>;
+  readPage: <O extends PageReadOp>(
+    op: O,
+    requestId: string,
+    payload: { workspaceId: string; query?: string },
+  ) => Promise<PageReadResults[O]>;
+  listModels: (
+    workspaceId: string,
+    profileId: string,
+    requestId: string,
+  ) => Promise<ModelsListResult>;
   ackCursor: (sessionId: string, seq: number) => Promise<void>;
   getCursor: (sessionId: string) => number;
   resync: (context: CommandContext, fromSeq: number) => Promise<void>;
@@ -58,6 +92,31 @@ export interface EngineStore {
 // Internal reactive state
 let currentState: EngineConnectionState = "disconnected";
 let lastHandshake: Handshake | null = null;
+let currentPorts: PortAvailability | null = null;
+let epoch = 0;
+const portListeners = new Set<(ports: PortAvailability | null) => void>();
+
+function notifyPorts(ports: PortAvailability | null) {
+  currentPorts = ports;
+  for (const listener of portListeners) listener(ports);
+}
+
+export const portAvailability = {
+  subscribe(fn: (ports: PortAvailability | null) => void): Unsubscribe {
+    fn(currentPorts);
+    portListeners.add(fn);
+    return () => portListeners.delete(fn);
+  },
+};
+
+function projectPorts(ports: PortAvailability): boolean {
+  return (
+    lastHandshake?.readiness.state === "ready" &&
+    ports.generation &&
+    ports.provider &&
+    ports.workspace
+  );
+}
 const stateListeners = new Set<(state: EngineConnectionState) => void>();
 const eventListeners = new Set<EventCallback>();
 const sessionCursors = new Map<string, number>();
@@ -70,43 +129,25 @@ function notifyState(next: EngineConnectionState) {
   }
 }
 
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 async function getTauriInvoke(): Promise<
   ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null
 > {
-  if (typeof window === "undefined") return null;
-  try {
-    // Dynamic import to satisfy @tauri-apps/api/core module resolution in packaged Tauri WebView
-    const core = (await import("@tauri-apps/api/core" as string)) as {
-      invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
-    };
-    return core.invoke;
-  } catch {
-    if (typeof window !== "undefined") {
-      const win = window as unknown as {
-        __TAURI_INTERNALS__?: {
-          invoke?: (
-            cmd: string,
-            args?: Record<string, unknown>,
-          ) => Promise<unknown>;
-        };
-        __TAURI__?: {
-          core?: {
-            invoke: (
-              cmd: string,
-              args?: Record<string, unknown>,
-            ) => Promise<unknown>;
-          };
-        };
-      };
-      if (win.__TAURI_INTERNALS__?.invoke) {
-        return win.__TAURI_INTERNALS__.invoke;
-      }
-      if (win.__TAURI__?.core?.invoke) {
-        return win.__TAURI__.core.invoke;
-      }
-    }
-    return null;
-  }
+  return isTauriRuntime() ? invokeNative : null;
+}
+
+function handleLifecycle(event: EngineLifecycleEvent): boolean {
+  if (event.protocolVersion !== PROTOCOL_VERSION) return false;
+  if (event.kind !== "engine_exited") return false;
+  epoch++;
+  lastHandshake = null;
+  notifyPorts(null);
+  notifyState("disconnected");
+  for (const dispose of [...activeSubscriptions.values()]) dispose();
+  return true;
 }
 
 /**
@@ -124,6 +165,9 @@ export const connectionState = {
  * Perform native handshake and establish verified readiness
  */
 export async function handshake(): Promise<Handshake> {
+  const handshakeEpoch = ++epoch;
+  lastHandshake = null;
+  notifyPorts(null);
   notifyState("connecting");
   const invokeTauri = await getTauriInvoke();
   if (!invokeTauri) {
@@ -131,21 +175,29 @@ export async function handshake(): Promise<Handshake> {
     throw new Error("TAURI_IPC_UNAVAILABLE: Native backend bridge not found");
   }
 
+  const lifecycle = new Channel<EngineLifecycleEvent>();
+  let exited = false;
+  lifecycle.onmessage = (event) => {
+    if (handshakeEpoch === epoch) exited = handleLifecycle(event) || exited;
+  };
+
   try {
     const raw = await invokeTauri("handshake", {
       protocolVersion: PROTOCOL_VERSION,
       schemaVersion: 1,
+      onLifecycle: lifecycle,
     });
     const verified = validateHandshake(raw);
-    lastHandshake = verified;
-    if (verified.readiness.state === "ready") {
-      notifyState("ready");
-    } else {
-      notifyState("unavailable");
+    if (!exited && handshakeEpoch === epoch) {
+      lastHandshake = verified;
+      const ports = validatePortAvailability(verified.readiness.ports);
+      notifyPorts(ports);
+      notifyState(projectPorts(ports) ? "ready" : "unavailable");
     }
     return verified;
   } catch (err) {
-    notifyState("error");
+    lifecycle.onmessage = () => {};
+    if (!exited && handshakeEpoch === epoch) notifyState("error");
     throw err;
   }
 }
@@ -162,6 +214,43 @@ export function onEvent(callback: EventCallback): Unsubscribe {
  * Internal/testing event dispatcher used by Tauri IPC or fixture harnesses
  */
 export function dispatchEngineEvent(event: SplyceEvent): void {
+  if (lastHandshake && event.kind === "engine.status") {
+    try {
+      const payload = event.payload;
+      if (
+        event.protocolVersion !== PROTOCOL_VERSION ||
+        !payload ||
+        !["ready", "busy", "stopping", "stopped"].includes(payload.state) ||
+        !Number.isSafeInteger(payload.activeWorkers) ||
+        payload.activeWorkers < 0 ||
+        Object.keys(payload).some(
+          (key) => !["state", "activeWorkers", "ports"].includes(key),
+        )
+      )
+        throw new Error("Invalid engine status");
+      const ports = validatePortAvailability(payload.ports);
+      if (
+        lastHandshake.readiness.state !== "ready" &&
+        Object.values(ports).some(Boolean)
+      )
+        throw new Error("Invalid engine status");
+      notifyPorts(ports);
+      notifyState(
+        projectPorts(ports) && payload.state === "ready"
+          ? "ready"
+          : projectPorts(ports) && payload.state === "busy"
+            ? "busy"
+            : "unavailable",
+      );
+    } catch {
+      lastHandshake = null;
+      notifyPorts(null);
+      notifyState("error");
+      return;
+    }
+  } else if (event.kind === "engine.status" && !lastHandshake) {
+    return;
+  }
   for (const listener of eventListeners) {
     listener(event);
   }
@@ -183,15 +272,30 @@ export async function subscribe(
   activeSubscriptions.get(sessionId)?.();
 
   const fromSeq = afterSeq ?? sessionCursors.get(sessionId) ?? 0;
-  await invokeTauri("subscribe", { sessionId, afterSeq: fromSeq });
+  const subscriptionEpoch = epoch;
+  const events = new Channel<SplyceEvent>();
+  events.onmessage = (event) => {
+    if (subscriptionEpoch === epoch) dispatchEngineEvent(event);
+  };
+  const lifecycle = new Channel<EngineLifecycleEvent>();
+  lifecycle.onmessage = (event) => {
+    if (subscriptionEpoch === epoch) handleLifecycle(event);
+  };
+  await invokeTauri("subscribe", {
+    sessionId,
+    afterSeq: fromSeq,
+    onEvent: events,
+    onLifecycle: lifecycle,
+  });
 
   let disposed = false;
   const dispose = () => {
     if (disposed) return;
     disposed = true;
-    // The native subscription ends with its channel (#61). Unsubscribing never
-    // reaches the engine as a cancel: cancel always means cancel the run.
+    events.onmessage = () => {};
+    lifecycle.onmessage = () => {};
     activeSubscriptions.delete(sessionId);
+    // Cancel stops a run; native subscription disposal has a separate contract.
   };
 
   activeSubscriptions.set(sessionId, dispose);
@@ -232,6 +336,117 @@ export async function invoke<O extends CommandOp>(
   });
 }
 
+export async function cancelSession(sessionId: string): Promise<void> {
+  const invokeTauri = await getTauriInvoke();
+  if (!invokeTauri) throw new Error("Native backend unavailable");
+  const result = await invokeTauri("cancel", { sessionId, reason: null });
+  if (
+    result === null ||
+    typeof result !== "object" ||
+    Array.isArray(result) ||
+    Object.keys(result).length !== 1 ||
+    (result as { canceled?: unknown }).canceled !== true
+  )
+    throw new Error("Cancellation unavailable");
+}
+
+/**
+ * Sessionless setup send. Mirrors the native `metadata` setup frame exactly:
+ * `send` with `{ op: command, payload: { frame, command, requestId, payload } }`.
+ */
+export async function sendSetup(
+  command: string,
+  requestId: string,
+  payload: object,
+): Promise<unknown> {
+  const invokeTauri = await getTauriInvoke();
+  if (!invokeTauri) {
+    throw new Error("TAURI_IPC_UNAVAILABLE: Native backend bridge not found");
+  }
+  return await invokeTauri("send", {
+    op: command,
+    payload: { frame: "setup", command, requestId, payload },
+  });
+}
+
+export async function readModels(
+  workspaceId: string,
+  profileId: string,
+  requestId: string,
+): Promise<ModelsListResult> {
+  const request = { requestId, workspaceId, profileId };
+  validateModelsListRequest(request);
+  let result: unknown;
+  try {
+    result = await sendSetup("models.list", requestId, request);
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? error.code
+        : undefined;
+    throw new ModelsListError(
+      code === "MODEL_CATALOG_INVALID" ||
+        code === "MODEL_CATALOG_DENIED" ||
+        code === "MODEL_CATALOG_TIMEOUT"
+        ? code
+        : "MODEL_CATALOG_UNAVAILABLE",
+    );
+  }
+  return validateModelsListResult(result);
+}
+
+export async function readPage<O extends PageReadOp>(
+  op: O,
+  requestId: string,
+  payload: { workspaceId: string; query?: string },
+): Promise<PageReadResults[O]> {
+  const request = { requestId, ...payload };
+  validatePageReadRequest(op, request);
+  let raw: unknown;
+  try {
+    raw = await sendSetup(op, requestId, request);
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? error.code
+        : undefined;
+    throw new PageReadError(
+      code === "PAGE_READ_INVALID" ? code : "PAGE_READ_UNAVAILABLE",
+    );
+  }
+  return validatePageReadResult(op, raw);
+}
+
+/** What the renderer keeps of an admitted workspace: never the path or selection ref. */
+export interface SelectedWorkspace {
+  readonly workspaceId: string;
+  readonly displayName: string;
+}
+
+/**
+ * Opens the native project chooser. `null` means the user cancelled. Only the
+ * workspace id and display name survive; anything malformed is rejected.
+ */
+export async function selectWorkspace(): Promise<SelectedWorkspace | null> {
+  const invokeTauri = await getTauriInvoke();
+  if (!invokeTauri) {
+    throw new Error("TAURI_IPC_UNAVAILABLE: Native backend bridge not found");
+  }
+  const raw = await invokeTauri("dialog_select_workspace");
+  if (raw === null) return null;
+  const workspace = (raw as { workspace?: unknown } | undefined)?.workspace as
+    { workspaceId?: unknown; displayName?: unknown } | undefined;
+  const { workspaceId, displayName } = workspace ?? {};
+  if (
+    typeof workspaceId !== "string" ||
+    workspaceId === "" ||
+    typeof displayName !== "string" ||
+    displayName.trim() === ""
+  )
+    throw new Error("Invalid workspace selection");
+  return { workspaceId, displayName };
+}
+
 /**
  * Acknowledge durable event sequence per session
  */
@@ -263,6 +478,8 @@ export const engine: EngineStore = {
   subscribe,
   onEvent,
   invoke,
+  readPage,
+  listModels: readModels,
   ackCursor,
   getCursor,
   resync,

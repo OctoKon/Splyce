@@ -12,7 +12,7 @@ import { createTurnStreamTransport } from "./turns";
 function started(sessionId: string, scopeId: string): SplyceEventEnvelope {
   return {
     schemaVersion: 1,
-    protocolVersion: 1,
+    protocolVersion: 2,
     recordId: "rec_1",
     eventId: `evt_${sessionId}_${scopeId}`,
     createdAt: "2026-10-26T00:00:00.000Z",
@@ -140,7 +140,7 @@ describe("session selection binding", () => {
     binding.dispose();
   });
 
-  it("ignores re-selecting the same session but restarts on A to B to A", async () => {
+  it("retains transcript history when reopening A after selecting B", async () => {
     clearSession();
     const { calls, transport, binding } = setup();
     selectSession({ sessionId: "s1", scopeId: "scopeA" });
@@ -153,11 +153,13 @@ describe("session selection binding", () => {
     expect(calls).toEqual(["subscribe s1 0"]);
     expect(transport.current("s1").runs.run_s1).toBeDefined();
 
-    // Deliberate: switching away and back drops the channel and replays from the cursor.
+    // Reopening keeps applied history and replays only subsequent events.
     selectSession({ sessionId: "s2", scopeId: "scopeA" });
     selectSession({ sessionId: "s1", scopeId: "scopeA" });
     await settle();
-    expect(calls.filter((c) => c === "subscribe s1 0")).toHaveLength(2);
+    expect(calls.filter((c) => c === "subscribe s1 0")).toHaveLength(1);
+    expect(calls).toContain("subscribe s1 1");
+    expect(transport.current("s1").runs.run_s1).toBeDefined();
     binding.dispose();
   });
 });

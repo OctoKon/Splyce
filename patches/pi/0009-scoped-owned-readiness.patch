@@ -1,0 +1,1602 @@
+diff --git a/vendor/pi/packages/agent/src/agent-loop.ts b/vendor/pi/packages/agent/src/agent-loop.ts
+index 0397096..32cea38 100644
+--- a/vendor/pi/packages/agent/src/agent-loop.ts
++++ b/vendor/pi/packages/agent/src/agent-loop.ts
+@@ -19,7 +19,14 @@ import {
+ 	validateToolArguments,
+ } from "@earendil-works/pi-ai";
+ import { requireSplyceToolAdmission } from "./splyce-admission.ts";
+-import { assertSplyceReady } from "./splyce-readiness.ts";
++import {
++	assertSameSplyceOwner,
++	assertSplyceLoopStream,
++	assertSplyceReady,
++	assertSplyceToolCurrent,
++	getSplyceToolImplementation,
++	inheritSplyceLoopConfig,
++} from "./splyce-readiness.ts";
+ import { getDefaultStreamFn } from "./stream-fn.ts";
+ import type {
+ 	AgentContext,
+@@ -53,7 +60,10 @@ export function agentLoop(
+ 	signal: AbortSignal | undefined,
+ 	streamFn: StreamFn,
+ ): EventStream<AgentEvent, AgentMessage[]> {
+-	assertSplyceReady();
++	assertSplyceReady(config);
++	assertSameSplyceOwner(config, config, "loop-config");
++	assertSplyceLoopStream(config, streamFn);
++	signal?.throwIfAborted();
+ 	const stream = createAgentStream();
+ 
+ 	void runAgentLoop(
+@@ -65,9 +75,12 @@ export function agentLoop(
+ 		},
+ 		signal,
+ 		streamFn,
+-	).then((messages) => {
+-		stream.end(messages);
+-	});
++	).then(
++		(messages) => {
++			stream.end(messages);
++		},
++		(error) => stream.fail(error),
++	);
+ 
+ 	return stream;
+ }
+@@ -86,7 +99,10 @@ export function agentLoopContinue(
+ 	signal: AbortSignal | undefined,
+ 	streamFn: StreamFn,
+ ): EventStream<AgentEvent, AgentMessage[]> {
+-	assertSplyceReady();
++	assertSplyceReady(config);
++	assertSameSplyceOwner(config, config, "loop-config");
++	assertSplyceLoopStream(config, streamFn);
++	signal?.throwIfAborted();
+ 	if (context.messages.length === 0) {
+ 		throw new Error("Cannot continue: no messages in context");
+ 	}
+@@ -105,9 +121,12 @@ export function agentLoopContinue(
+ 		},
+ 		signal,
+ 		streamFn,
+-	).then((messages) => {
+-		stream.end(messages);
+-	});
++	).then(
++		(messages) => {
++			stream.end(messages);
++		},
++		(error) => stream.fail(error),
++	);
+ 
+ 	return stream;
+ }
+@@ -120,7 +139,18 @@ export async function runAgentLoop(
+ 	signal: AbortSignal | undefined,
+ 	streamFn: StreamFn,
+ ): Promise<AgentMessage[]> {
+-	assertSplyceReady();
++	assertSplyceReady(config);
++	assertSameSplyceOwner(config, config, "loop-config");
++	assertSplyceLoopStream(config, streamFn);
++	signal?.throwIfAborted();
++	const nativeEmit = emit;
++	emit = async (event) => {
++		assertSplyceReady(config);
++		signal?.throwIfAborted();
++		await nativeEmit(event);
++		assertSplyceReady(config);
++		signal?.throwIfAborted();
++	};
+ 	const initialMessages = declareToolChanges(context, prompts);
+ 	const newMessages: AgentMessage[] = [...initialMessages];
+ 	const currentContext: AgentContext = {
+@@ -146,7 +176,18 @@ export async function runAgentLoopContinue(
+ 	signal: AbortSignal | undefined,
+ 	streamFn: StreamFn,
+ ): Promise<AgentMessage[]> {
+-	assertSplyceReady();
++	assertSplyceReady(config);
++	assertSameSplyceOwner(config, config, "loop-config");
++	assertSplyceLoopStream(config, streamFn);
++	signal?.throwIfAborted();
++	const nativeEmit = emit;
++	emit = async (event) => {
++		assertSplyceReady(config);
++		signal?.throwIfAborted();
++		await nativeEmit(event);
++		assertSplyceReady(config);
++		signal?.throwIfAborted();
++	};
+ 	if (context.messages.length === 0) {
+ 		throw new Error("Cannot continue: no messages in context");
+ 	}
+@@ -165,8 +206,28 @@ export async function runAgentLoopContinue(
+ 	return newMessages;
+ }
+ 
+-function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
+-	return new EventStream<AgentEvent, AgentMessage[]>(
++class AgentEventStream extends EventStream<AgentEvent, AgentMessage[]> {
++	private failure?: unknown;
++	private failed = false;
++	fail(error: unknown): void {
++		this.failure = error;
++		this.failed = true;
++		this.end([]);
++	}
++	override async result(): Promise<AgentMessage[]> {
++		const result = await super.result();
++		if (this.failed) throw this.failure;
++		return result;
++	}
++	override async *[Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
++		const iterator = super[Symbol.asyncIterator]();
++		yield* { [Symbol.asyncIterator]: () => iterator };
++		if (this.failed) throw this.failure;
++	}
++}
++
++function createAgentStream(): AgentEventStream {
++	return new AgentEventStream(
+ 		(event: AgentEvent) => event.type === "agent_end",
+ 		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
+ 	);
+@@ -196,10 +257,15 @@ async function runLoop(
+ 
+ 		// Inner loop: process tool calls and steering messages
+ 		while (hasMoreToolCalls || pendingMessages.length > 0) {
++			assertSplyceReady(config);
++			signal?.throwIfAborted();
+ 			let preparedMessages: AgentMessage[] = [];
+ 			if (lastCompletedTurn) {
+ 				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
++				assertSplyceReady(config);
++				signal?.throwIfAborted();
+ 				if (nextTurnSnapshot) {
++					const previousConfig = config;
+ 					currentContext = nextTurnSnapshot.context ?? currentContext;
+ 					preparedMessages = nextTurnSnapshot.messages ?? [];
+ 					config = {
+@@ -212,6 +278,7 @@ async function runLoop(
+ 									? undefined
+ 									: nextTurnSnapshot.thinkingLevel,
+ 					};
++					inheritSplyceLoopConfig(previousConfig, config);
+ 				}
+ 				// Preparation can be long-running (for example, compaction). Pick up steering
+ 				// queued while it ran. Only poll again if the earlier poll returned nothing;
+@@ -239,7 +306,10 @@ async function runLoop(
+ 				},
+ 				signal,
+ 			);
++			assertSplyceReady(config);
++			signal?.throwIfAborted();
+ 			if (requestUpdate) {
++				const previousConfig = config;
+ 				currentContext = requestUpdate.context ?? currentContext;
+ 				config = {
+ 					...config,
+@@ -251,6 +321,7 @@ async function runLoop(
+ 								? undefined
+ 								: requestUpdate.thinkingLevel,
+ 				};
++				inheritSplyceLoopConfig(previousConfig, config);
+ 			}
+ 
+ 			// Stream assistant response
+@@ -299,6 +370,8 @@ async function runLoop(
+ 				newMessages,
+ 			};
+ 			const decision = await config.finishTurn?.(lastCompletedTurn, signal);
++			assertSplyceReady(config);
++			signal?.throwIfAborted();
+ 			await emit({ type: "turn_end", message, toolResults });
+ 
+ 			if (decision?.action === "end") {
+@@ -315,6 +388,8 @@ async function runLoop(
+ 
+ 		// Agent would stop here. Check for follow-up messages.
+ 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
++		assertSplyceReady(config);
++		signal?.throwIfAborted();
+ 		if (followUpMessages.length > 0) {
+ 			// Set as pending so inner loop processes them
+ 			explicitContinuation = false;
+@@ -401,13 +476,19 @@ async function streamAssistantResponse(
+ 	streamFunction: StreamFn,
+ ): Promise<AssistantMessage> {
+ 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
++	assertSplyceReady(config);
++	signal?.throwIfAborted();
+ 	let messages = context.messages;
+ 	if (config.transformContext) {
+ 		messages = await config.transformContext(messages, signal);
++		assertSplyceReady(config);
++		signal?.throwIfAborted();
+ 	}
+ 
+ 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
+ 	const llmMessages = await config.convertToLlm(messages);
++	assertSplyceReady(config);
++	signal?.throwIfAborted();
+ 
+ 	const llmContext = normalizeContext({ messages: llmMessages });
+ 
+@@ -415,6 +496,9 @@ async function streamAssistantResponse(
+ 	const resolvedApiKey =
+ 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+ 
++	assertSplyceReady(config);
++	assertSplyceLoopStream(config, streamFunction);
++	signal?.throwIfAborted();
+ 	const response = await streamFunction(config.model, llmContext, {
+ 		...config,
+ 		apiKey: resolvedApiKey,
+@@ -428,6 +512,8 @@ async function streamAssistantResponse(
+ 	let addedPartial = false;
+ 
+ 	for await (const event of response) {
++		assertSplyceReady(config);
++		signal?.throwIfAborted();
+ 		switch (event.type) {
+ 			case "start":
+ 				partialMessage = event.partial;
+@@ -459,6 +545,8 @@ async function streamAssistantResponse(
+ 			case "done":
+ 			case "error": {
+ 				const finalMessage = await result();
++				assertSplyceReady(config);
++				signal?.throwIfAborted();
+ 				if (addedPartial) {
+ 					context.messages[context.messages.length - 1] = finalMessage;
+ 				} else {
+@@ -474,6 +562,8 @@ async function streamAssistantResponse(
+ 	}
+ 
+ 	const finalMessage = await result();
++	assertSplyceReady(config);
++	signal?.throwIfAborted();
+ 	if (addedPartial) {
+ 		context.messages[context.messages.length - 1] = finalMessage;
+ 	} else {
+@@ -528,6 +618,9 @@ async function executeToolCalls(
+ 	signal: AbortSignal | undefined,
+ 	emit: AgentEventSink,
+ ): Promise<ExecutedToolCallBatch> {
++	assertSplyceReady(config);
++	signal?.throwIfAborted();
++	for (const tool of currentContext.tools ?? []) assertSameSplyceOwner(config, tool, "tool");
+ 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+ 	const hasSequentialToolCall = toolCalls.some(
+ 		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
+@@ -731,6 +824,7 @@ async function prepareToolCall(
+ 	parentToolCallId?: string,
+ ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+ 	const tool = tools.find((t) => t.name === toolCall.name);
++	if (tool) assertSplyceToolCurrent(tool);
+ 	requireSplyceToolAdmission(tool).reserve(toolCall.id, toolCall.name, signal);
+ 	if (!tool) {
+ 		return {
+@@ -740,6 +834,7 @@ async function prepareToolCall(
+ 		};
+ 	}
+ 
++	assertSplyceToolCurrent(tool, signal);
+ 	let validatedArgs: unknown;
+ 	try {
+ 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
+@@ -753,13 +848,20 @@ async function prepareToolCall(
+ 		};
+ 	}
+ 	try {
+-		await requireSplyceToolAdmission(tool).prepare(toolCall.id, toolCall.name, validatedArgs, parentToolCallId, signal);
++		await requireSplyceToolAdmission(tool).prepare(
++			toolCall.id,
++			toolCall.name,
++			validatedArgs,
++			parentToolCallId,
++			signal,
++		);
+ 	} catch (error) {
+ 		requireSplyceToolAdmission(tool).discard(toolCall.id, signal?.aborted ? "canceled" : "denied");
+ 		throw error;
+ 	}
+ 	let hooksCompleted = false;
+ 	try {
++		assertSplyceToolCurrent(tool, signal);
+ 		if (signal?.aborted) {
+ 			return {
+ 				kind: "immediate",
+@@ -811,7 +913,8 @@ async function prepareToolCall(
+ 			isError: true,
+ 		};
+ 	} finally {
+-		if (!hooksCompleted) requireSplyceToolAdmission(tool).discard(toolCall.id, signal?.aborted ? "canceled" : "denied");
++		if (!hooksCompleted)
++			requireSplyceToolAdmission(tool).discard(toolCall.id, signal?.aborted ? "canceled" : "denied");
+ 	}
+ 	requireSplyceToolAdmission(tool).finish(toolCall.id, toolCall.name, validatedArgs, signal);
+ 	return {
+@@ -889,13 +992,20 @@ async function executePreparedToolCall(
+ 			const elapsed = () => Math.round(performance.now() - startedAt);
+ 
+ 			try {
+-				const result = await prepared.tool.execute(
++				signal?.throwIfAborted();
++				const result = await getSplyceToolImplementation(prepared.tool).call(
++					prepared.tool,
+ 					prepared.toolCall.id,
+ 					admittedArgs as never,
+ 					signal,
+ 					(partialResult) => {
+ 						if (!acceptingUpdates) return;
+-						updateEvents.push(Promise.resolve(onUpdate(partialResult)));
++						assertSplyceToolCurrent(prepared.tool, signal);
++						updateEvents.push(
++							Promise.resolve(onUpdate(partialResult)).then(() => {
++								assertSplyceToolCurrent(prepared.tool, signal);
++							}),
++						);
+ 					},
+ 				);
+ 				const durationMs = elapsed();
+@@ -931,6 +1041,7 @@ async function finalizeExecutedToolCall(
+ 	let isError = executed.isError;
+ 
+ 	if (config.afterToolCall) {
++		assertSplyceToolCurrent(prepared.tool, signal);
+ 		try {
+ 			const afterResult = await config.afterToolCall(
+ 				{
+@@ -943,6 +1054,7 @@ async function finalizeExecutedToolCall(
+ 				},
+ 				signal,
+ 			);
++			assertSplyceToolCurrent(prepared.tool, signal);
+ 			if (afterResult) {
+ 				// Structured content not replaced along with the content may no longer match it.
+ 				const structuredContent =
+diff --git a/vendor/pi/packages/agent/src/agent.ts b/vendor/pi/packages/agent/src/agent.ts
+index 2aab336..5657613 100644
+--- a/vendor/pi/packages/agent/src/agent.ts
++++ b/vendor/pi/packages/agent/src/agent.ts
+@@ -13,7 +13,12 @@ import {
+ 	toToolDeclaration,
+ } from "@earendil-works/pi-ai";
+ import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+-import { assertSplyceReady } from "./splyce-readiness.ts";
++import {
++	assertSplyceReady,
++	getSplyceAgentCallbacks,
++	inheritSplyceLoopConfig,
++	inheritSplyceOwner,
++} from "./splyce-readiness.ts";
+ import { getDefaultStreamFn } from "./stream-fn.ts";
+ import type {
+ 	AfterToolCallContext,
+@@ -261,6 +266,7 @@ export class Agent {
+ 		this.maxRetryDelayMs = runtimeOptions.maxRetryDelayMs;
+ 		this.toolExecution = runtimeOptions.toolExecution ?? "parallel";
+ 		this.identity = runtimeOptions.identity;
++		if (options) inheritSplyceOwner(options, this, "agent");
+ 	}
+ 
+ 	/**
+@@ -381,7 +387,8 @@ export class Agent {
+ 	async prompt(message: AgentMessage | AgentMessage[]): Promise<void>;
+ 	async prompt(input: string, images?: ImageContent[]): Promise<void>;
+ 	async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise<void> {
+-		assertSplyceReady();
++		assertSplyceReady(this);
++		getSplyceAgentCallbacks(this);
+ 		if (this.activeRun) {
+ 			throw new Error(
+ 				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
+@@ -393,7 +400,8 @@ export class Agent {
+ 
+ 	/** Continue from the current transcript. The last message must be a user or tool-result message. */
+ 	async continue(): Promise<void> {
+-		assertSplyceReady();
++		assertSplyceReady(this);
++		getSplyceAgentCallbacks(this);
+ 		if (this.activeRun) {
+ 			throw new Error("Agent is already processing. Wait for completion before continuing.");
+ 		}
+@@ -478,34 +486,52 @@ export class Agent {
+ 
+ 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
+ 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+-		return {
++		const callbacks = getSplyceAgentCallbacks(this);
++		const check = () => {
++			getSplyceAgentCallbacks(this);
++			this.signal?.throwIfAborted();
++		};
++		const guard = <T extends (...args: any[]) => any>(callback: T | undefined): T | undefined =>
++			callback &&
++			(((...args: Parameters<T>) => {
++				check();
++				const result = callback(...args);
++				if (result && typeof result.then === "function")
++					return Promise.resolve(result).then((value) => {
++						check();
++						return value;
++					});
++				check();
++				return result;
++			}) as T);
++		const config: AgentLoopConfig = {
+ 			model: this._state.model,
+ 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
+ 			sessionId: this.sessionId,
+-			onPayload: this.onPayload,
+-			onResponse: this.onResponse,
+-			onProviderStreamEvent: this.onProviderStreamEvent,
++			onPayload: guard(callbacks.onPayload),
++			onResponse: guard(callbacks.onResponse),
++			onProviderStreamEvent: guard(callbacks.onProviderStreamEvent),
+ 			transport: this.transport,
+ 			thinkingBudgets: this.thinkingBudgets,
+ 			maxRetryDelayMs: this.maxRetryDelayMs,
+ 			identity: this.identity,
+ 			toolExecution: this.toolExecution,
+-			beforeToolCall: this.beforeToolCall,
+-			afterToolCall: this.afterToolCall,
+-			finishTurn: this.finishTurn,
+-			prepareRequest: this.prepareRequest,
++			beforeToolCall: guard(callbacks.beforeToolCall),
++			afterToolCall: guard(callbacks.afterToolCall),
++			finishTurn: guard(callbacks.finishTurn),
++			prepareRequest: guard(callbacks.prepareRequest),
+ 			prepareNextTurn:
+-				this.prepareNextTurnWithContext || this.prepareNextTurn
++				callbacks.prepareNextTurnWithContext || callbacks.prepareNextTurn
+ 					? async (context) => {
+-							if (this.prepareNextTurnWithContext) {
+-								return await this.prepareNextTurnWithContext(context, this.signal);
++							if (callbacks.prepareNextTurnWithContext) {
++								return await guard(callbacks.prepareNextTurnWithContext)!(context, this.signal);
+ 							}
+-							return await this.prepareNextTurn?.(this.signal);
++							return await guard(callbacks.prepareNextTurn)?.(this.signal);
+ 						}
+ 					: undefined,
+-			convertToLlm: this.convertToLlm,
+-			transformContext: this.transformContext,
+-			getApiKey: this.getApiKey,
++			convertToLlm: guard(callbacks.convertToLlm)!,
++			transformContext: guard(callbacks.transformContext),
++			getApiKey: guard(callbacks.getApiKey),
+ 			getSteeringMessages: async () => {
+ 				if (skipInitialSteeringPoll) {
+ 					skipInitialSteeringPoll = false;
+@@ -515,6 +541,8 @@ export class Agent {
+ 			},
+ 			getFollowUpMessages: async () => this.followUpQueue.drain(),
+ 		};
++		inheritSplyceLoopConfig(this, config);
++		return config;
+ 	}
+ 
+ 	private async runWithLifecycle(executor: (signal: AbortSignal) => Promise<void>): Promise<void> {
+@@ -543,6 +571,14 @@ export class Agent {
+ 	}
+ 
+ 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
++		this._state.errorMessage = error instanceof Error ? error.message : String(error);
++		if (aborted) return;
++		try {
++			getSplyceAgentCallbacks(this);
++		} catch (readinessError) {
++			if ((readinessError as { code?: string }).code === "SPLYCE_UNAVAILABLE") return;
++			throw readinessError;
++		}
+ 		const failureMessage = {
+ 			role: "assistant",
+ 			content: [{ type: "text", text: "" }],
+@@ -576,6 +612,8 @@ export class Agent {
+ 	 * and `finishRun()` clears runtime-owned state.
+ 	 */
+ 	private async processEvents(event: AgentEvent): Promise<void> {
++		getSplyceAgentCallbacks(this);
++		this.signal?.throwIfAborted();
+ 		switch (event.type) {
+ 			case "message_start":
+ 				this._state.streamingMessage = event.message;
+@@ -620,7 +658,11 @@ export class Agent {
+ 			throw new Error("Agent listener invoked outside active run");
+ 		}
+ 		for (const listener of this.listeners) {
++			getSplyceAgentCallbacks(this);
++			signal.throwIfAborted();
+ 			await listener(event, signal);
++			getSplyceAgentCallbacks(this);
++			signal.throwIfAborted();
+ 		}
+ 	}
+ }
+diff --git a/vendor/pi/packages/agent/src/index.ts b/vendor/pi/packages/agent/src/index.ts
+index 45c4023..02dd8ca 100644
+--- a/vendor/pi/packages/agent/src/index.ts
++++ b/vendor/pi/packages/agent/src/index.ts
+@@ -2,6 +2,12 @@ export * from "./agent.ts";
+ export * from "./agent-loop.ts";
+ export * from "./proxy.ts";
+ export { bindSplyceToolAdmission, type SplyceToolAdmission } from "./splyce-admission.ts";
+-export { assertSplyceReady } from "./splyce-readiness.ts";
++export {
++	assertSameSplyceOwner,
++	assertSplyceReady,
++	disposeSplyceOwner,
++	inheritSplyceOwner,
++	sealSplyceAgentCallbacks,
++} from "./splyce-readiness.ts";
+ export { setDefaultStreamFn } from "./stream-fn.ts";
+ export * from "./types.ts";
+diff --git a/vendor/pi/packages/agent/src/splyce-readiness.ts b/vendor/pi/packages/agent/src/splyce-readiness.ts
+index 5972f7a..8fc5a9d 100644
+--- a/vendor/pi/packages/agent/src/splyce-readiness.ts
++++ b/vendor/pi/packages/agent/src/splyce-readiness.ts
+@@ -1,4 +1,189 @@
+-/** TD-07: admission stays unavailable until the authoritative policy/store is wired. */
+-export const assertSplyceReady = (): void => {
++import type { Agent } from "./agent.ts";
++import type { AgentTool, StreamFn } from "./types.ts";
++
++export type SplyceRole =
++	| "sdk-options"
++	| "agent-options"
++	| "agent"
++	| "loop-config"
++	| "session-options"
++	| "session"
++	| "runner"
++	| "tool"
++	| "model-runtime-options"
++	| "model-runtime"
++	| "resource-loader-options"
++	| "resource-loader"
++	| "session-manager"
++	| "settings-manager"
++	| "model";
++
++interface Owner {
++	checkCurrent: () => void;
++	disposed: boolean;
++}
++interface Binding {
++	owner: Owner;
++	role: SplyceRole;
++}
++const bindings = new WeakMap<object, Binding>();
++const callbackKeys = [
++	"convertToLlm",
++	"transformContext",
++	"getApiKey",
++	"beforeToolCall",
++	"afterToolCall",
++	"prepareRequest",
++	"prepareNextTurn",
++	"prepareNextTurnWithContext",
++	"finishTurn",
++	"onPayload",
++	"onResponse",
++	"onProviderStreamEvent",
++] as const;
++type Callbacks = Pick<Agent, (typeof callbackKeys)[number]>;
++const callbacks = new WeakMap<object, Callbacks>();
++const sealedAgents = new WeakSet<object>();
++function captureCallbacks(agent: Agent): void {
++	callbacks.set(agent, Object.fromEntries(callbackKeys.map((key) => [key, agent[key]])) as Callbacks);
++}
++
++/** Session wrappers are installed synchronously before the initialized Agent is exposed. */
++export function sealSplyceAgentCallbacks(session: object, agent: Agent): void {
++	assertSameSplyceOwner(session, session, "session");
++	assertSameSplyceOwner(session, agent, "agent");
++	if (sealedAgents.has(agent)) unavailable();
++	captureCallbacks(agent);
++	sealedAgents.add(agent);
++}
++
++export function getSplyceAgentCallbacks(agent: Agent): Callbacks {
++	assertSameSplyceOwner(agent, agent, "agent");
++	const snapshot = callbacks.get(agent);
++	if (!snapshot || callbackKeys.some((key) => snapshot[key] !== agent[key])) unavailable();
++	return snapshot;
++}
++
++const loopCallbackKeys = [
++	...callbackKeys.filter((key) => key !== "prepareNextTurnWithContext"),
++	"getSteeringMessages",
++	"getFollowUpMessages",
++];
++const loopCallbacks = new WeakMap<object, Record<string, unknown>>();
++const streams = new WeakMap<object, StreamFn>();
++const toolImplementations = new WeakMap<object, AgentTool["execute"]>();
++const derivations: Partial<Record<SplyceRole, readonly SplyceRole[]>> = {
++	"sdk-options": ["agent-options", "session-options"],
++	"agent-options": ["agent"],
++	"session-options": ["session"],
++	session: ["runner", "tool"],
++	"model-runtime-options": ["model-runtime"],
++	"resource-loader-options": ["resource-loader"],
++};
++
++function unavailable(): never {
+ 	throw Object.assign(new Error("SPLYCE_UNAVAILABLE"), { code: "SPLYCE_UNAVAILABLE" as const });
++}
++
++function current(subject?: object): Binding {
++	const binding = subject && bindings.get(subject);
++	if (!binding || binding.owner.disposed) return unavailable();
++	binding.owner.checkCurrent();
++	if (binding.owner.disposed) return unavailable();
++	if (binding.role === "loop-config") {
++		const snapshot = loopCallbacks.get(subject!);
++		if (!snapshot || loopCallbackKeys.some((key) => snapshot[key] !== (subject as Record<string, unknown>)[key]))
++			unavailable();
++	}
++	return binding;
++}
++
++function bind(owner: Owner, subject: object, role: SplyceRole): void {
++	if (owner.disposed) unavailable();
++	owner.checkCurrent();
++	const previous = bindings.get(subject);
++	if (owner.disposed || (previous && (previous.owner !== owner || previous.role !== role))) unavailable();
++	bindings.set(subject, { owner, role });
++	if (role === "agent" && !streams.has(subject)) {
++		const stream = (subject as { streamFunction: StreamFn }).streamFunction;
++		if (typeof stream !== "function") unavailable();
++		streams.set(subject, stream);
++		captureCallbacks(subject as Agent);
++	}
++	if (role === "tool" && !toolImplementations.has(subject)) {
++		const tool = subject as AgentTool;
++		if (typeof tool.execute !== "function") unavailable();
++		toolImplementations.set(tool, tool.execute);
++		tool.execute = () => unavailable();
++	}
++}
++
++/** Private native composition entrypoint; deliberately absent from the package index. */
++export function createSplyceOwner(checkCurrent: () => void): {
++	bind: (subject: object, role: SplyceRole) => void;
++	dispose: () => void;
++} {
++	const owner: Owner = { checkCurrent, disposed: false };
++	return {
++		bind: (subject, role) => bind(owner, subject, role),
++		dispose: () => {
++			owner.disposed = true;
++		},
++	};
++}
++
++/** No object means no authority; standalone/default SDK callers remain unavailable. */
++export const assertSplyceReady = (subject?: object): void => {
++	current(subject);
+ };
++
++/** Revocation needs no current-state check, so stale owners can always be cleaned up. */
++export function disposeSplyceOwner(subject: object): void {
++	const binding = bindings.get(subject);
++	if (binding) binding.owner.disposed = true;
++}
++
++/** Inert constructors can stay unowned; an owned identity may never change its owner or role. */
++export function inheritSplyceOwner(parent: object, child: object, role: SplyceRole): boolean {
++	if (!bindings.has(parent)) return false;
++	const binding = current(parent);
++	if (!derivations[binding.role]?.includes(role)) unavailable();
++	bind(binding.owner, child, role);
++	return true;
++}
++
++/** Only native Agent construction and actual loop snapshots derive runnable configurations. */
++export function inheritSplyceLoopConfig(parent: object, child: object): void {
++	const binding = current(parent);
++	const stream = streams.get(parent);
++	if ((binding.role !== "agent" && binding.role !== "loop-config") || !stream) unavailable();
++	bind(binding.owner, child, "loop-config");
++	streams.set(child, stream);
++	loopCallbacks.set(
++		child,
++		Object.fromEntries(loopCallbackKeys.map((key) => [key, (child as Record<string, unknown>)[key]])),
++	);
++}
++
++export function assertSplyceLoopStream(config: object, stream: StreamFn): void {
++	assertSameSplyceOwner(config, config, "loop-config");
++	if (streams.get(config) !== stream) unavailable();
++}
++
++export function assertSplyceToolCurrent(tool: AgentTool, signal?: AbortSignal): void {
++	if (bindings.has(tool)) assertSameSplyceOwner(tool, tool, "tool");
++	signal?.throwIfAborted();
++}
++
++/** Called only inside the already-admitted execution callback, never exported by the SDK. */
++export function getSplyceToolImplementation(tool: AgentTool): AgentTool["execute"] {
++	const execute = toolImplementations.get(tool);
++	if (execute) assertSameSplyceOwner(tool, tool, "tool");
++	return execute ?? tool.execute;
++}
++
++export function assertSameSplyceOwner(parent: object, child: object, expectedRole?: SplyceRole): void {
++	const a = current(parent);
++	const b = current(child);
++	if (a.owner !== b.owner || (expectedRole && b.role !== expectedRole)) unavailable();
++}
+diff --git a/vendor/pi/packages/coding-agent/src/core/agent-session.ts b/vendor/pi/packages/coding-agent/src/core/agent-session.ts
+index 54d3054..267a2a1 100644
+--- a/vendor/pi/packages/coding-agent/src/core/agent-session.ts
++++ b/vendor/pi/packages/coding-agent/src/core/agent-session.ts
+@@ -25,11 +25,15 @@ import {
+ 	type AgentState,
+ 	type AgentTool,
+ 	type AgentToolCallOutcome,
++	assertSameSplyceOwner,
+ 	assertSplyceReady,
+ 	type BeforeToolCallContext,
+ 	type BeforeToolCallResult,
++	disposeSplyceOwner,
++	inheritSplyceOwner,
+ 	type PrepareNextTurnContext,
+ 	runToolCall,
++	sealSplyceAgentCallbacks,
+ 	type ThinkingLevel,
+ } from "@earendil-works/pi-agent-core";
+ import { contentText, getCurrentSystemMessage, getCurrentTools, retryDelayMs } from "@earendil-works/pi-ai";
+@@ -484,6 +488,13 @@ export class AgentSession {
+ 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
+ 
+ 	constructor(config: AgentSessionConfig) {
++		if (inheritSplyceOwner(config, this, "session")) {
++			assertSameSplyceOwner(this, config.agent, "agent");
++			assertSameSplyceOwner(this, config.sessionManager, "session-manager");
++			assertSameSplyceOwner(this, config.settingsManager, "settings-manager");
++			assertSameSplyceOwner(this, config.resourceLoader, "resource-loader");
++			assertSameSplyceOwner(this, config.modelRuntime, "model-runtime");
++		}
+ 		this.agent = config.agent;
+ 		this.sessionManager = config.sessionManager;
+ 		this.settingsManager = config.settingsManager;
+@@ -524,6 +535,7 @@ export class AgentSession {
+ 			includeAllExtensionTools: true,
+ 		});
+ 		if (this._usesDefaultTools) this._restoreToolsFromTranscript(this._defaultToolModifiers);
++		if (inheritSplyceOwner(config, this, "session")) sealSplyceAgentCallbacks(this, this.agent);
+ 	}
+ 
+ 	get modelRuntime(): ModelRuntime {
+@@ -651,29 +663,33 @@ export class AgentSession {
+ 	 * happens here instead of in wrappers.
+ 	 */
+ 	private _installAgentToolHooks(): void {
+-		this.agent.beforeToolCall = (context) => this._beforeToolCall(context);
+-		this.agent.afterToolCall = (context) => this._afterToolCall(context);
++		this.agent.beforeToolCall = (context, signal) => this._beforeToolCall(context, undefined, signal);
++		this.agent.afterToolCall = (context, signal) => this._afterToolCall(context, undefined, signal);
+ 	}
+ 
+ 	/** `tool_call` handlers. `parentToolCallId` is set for calls another tool made. */
+ 	private async _beforeToolCall(
+ 		{ toolCall, args }: BeforeToolCallContext,
+ 		parentToolCallId?: string,
++		signal?: AbortSignal,
+ 	): Promise<BeforeToolCallResult | undefined> {
+-		assertSplyceReady();
++		assertSplyceReady(this);
+ 		const runner = this._extensionRunner;
+ 		if (!runner.hasHandlers("tool_call")) {
+ 			return undefined;
+ 		}
+ 
+ 		try {
+-			return await runner.emitToolCall({
++			const result = await runner.emitToolCall({
+ 				type: "tool_call",
+ 				toolName: toolCall.name,
+ 				toolCallId: toolCall.id,
+ 				...(parentToolCallId ? { parentToolCallId } : {}),
+ 				input: args as Record<string, unknown>,
+ 			});
++			assertSplyceReady(this);
++			signal?.throwIfAborted();
++			return result;
+ 		} catch (err) {
+ 			if (err instanceof Error) {
+ 				throw err;
+@@ -686,7 +702,10 @@ export class AgentSession {
+ 	private async _afterToolCall(
+ 		{ toolCall, args, result, isError }: AfterToolCallContext,
+ 		parentToolCallId?: string,
++		signal?: AbortSignal,
+ 	): Promise<AfterToolCallResult | undefined> {
++		assertSplyceReady(this);
++		signal?.throwIfAborted();
+ 		const runner = this._extensionRunner;
+ 		const hookResult = runner.hasHandlers("tool_result")
+ 			? await runner.emitToolResult({
+@@ -703,6 +722,8 @@ export class AgentSession {
+ 				})
+ 			: undefined;
+ 
++		assertSplyceReady(this);
++		signal?.throwIfAborted();
+ 		const content = hookResult?.content ?? result.content ?? [];
+ 		// Runs after the extension hook so images injected or replaced by extensions are normalized too.
+ 		const resizeOptions = this._limitsModel()?.inputLimits?.images?.resize;
+@@ -711,6 +732,8 @@ export class AgentSession {
+ 			...(resizeOptions ? { resizeOptions } : {}),
+ 		});
+ 
++		assertSplyceReady(this);
++		signal?.throwIfAborted();
+ 		if (!hookResult && normalizedContent === content) {
+ 			return undefined;
+ 		}
+@@ -735,6 +758,7 @@ export class AgentSession {
+ 		args: unknown,
+ 		options: ExecuteToolOptions,
+ 	): Promise<AgentToolCallOutcome> {
++		assertSplyceReady(this);
+ 		this._nestedToolCalls ??= new NestedToolCallRunner({
+ 			getTools: () => this._getCallableTools(),
+ 			isSequential: () => this.agent.toolExecution === "sequential",
+@@ -752,8 +776,8 @@ export class AgentSession {
+ 					tools: this._getCallableTools(),
+ 					assistantMessage,
+ 					context: { messages: this.agent.state.messages, tools: this.agent.state.tools },
+-					beforeToolCall: (context) => this._beforeToolCall(context, parentId),
+-					afterToolCall: (context) => this._afterToolCall(context, parentId),
++					beforeToolCall: (context, signal) => this._beforeToolCall(context, parentId, signal),
++					afterToolCall: (context, signal) => this._afterToolCall(context, parentId, signal),
+ 					signal,
+ 					onUpdate,
+ 				});
+@@ -809,9 +833,13 @@ export class AgentSession {
+ 					},
+ 					signal,
+ 				);
++				assertSplyceReady(this);
++				signal?.throwIfAborted();
+ 				return { previous, context: previous?.context ?? canonicalContext, projection };
+ 			};
+ 			let { previous, context, projection } = await prepare();
++			assertSplyceReady(this);
++			signal?.throwIfAborted();
+ 			const model = previous?.model ?? this.agent.state.model;
+ 			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
+ 			if (!isVirtualModel(model)) return { ...previous, context, model, thinkingLevel };
+@@ -891,7 +919,11 @@ export class AgentSession {
+ 		this.agent.finishTurn = async (turn, signal) => {
+ 			this._boundaryDispatchedMessages.add(turn.message);
+ 			const extensionContinue = await this._dispatchTurnEndBoundary(turn.message, turn.toolResults);
++			assertSplyceReady(this);
++			signal?.throwIfAborted();
+ 			const previousDecision = await previousFinishTurn?.(turn, signal);
++			assertSplyceReady(this);
++			signal?.throwIfAborted();
+ 			if (previousDecision?.action === "end") return previousDecision;
+ 			if (extensionContinue || previousDecision?.action === "continue") return { action: "continue" };
+ 			return undefined;
+@@ -899,14 +931,19 @@ export class AgentSession {
+ 	}
+ 
+ 	private _installAgentNextTurnRefresh(): void {
++		const previousPrepareNextTurn = this.agent.prepareNextTurn;
+ 		const previousPrepareNextTurnWithContext =
+ 			this.agent.prepareNextTurnWithContext ??
+-			(this.agent.prepareNextTurn
+-				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
++			(previousPrepareNextTurn
++				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await previousPrepareNextTurn?.(signal)
+ 				: undefined);
+ 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
+ 			const context = await this._compactBeforeNextAssistantResponse(turn.context);
++			assertSplyceReady(this);
++			signal?.throwIfAborted();
+ 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
++			assertSplyceReady(this);
++			signal?.throwIfAborted();
+ 			const nextContext = previousSnapshot?.context ?? context;
+ 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
+ 			const options = normalizeBuildSystemPromptOptions({
+@@ -1025,6 +1062,7 @@ export class AgentSession {
+ 	}
+ 
+ 	private _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): void {
++		assertSplyceReady(this);
+ 		const appended = this._applyBoundaryDrafts(this.sessionManager, drafts);
+ 		this._refreshFinalizedContext();
+ 		for (const entry of appended) this._emit({ type: "entry_appended", entry });
+@@ -1104,6 +1142,7 @@ export class AgentSession {
+ 
+ 	/** Internal handler for agent events - shared by subscribe and reconnect */
+ 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
++		assertSplyceReady(this);
+ 		// An abort requested while the run was starting, e.g. during before_agent_start, stops it
+ 		// here. agent_start is awaited before the first request.
+ 		if (event.type === "agent_start" && this._agentRunAbortRequested) this.agent.abort();
+@@ -1144,6 +1183,7 @@ export class AgentSession {
+ 
+ 		// Emit to extensions first, then notify public listeners.
+ 		await this._emitExtensionEvent(event);
++		assertSplyceReady(this);
+ 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+ 
+ 		// Handle session persistence
+@@ -1413,6 +1453,7 @@ export class AgentSession {
+ 	 * Call this when completely done with the session.
+ 	 */
+ 	dispose(): void {
++		disposeSplyceOwner(this);
+ 		try {
+ 			this.abortRetry();
+ 			this.abortCompaction();
+@@ -1456,6 +1497,7 @@ export class AgentSession {
+ 
+ 	/** Persist the cache-warming mode and immediately reconcile active warming. */
+ 	setCacheWarmingMode(mode: CacheWarmingMode): void {
++		assertSplyceReady(this);
+ 		this.settingsManager.setCacheWarmingMode(mode);
+ 		this._cacheWarmer?.onModeChanged();
+ 	}
+@@ -1539,6 +1581,7 @@ export class AgentSession {
+ 	 * Changes take effect on the next agent turn.
+ 	 */
+ 	setActiveToolsByName(toolNames: string[]): void {
++		assertSplyceReady(this);
+ 		const previous = this.getActiveToolNames();
+ 		this._setActiveTools(toolNames);
+ 		// A loadout that deactivates a tool replaces the restored one, whose pending tools are dropped.
+@@ -1688,6 +1731,8 @@ export class AgentSession {
+ 
+ 	/** Update scoped models for cycling */
+ 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
++		assertSplyceReady(this);
++		for (const scoped of scopedModels) assertSameSplyceOwner(this, scoped.model, "model");
+ 		this._scopedModels = scopedModels;
+ 	}
+ 
+@@ -1791,6 +1836,8 @@ export class AgentSession {
+ 		const previousTransformContext = this.agent.transformContext;
+ 		this.agent.transformContext = async (messages, signal) => {
+ 			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
++			assertSplyceReady(this);
++			signal?.throwIfAborted();
+ 			const hidden = this._hiddenDeclarations;
+ 			if (hidden.size === 0) return transformed;
+ 			return transformed.map((message) => {
+@@ -1811,6 +1858,8 @@ export class AgentSession {
+ 		const previousTransformContext = this.agent.transformContext;
+ 		this.agent.transformContext = async (messages, signal) => {
+ 			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
++			assertSplyceReady(this);
++			signal?.throwIfAborted();
+ 			const forced = this._runSystemPromptOptions?.forceSystemPrompt;
+ 			if (forced === undefined) return transformed;
+ 			const current = getCurrentSystemMessage(transformed);
+@@ -1874,6 +1923,7 @@ export class AgentSession {
+ 	 * @param onStarted Called once the run's messages are prepared, before the first request.
+ 	 */
+ 	private async _startRun(trigger: BeforeAgentStartTrigger, onStarted?: () => void): Promise<void> {
++		assertSplyceReady(this);
+ 		this._isAgentRunActive = true;
+ 		this._agentRunAbortRequested = false;
+ 		let messages: AgentMessage[];
+@@ -1886,6 +1936,7 @@ export class AgentSession {
+ 			this._resolveIdleWaitIfIdle();
+ 			throw error;
+ 		}
++		assertSplyceReady(this);
+ 		// Messages held while the run was starting go before its starting messages, as they would
+ 		// have while idle. No run exists yet, so they cannot split a tool call from its result.
+ 		this._flushPendingBashMessages();
+@@ -2047,11 +2098,13 @@ export class AgentSession {
+ 		source: InputSource,
+ 		streamingBehavior?: "steer" | "followUp",
+ 	): Promise<{ text: string; images: ImageContent[] | undefined } | undefined> {
++		assertSplyceReady(this);
+ 		if (!this._extensionRunner.hasHandlers("input")) {
+ 			return { text, images };
+ 		}
+ 
+ 		const inputResult = await this._extensionRunner.emitInput(text, images, source, streamingBehavior);
++		assertSplyceReady(this);
+ 		if (inputResult.action === "handled") {
+ 			return undefined;
+ 		}
+@@ -2093,6 +2146,7 @@ export class AgentSession {
+ 	 * @throws Error if no model selected or no API key available (when not streaming)
+ 	 */
+ 	async prompt(text: string, options?: PromptOptions): Promise<void> {
++		assertSplyceReady(this);
+ 		if (this._isEmittingAgentSettled) {
+ 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
+ 			return;
+@@ -2243,6 +2297,7 @@ export class AgentSession {
+ 		behavior: "steer" | "followUp",
+ 		source: InputSource,
+ 	): Promise<QueuedInputDisposition> {
++		assertSplyceReady(this);
+ 		if (text.startsWith("/")) {
+ 			this._throwIfExtensionCommand(text);
+ 		}
+@@ -2361,6 +2416,7 @@ export class AgentSession {
+ 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+ 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+ 	): Promise<void> {
++		assertSplyceReady(this);
+ 		const appMessage = {
+ 			role: "custom" as const,
+ 			customType: message.customType,
+@@ -2396,6 +2452,7 @@ export class AgentSession {
+ 	}
+ 
+ 	private _appendCustomMessage(appMessage: CustomMessage): void {
++		assertSplyceReady(this);
+ 		this.sessionManager.appendCustomMessageEntry(
+ 			appMessage.customType,
+ 			appMessage.content,
+@@ -2542,6 +2599,7 @@ export class AgentSession {
+ 	 * @throws Error if no auth is configured for the model
+ 	 */
+ 	async setModel(model: Model<any>, options: ModelMutationOptions = {}): Promise<void> {
++		assertSameSplyceOwner(this, model, "model");
+ 		if (!(await this._modelRuntime.checkAuth(model.provider))) {
+ 			throw new Error(`No API key for ${model.provider}/${model.id}`);
+ 		}
+@@ -2677,6 +2735,7 @@ export class AgentSession {
+ 	 * Persists the requested level to global defaults only when options.persist is true.
+ 	 */
+ 	setThinkingLevel(level: ThinkingLevel, options: ModelMutationOptions = {}): void {
++		assertSplyceReady(this);
+ 		const availableLevels = this.getAvailableThinkingLevels();
+ 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
+ 
+@@ -2765,6 +2824,7 @@ export class AgentSession {
+ 	 * Saves to settings.
+ 	 */
+ 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
++		assertSplyceReady(this);
+ 		this.agent.steeringMode = mode;
+ 		this.settingsManager.setSteeringMode(mode);
+ 	}
+@@ -2774,6 +2834,7 @@ export class AgentSession {
+ 	 * Saves to settings.
+ 	 */
+ 	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
++		assertSplyceReady(this);
+ 		this.agent.followUpMode = mode;
+ 		this.settingsManager.setFollowUpMode(mode);
+ 	}
+@@ -2829,6 +2890,7 @@ export class AgentSession {
+ 	 * @param customInstructions Optional instructions for the compaction summary
+ 	 */
+ 	async compact(customInstructions?: string): Promise<CompactionResult> {
++		assertSplyceReady(this);
+ 		await this.abort();
+ 		this._compactionAbortController = new AbortController();
+ 		this._emit({ type: "compaction_start", reason: "manual" });
+@@ -3310,6 +3372,7 @@ export class AgentSession {
+ 	 * Toggle auto-compaction setting.
+ 	 */
+ 	setAutoCompactionEnabled(enabled: boolean): void {
++		assertSplyceReady(this);
+ 		this.settingsManager.setCompactionEnabled(enabled);
+ 	}
+ 
+@@ -3319,7 +3382,7 @@ export class AgentSession {
+ 	}
+ 
+ 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
+-		assertSplyceReady();
++		assertSplyceReady(this);
+ 		if (bindings.uiContext !== undefined) {
+ 			this._extensionUIContext = bindings.uiContext;
+ 		}
+@@ -3346,6 +3409,7 @@ export class AgentSession {
+ 	}
+ 
+ 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
++		assertSplyceReady(this);
+ 		if (!this._extensionRunner.hasHandlers("resources_discover")) {
+ 			return;
+ 		}
+@@ -3422,6 +3486,9 @@ export class AgentSession {
+ 	}
+ 
+ 	private _bindExtensionCore(runner: ExtensionRunner): void {
++		if (inheritSplyceOwner(this, runner, "runner")) {
++			assertSameSplyceOwner(this, runner, "runner");
++		}
+ 		const getCommands = (): SlashCommandInfo[] => {
+ 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
+ 				name: command.invocationName,
+@@ -3468,6 +3535,7 @@ export class AgentSession {
+ 					});
+ 				},
+ 				appendEntry: (customType, data) => {
++					assertSameSplyceOwner(this, runner, "runner");
+ 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
+ 					const entry = this.sessionManager.getEntry(entryId);
+ 					if (entry) {
+@@ -3481,6 +3549,7 @@ export class AgentSession {
+ 					return this.sessionManager.getSessionName();
+ 				},
+ 				setLabel: (entryId, label) => {
++					assertSameSplyceOwner(this, runner, "runner");
+ 					this.sessionManager.appendLabelChange(entryId, label);
+ 				},
+ 				getActiveTools: () => this.getActiveToolNames(),
+@@ -3626,6 +3695,9 @@ export class AgentSession {
+ 			toolRegistry.set(tool.name, tool);
+ 		}
+ 		this._toolRegistry = toolRegistry;
++		for (const tool of toolRegistry.values()) {
++			inheritSplyceOwner(this, tool, "tool");
++		}
+ 
+ 		const nextActiveToolNames = (
+ 			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
+@@ -3722,6 +3794,7 @@ export class AgentSession {
+ 	}
+ 
+ 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
++		assertSplyceReady(this);
+ 		const oldRunner = this._extensionRunner;
+ 		const previousFlagValues = oldRunner.getFlagValues();
+ 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
+@@ -3886,6 +3959,7 @@ export class AgentSession {
+ 	 * Toggle auto-retry setting.
+ 	 */
+ 	setAutoRetryEnabled(enabled: boolean): void {
++		assertSplyceReady(this);
+ 		this.settingsManager.setRetryEnabled(enabled);
+ 	}
+ 
+@@ -3942,6 +4016,7 @@ export class AgentSession {
+ 	 * Used by executeBash and by extensions that handle bash execution themselves.
+ 	 */
+ 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
++		assertSplyceReady(this);
+ 		const bashMessage: BashExecutionMessage = {
+ 			role: "bashExecution",
+ 			command,
+@@ -4005,6 +4080,7 @@ export class AgentSession {
+ 	 * Set a display name for the current session.
+ 	 */
+ 	setSessionName(name: string): void {
++		assertSplyceReady(this);
+ 		this.sessionManager.appendSessionInfo(name);
+ 		const event = { type: "session_info_changed", name: this.sessionManager.getSessionName() } as const;
+ 		this._emit(event);
+@@ -4030,6 +4106,7 @@ export class AgentSession {
+ 		targetId: string,
+ 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
+ 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
++		assertSplyceReady(this);
+ 		if (this.isStreaming) {
+ 			throw new Error("Wait for the current response to finish before navigating the session tree.");
+ 		}
+@@ -4351,6 +4428,7 @@ export class AgentSession {
+ 	 * @returns Path to exported file
+ 	 */
+ 	async exportToHtml(outputPath?: string, options: { themeName?: string } = {}): Promise<string> {
++		assertSplyceReady();
+ 		const themeName = [options.themeName, this.settingsManager.getTheme()].find(
+ 			(candidate) => candidate !== undefined && getThemeByName(candidate) !== undefined,
+ 		);
+@@ -4377,6 +4455,7 @@ export class AgentSession {
+ 	 * @returns The resolved output file path.
+ 	 */
+ 	exportToJsonl(outputPath?: string): string {
++		assertSplyceReady();
+ 		return exportSessionToJsonl(this.sessionManager, outputPath);
+ 	}
+ 
+diff --git a/vendor/pi/packages/coding-agent/src/core/model-runtime.ts b/vendor/pi/packages/coding-agent/src/core/model-runtime.ts
+index 17459b1..eaef58d 100644
+--- a/vendor/pi/packages/coding-agent/src/core/model-runtime.ts
++++ b/vendor/pi/packages/coding-agent/src/core/model-runtime.ts
+@@ -1,5 +1,5 @@
+ import { dirname, join } from "node:path";
+-import { assertSplyceReady } from "@earendil-works/pi-agent-core";
++import { assertSameSplyceOwner, assertSplyceReady, inheritSplyceOwner } from "@earendil-works/pi-agent-core";
+ import {
+ 	type AnyModel,
+ 	type Api,
+@@ -217,11 +217,21 @@ export class ModelRuntime implements Models {
+ 	}
+ 
+ 	static async create(options: CreateModelRuntimeOptions = {}): Promise<ModelRuntime> {
+-		assertSplyceReady();
++		assertSplyceReady(options);
++		assertSameSplyceOwner(options, options, "model-runtime-options");
++		if (
++			!options.credentials ||
++			!options.modelsStore ||
++			options.modelsPath !== null ||
++			options.allowModelNetwork !== false ||
++			options.refreshOnCreate !== false
++		)
++			assertSplyceReady();
+ 		const credentials = new RuntimeCredentials(options.credentials ?? DefaultAuthStorage.create(options.authPath));
+ 		const modelsPath =
+ 			options.modelsPath === null ? undefined : (options.modelsPath ?? join(getAgentDir(), "models.json"));
+ 		const config = await ModelConfig.load(modelsPath);
++		assertSplyceReady(options);
+ 		const modelsStore =
+ 			options.modelsStore ??
+ 			(modelsPath
+@@ -249,6 +259,7 @@ export class ModelRuntime implements Models {
+ 			providers,
+ 			process.env.PI_OFFLINE === undefined,
+ 		);
++		inheritSplyceOwner(options, runtime, "model-runtime");
+ 		runtime.configureRadiusProviders();
+ 		runtime.rebuildProviders();
+ 		const refreshFromNetwork = runtime.modelNetworkEnabled && options.allowModelNetwork === true;
+@@ -478,18 +489,22 @@ export class ModelRuntime implements Models {
+ 		providerId?: string,
+ 		options?: AuthOperationOptions,
+ 	): Promise<readonly ModelTypeMap[TType][]> {
++		assertSplyceReady();
+ 		return this.models.getAvailableOfType(type, providerId, options);
+ 	}
+ 
+ 	getAllAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly AnyModel[]> {
++		assertSplyceReady();
+ 		return this.models.getAllAvailable(providerId, options);
+ 	}
+ 
+ 	async checkAuth(providerId: string, options?: AuthOperationOptions): Promise<AuthCheck | undefined> {
++		assertSplyceReady();
+ 		return this.models.checkAuth(providerId, options);
+ 	}
+ 
+ 	async getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]> {
++		assertSplyceReady();
+ 		if (providerId) {
+ 			const errorSeq = ++this.availabilityErrorSeq;
+ 			try {
+@@ -561,6 +576,8 @@ export class ModelRuntime implements Models {
+ 		providerOrModel: string | AnyModel,
+ 		overrides: ModelRuntimeAuthOverrides = {},
+ 	): Promise<AuthResult | undefined> {
++		// Native provider admission must supply the final-send port before auth can be enabled.
++		assertSplyceReady();
+ 		if (typeof providerOrModel === "string") return this.models.getAuth(providerOrModel, overrides);
+ 		const resolution = await this.models.getAuth(providerOrModel, overrides);
+ 		if (!resolution) return undefined;
+@@ -580,6 +597,7 @@ export class ModelRuntime implements Models {
+ 	}
+ 
+ 	private enqueueCredentialOperation<T>(providerId: string, signal: AbortSignal, task: () => Promise<T>): Promise<T> {
++		assertSplyceReady();
+ 		const previous = this.credentialOperations.get(providerId) ?? Promise.resolve();
+ 		let markStarted: (() => void) | undefined;
+ 		const started = new Promise<void>((resolve) => {
+@@ -643,6 +661,7 @@ export class ModelRuntime implements Models {
+ 	}
+ 
+ 	listCredentials(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
++		assertSplyceReady();
+ 		return this.credentials.list(options);
+ 	}
+ 
+@@ -669,6 +688,7 @@ export class ModelRuntime implements Models {
+ 		model: TModel;
+ 		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
+ 	}> {
++		assertSplyceReady(this);
+ 		assertSplyceReady();
+ 		const provider = this.models.getProvider(model.provider);
+ 		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
+@@ -857,6 +877,7 @@ export class ModelRuntime implements Models {
+ 	}
+ 
+ 	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
++		assertSplyceReady(this);
+ 		assertSplyceReady();
+ 		this.config = await ModelConfig.load(this.modelsPath);
+ 		this.configureRadiusProviders();
+diff --git a/vendor/pi/packages/coding-agent/src/core/resource-loader.ts b/vendor/pi/packages/coding-agent/src/core/resource-loader.ts
+index a504a55..a5c1231 100644
+--- a/vendor/pi/packages/coding-agent/src/core/resource-loader.ts
++++ b/vendor/pi/packages/coding-agent/src/core/resource-loader.ts
+@@ -1,6 +1,6 @@
+ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+ import { basename, dirname, join, resolve, sep } from "node:path";
+-import { assertSplyceReady } from "@earendil-works/pi-agent-core";
++import { assertSameSplyceOwner, assertSplyceReady, inheritSplyceOwner } from "@earendil-works/pi-agent-core";
+ import { detectCapabilities, getTerminalColorMode, type TerminalColorMode } from "@earendil-works/pi-tui";
+ import chalk from "chalk";
+ import { APP_NAME, CONFIG_DIR_NAME } from "../config.ts";
+@@ -261,6 +261,7 @@ export function loadProjectContextFiles(options: {
+ 	cwd: string;
+ 	agentDir: string;
+ }): Array<{ path: string; content: string }> {
++	assertSplyceReady();
+ 	const resolvedCwd = resolvePath(options.cwd);
+ 	const resolvedAgentDir = resolvePath(options.agentDir);
+ 
+@@ -401,6 +402,9 @@ export class DefaultResourceLoader implements ResourceLoader {
+ 	private loaded: boolean;
+ 
+ 	constructor(options: DefaultResourceLoaderOptions) {
++		if (inheritSplyceOwner(options, this, "resource-loader")) {
++			assertSameSplyceOwner(this, options.settingsManager!, "settings-manager");
++		}
+ 		this.cwd = resolvePath(options.cwd);
+ 		this.agentDir = resolvePath(options.agentDir);
+ 		this.settingsManager = options.settingsManager ?? SettingsManager.create(this.cwd, this.agentDir);
+@@ -491,6 +495,8 @@ export class DefaultResourceLoader implements ResourceLoader {
+ 	}
+ 
+ 	extendResources(paths: ResourceExtensionPaths): void {
++		assertSplyceReady(this);
++		assertSplyceReady();
+ 		const skillPaths = this.normalizeExtensionPaths(paths.skillPaths ?? []);
+ 		const promptPaths = this.normalizeExtensionPaths(paths.promptPaths ?? []);
+ 		const themePaths = this.normalizeExtensionPaths(paths.themePaths ?? []);
+@@ -531,6 +537,7 @@ export class DefaultResourceLoader implements ResourceLoader {
+ 	}
+ 
+ 	async loadProjectTrustExtensions(): Promise<LoadExtensionsResult> {
++		assertSplyceReady(this);
+ 		assertSplyceReady();
+ 		// Force untrusted project settings for the bootstrap pass. This keeps project-local
+ 		// extensions/packages out while still loading user/global and temporary CLI extensions.
+@@ -540,6 +547,8 @@ export class DefaultResourceLoader implements ResourceLoader {
+ 	}
+ 
+ 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
++		assertSplyceReady(this);
++		// Selected-resource admission must precede package acquisition or executable resource loading.
+ 		assertSplyceReady();
+ 		resetTimings("extensions");
+ 
+diff --git a/vendor/pi/packages/coding-agent/src/core/sdk.ts b/vendor/pi/packages/coding-agent/src/core/sdk.ts
+index b854975..3be96ad 100644
+--- a/vendor/pi/packages/coding-agent/src/core/sdk.ts
++++ b/vendor/pi/packages/coding-agent/src/core/sdk.ts
+@@ -1,36 +1,27 @@
+-import { join } from "node:path";
+ import {
+ 	Agent,
+ 	type AgentMessage,
++	type AgentOptions,
++	assertSameSplyceOwner,
+ 	assertSplyceReady,
++	inheritSplyceOwner,
+ 	setDefaultStreamFn,
+ 	type ThinkingLevel,
+ } from "@earendil-works/pi-agent-core";
+ import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+ import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
+-import { getAgentDir } from "../config.ts";
+ import { resolvePath } from "../utils/paths.ts";
+-import { AgentSession } from "./agent-session.ts";
+-import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
++import { AgentSession, type AgentSessionConfig } from "./agent-session.ts";
+ import { CacheWarmer } from "./cache-warmer.ts";
+ import { getClientIdentity } from "./client-identity.ts";
+ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+ import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+ import { createToolNameMatcher } from "./mcp-servers.ts";
+ import { convertToLlm } from "./messages.ts";
+-import { findInitialModel } from "./model-resolver.ts";
+-import { ModelRuntime } from "./model-runtime.ts";
++import type { ModelRuntime } from "./model-runtime.ts";
+ import type { ResourceLoader } from "./resource-loader.ts";
+-import { DefaultResourceLoader } from "./resource-loader.ts";
+-import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
+-import {
+-	applyToolModifiers,
+-	DEFAULT_TOOL_NAMES,
+-	getToolListError,
+-	isToolModifier,
+-	SettingsManager,
+-} from "./settings-manager.ts";
+-import { time } from "./timings.ts";
++import type { SessionManager } from "./session-manager.ts";
++import { getToolListError, type SettingsManager } from "./settings-manager.ts";
+ import {
+ 	createBashTool,
+ 	createCodingTools,
+@@ -44,7 +35,6 @@ import {
+ 	createWriteTool,
+ 	withFileMutationQueue,
+ } from "./tools/index.ts";
+-import { getBranchSelection } from "./virtual-models.ts";
+ 
+ // Preserve the pre-0.81 fallback for extensions that construct Agent instances
+ // or invoke low-level agent loops without supplying streamFn. Agent core remains
+@@ -155,10 +145,6 @@ export {
+ 
+ // Helper Functions
+ 
+-function getDefaultAgentDir(): string {
+-	return getAgentDir();
+-}
+-
+ /**
+  * Create an AgentSession with the specified options.
+  *
+@@ -195,68 +181,34 @@ function getDefaultAgentDir(): string {
+  * ```
+  */
+ export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+-	assertSplyceReady();
+-	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
+-	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
+-	let resourceLoader = options.resourceLoader;
+-
+-	const authPath = options.agentDir ? join(agentDir, "auth.json") : undefined;
+-	const modelsPath = options.agentDir ? join(agentDir, "models.json") : undefined;
+-	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
+-
+-	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+-	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+-
+-	if (!resourceLoader) {
+-		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+-		await resourceLoader.reload();
+-		time("resourceLoader.reload");
++	assertSplyceReady(options);
++	assertSameSplyceOwner(options, options, "sdk-options");
++	if (
++		!options.cwd ||
++		!options.agentDir ||
++		!options.model ||
++		!options.modelRuntime ||
++		!options.sessionManager ||
++		!options.settingsManager ||
++		!options.resourceLoader ||
++		!Array.isArray(options.tools)
++	) {
++		throw Object.assign(new Error("SPLYCE_UNAVAILABLE"), { code: "SPLYCE_UNAVAILABLE" });
+ 	}
++	const { model, modelRuntime, settingsManager, sessionManager, resourceLoader } = options;
++	assertSameSplyceOwner(options, model, "model");
++	assertSameSplyceOwner(options, modelRuntime, "model-runtime");
++	assertSameSplyceOwner(options, settingsManager, "settings-manager");
++	assertSameSplyceOwner(options, sessionManager, "session-manager");
++	assertSameSplyceOwner(options, resourceLoader, "resource-loader");
++	for (const scoped of options.scopedModels ?? []) assertSameSplyceOwner(options, scoped.model, "model");
++	const cwd = resolvePath(options.cwd);
+ 
+ 	// Check if session has existing data to restore
+ 	const existingSession = sessionManager.buildSessionContext();
+ 	const hasExistingSession = existingSession.messages.length > 0;
+ 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
+ 
+-	let model = options.model;
+-	let modelFallbackMessage: string | undefined;
+-
+-	// Assistant messages name the physical model that answered, so a virtual selection is only in
+-	// model_change entries.
+-	const sessionModel = getBranchSelection(sessionManager.getBranch(), (provider, modelId) =>
+-		modelRuntime.getModel(provider, modelId),
+-	);
+-
+-	// If session has data, try to restore model from it
+-	if (!model && hasExistingSession && sessionModel) {
+-		const restoredModel = modelRuntime.getModel(sessionModel.provider, sessionModel.modelId);
+-		if (restoredModel && modelRuntime.hasConfiguredAuth(restoredModel.provider)) {
+-			model = restoredModel;
+-		}
+-		if (!model) {
+-			modelFallbackMessage = `Could not restore model ${sessionModel.provider}/${sessionModel.modelId}`;
+-		}
+-	}
+-
+-	// If still no model, use findInitialModel (checks settings default, then provider defaults)
+-	if (!model) {
+-		const result = await findInitialModel({
+-			scopedModels: [],
+-			isContinuing: hasExistingSession,
+-			defaultProvider: settingsManager.getDefaultProvider(),
+-			defaultModelId: settingsManager.getDefaultModel(),
+-			defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
+-			modelThinkingLevels: settingsManager.getAllModelThinkingLevels(),
+-			modelRuntime,
+-		});
+-		model = result.model;
+-		if (!model) {
+-			modelFallbackMessage = formatNoModelsAvailableMessage();
+-		} else if (modelFallbackMessage) {
+-			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+-		}
+-	}
+-
+ 	let thinkingLevel = options.thinkingLevel;
+ 
+ 	// If session has data, restore thinking level from it
+@@ -286,19 +238,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 
+ 	const toolListError = options.tools ? getToolListError(options.tools) : undefined;
+ 	if (toolListError) throw new Error(`Invalid tools option: ${toolListError}`);
+-	const defaultToolNames = options.noTools ? [] : (settingsManager.getDefaultTools() ?? DEFAULT_TOOL_NAMES);
+-	// A `tools` list of only `+name`/`-name` entries changes the default selection instead of
+-	// replacing it, like the `defaultTools` setting.
+-	const toolModifiers = options.tools?.some(isToolModifier) ? options.tools : undefined;
+-	const selectedToolNames = toolModifiers ? applyToolModifiers(defaultToolNames, toolModifiers) : options.tools;
+-	const allowedToolNames = toolModifiers
+-		? options.noTools === "all"
+-			? selectedToolNames
+-			: undefined
+-		: (options.tools ?? (options.noTools === "all" ? [] : undefined));
++	if (options.tools.some((name) => name.startsWith("+") || name.startsWith("-"))) {
++		throw new Error("Owned sessions require an explicit tool allowlist");
++	}
++	const allowedToolNames = options.tools;
+ 	const excludedToolNames = options.excludeTools;
+ 	const isExcludedTool = excludedToolNames ? createToolNameMatcher(excludedToolNames) : undefined;
+-	const initialActiveToolNames = (selectedToolNames ?? defaultToolNames).filter((name) => !isExcludedTool?.(name));
++	const initialActiveToolNames = options.tools.filter((name) => !isExcludedTool?.(name));
+ 
+ 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
+ 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
+@@ -407,7 +353,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		});
+ 	};
+ 
+-	const agent = new Agent({
++	const agentOptions: AgentOptions = {
+ 		initialState: {
+ 			systemPrompt: "",
+ 			model,
+@@ -442,7 +388,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		transport: settingsManager.getTransport(),
+ 		thinkingBudgets: settingsManager.getThinkingBudgets(),
+ 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
+-	});
++	};
++	inheritSplyceOwner(options, agentOptions, "agent-options");
++	const agent = new Agent(agentOptions);
+ 
+ 	// Restore missing settings metadata for older sessions.
+ 	if (hasExistingSession) {
+@@ -457,7 +405,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		sessionManager.appendThinkingLevelChange(thinkingLevel);
+ 	}
+ 
+-	const session = new AgentSession({
++	const sessionOptions: AgentSessionConfig = {
+ 		agent,
+ 		sessionManager,
+ 		settingsManager,
+@@ -468,19 +416,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 		modelRuntime,
+ 		cacheWarmer,
+ 		initialActiveToolNames,
+-		usesDefaultTools: (options.tools === undefined || toolModifiers !== undefined) && !options.noTools,
+-		defaultToolModifiers: toolModifiers,
++		usesDefaultTools: false,
+ 		allowedToolNames,
+ 		excludedToolNames,
+ 		extensionRunnerRef,
+ 		sessionStartEvent: options.sessionStartEvent,
+-	});
++	};
++	inheritSplyceOwner(options, sessionOptions, "session-options");
++	const session = new AgentSession(sessionOptions);
+ 
+ 	const extensionsResult = resourceLoader.getExtensions();
+ 
+ 	return {
+ 		session,
+ 		extensionsResult,
+-		modelFallbackMessage,
+ 	};
+ }

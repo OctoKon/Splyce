@@ -351,7 +351,9 @@
 >
   <header class="setup-header">
     <p class="eyebrow">Splyce setup</p>
-    <h1 id="setup-title" bind:this={pageHeading} tabindex="-1">Set up Splyce</h1>
+    <h1 id="setup-title" bind:this={pageHeading} tabindex="-1">
+      Set up Splyce
+    </h1>
     <p
       class="generation"
       data-testid="generation"
@@ -397,7 +399,11 @@
         </p>
       </div>
       <div class="actions">
-        <button type="button" onclick={chooseModules} data-testid="choose-modules">
+        <button
+          type="button"
+          onclick={chooseModules}
+          data-testid="choose-modules"
+        >
           Choose optional modules
         </button>
         <button type="button" onclick={skip} data-testid="skip">
@@ -432,13 +438,25 @@
         {#if view.generationReason}— {view.generationReason}{/if}
       </p>
       <div class="actions">
-        <button type="button" onclick={onConfigureProvider} data-testid="configure-provider">
+        <button
+          type="button"
+          onclick={onConfigureProvider}
+          data-testid="configure-provider"
+        >
           Configure a provider or model
         </button>
-        <button type="button" onclick={onOpenModules} data-testid="open-modules">
+        <button
+          type="button"
+          onclick={onOpenModules}
+          data-testid="open-modules"
+        >
           Open modules
         </button>
-        <button type="button" onclick={onEnterWorkbench} data-testid="enter-workbench">
+        <button
+          type="button"
+          onclick={onEnterWorkbench}
+          data-testid="enter-workbench"
+        >
           Open the workbench
         </button>
       </div>
@@ -471,7 +489,9 @@
             >
               Refresh catalog
             </button>
-            <button type="button" onclick={baseOnly}>Continue with base only</button>
+            <button type="button" onclick={baseOnly}
+              >Continue with base only</button
+            >
             <button type="button" onclick={skip}>Skip setup</button>
           </div>
         </div>
@@ -505,13 +525,20 @@
                 <p role="alert" class="blocker">{entry.selectBlockedReason}</p>
               {/if}
               <dl>
-                <dt>Source</dt><dd>{entry.sourceLabel}</dd>
-                <dt>Digest</dt><dd><code>{entry.digestLabel}</code></dd>
-                <dt>License</dt><dd>{entry.licenseLabel}</dd>
-                <dt>Compatibility</dt><dd>{entry.compatibilityLabel}</dd>
-                <dt>Download</dt><dd>{entry.downloadLabel}</dd>
-                <dt>Installed size</dt><dd>{entry.installedLabel}</dd>
-                <dt>Dependencies</dt><dd>{entry.dependencyLabel}</dd>
+                <dt>Source</dt>
+                <dd>{entry.sourceLabel}</dd>
+                <dt>Digest</dt>
+                <dd><code>{entry.digestLabel}</code></dd>
+                <dt>License</dt>
+                <dd>{entry.licenseLabel}</dd>
+                <dt>Compatibility</dt>
+                <dd>{entry.compatibilityLabel}</dd>
+                <dt>Download</dt>
+                <dd>{entry.downloadLabel}</dd>
+                <dt>Installed size</dt>
+                <dd>{entry.installedLabel}</dd>
+                <dt>Dependencies</dt>
+                <dd>{entry.dependencyLabel}</dd>
               </dl>
               {#if entry.setupExecutionLabel}
                 <p data-testid="setup-execution-warning">
@@ -524,7 +551,9 @@
         </ul>
       {/if}
 
-      <p data-testid="selection-count">Selected: {selected.length} module(s).</p>
+      <p data-testid="selection-count">
+        Selected: {selected.length} module(s).
+      </p>
       <div class="actions">
         <button
           bind:this={reviewButton}
@@ -540,7 +569,9 @@
         <button type="button" onclick={backToStart}>Back</button>
       </div>
       {#if selection.reason}
-        <p id="selection-reason" role="status" class="reason">{selection.reason}</p>
+        <p id="selection-reason" role="status" class="reason">
+          {selection.reason}
+        </p>
       {/if}
     </section>
   {:else if step === "reviewing"}
@@ -577,11 +608,16 @@
             <li data-testid="plan-root" data-package-id={entry.packageId}>
               <strong>{entry.title}</strong> ({entry.roleLabel})
               <dl>
-                <dt>Source</dt><dd>{entry.sourceLabel}</dd>
-                <dt>Digest</dt><dd><code>{entry.digestLabel}</code></dd>
-                <dt>License</dt><dd>{entry.licenseLabel}</dd>
-                <dt>Download</dt><dd>{entry.downloadLabel}</dd>
-                <dt>Installed size</dt><dd>{entry.installedLabel}</dd>
+                <dt>Source</dt>
+                <dd>{entry.sourceLabel}</dd>
+                <dt>Digest</dt>
+                <dd><code>{entry.digestLabel}</code></dd>
+                <dt>License</dt>
+                <dd>{entry.licenseLabel}</dd>
+                <dt>Download</dt>
+                <dd>{entry.downloadLabel}</dd>
+                <dt>Installed size</dt>
+                <dd>{entry.installedLabel}</dd>
               </dl>
               {#if entry.setupExecution}
                 <p>Includes an executable setup step; its grant is separate.</p>
@@ -598,13 +634,20 @@
         {:else}
           <ul>
             {#each review.dependencies as entry (entry.packageId)}
-              <li data-testid="plan-dependency" data-package-id={entry.packageId}>
+              <li
+                data-testid="plan-dependency"
+                data-package-id={entry.packageId}
+              >
                 <strong>{entry.title}</strong> ({entry.roleLabel})
                 <dl>
-                  <dt>Source</dt><dd>{entry.sourceLabel}</dd>
-                  <dt>Digest</dt><dd><code>{entry.digestLabel}</code></dd>
-                  <dt>Download</dt><dd>{entry.downloadLabel}</dd>
-                  <dt>Installed size</dt><dd>{entry.installedLabel}</dd>
+                  <dt>Source</dt>
+                  <dd>{entry.sourceLabel}</dd>
+                  <dt>Digest</dt>
+                  <dd><code>{entry.digestLabel}</code></dd>
+                  <dt>Download</dt>
+                  <dd>{entry.downloadLabel}</dd>
+                  <dt>Installed size</dt>
+                  <dd>{entry.installedLabel}</dd>
                 </dl>
                 {#if entry.sharedLabel}<p>{entry.sharedLabel}</p>{/if}
               </li>
@@ -668,7 +711,12 @@
           <button type="button" onclick={cancelReview}>Cancel</button>
         </div>
         {#if confirm.reason}
-          <p id="confirm-reason" role="status" class="reason" data-testid="confirm-reason">
+          <p
+            id="confirm-reason"
+            role="status"
+            class="reason"
+            data-testid="confirm-reason"
+          >
             {confirm.reason}
           </p>
         {/if}
@@ -765,7 +813,8 @@
           {:else}
             <button
               type="button"
-              disabled={!operation.canRetry.enabled || pendingOperation !== null}
+              disabled={!operation.canRetry.enabled ||
+                pendingOperation !== null}
               title={operation.canRetry.reason ?? undefined}
               onclick={retryOperation}
               data-testid="retry-operation"
@@ -804,7 +853,7 @@
     margin: 0 auto;
     padding: 24px;
     box-sizing: border-box;
-    color: #111827;
+    color: var(--on-surface, #111827);
   }
   .setup-header h1 {
     margin: 4px 0 8px;
@@ -821,40 +870,40 @@
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
   }
   .generation {
     margin: 0 0 12px;
     font-size: 0.875rem;
   }
   .generation[data-state="unconfigured"] strong {
-    color: #92400e;
+    color: var(--status-warning, #92400e);
   }
   .panel {
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border, #e5e7eb);
     border-radius: 8px;
     padding: 20px;
     margin-top: 16px;
-    background: #ffffff;
+    background: var(--neutral, #ffffff);
   }
   .panel h2 {
     margin-top: 0;
   }
   .detail {
     display: block;
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
     font-size: 0.875rem;
   }
   .banner {
     padding: 8px 12px;
     border-radius: 6px;
-    background: #fffbeb;
-    border: 1px solid #fcd34d;
-    color: #78350f;
+    background: var(--warning-soft, #fffbeb);
+    border: 1px solid var(--warning-border, #fcd34d);
+    color: var(--status-warning, #78350f);
     font-size: 0.875rem;
   }
   .warning {
-    color: #92400e;
+    color: var(--status-warning, #92400e);
     font-weight: 600;
   }
   .primary {
@@ -866,7 +915,7 @@
   }
   .primary p {
     margin: 6px 0 0;
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
     font-size: 0.875rem;
   }
   .actions {
@@ -878,9 +927,9 @@
   button {
     font: inherit;
     padding: 6px 12px;
-    border: 1px solid #9ca3af;
+    border: 1px solid var(--hover-border, #9ca3af);
     border-radius: 6px;
-    background: #ffffff;
+    background: var(--neutral, #ffffff);
     color: inherit;
     cursor: pointer;
   }
@@ -911,7 +960,7 @@
     gap: 12px;
   }
   .module-options > li {
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border, #e5e7eb);
     border-radius: 8px;
     padding: 12px;
   }
@@ -928,7 +977,7 @@
     font-size: 0.8125rem;
   }
   dt {
-    color: #4b5563;
+    color: var(--text-muted, #4b5563);
     font-weight: 600;
   }
   dd {
@@ -940,7 +989,7 @@
   }
   .blocker,
   .reason {
-    color: #991b1b;
+    color: var(--error, #991b1b);
     font-size: 0.875rem;
   }
   progress {

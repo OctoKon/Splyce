@@ -31,6 +31,9 @@
     onChange?: (mode: PermissionMode) => void;
     /** Optional announcement of a dismissed bypass confirmation. */
     onDismissConfirm?: () => void;
+    options?: readonly PermissionMode[];
+    id?: string;
+    compact?: boolean;
   }
 
   let {
@@ -38,6 +41,9 @@
     context,
     onChange = () => {},
     onDismissConfirm = () => {},
+    options,
+    id = "permission-mode-select",
+    compact = false,
   }: Props = $props();
 
   const view = $derived(permissionModeView(modeState));
@@ -45,7 +51,8 @@
   const blockedReason = $derived(
     ready
       ? null
-      : (context.engineReason ?? "Engine unavailable; the mode cannot be changed."),
+      : (context.engineReason ??
+          "Engine unavailable; the mode cannot be changed."),
   );
   const selected = $derived(
     modeState.status === "pending" && modeState.requested
@@ -157,17 +164,17 @@
   }
 </script>
 
-<div class="mode-select" data-testid="permission-mode">
-  <label for="permission-mode-select">Permission mode</label>
+<div class="mode-select" class:compact data-testid="permission-mode">
+  <label for={id}>Permission mode</label>
   <select
-    id="permission-mode-select"
+    {id}
     bind:this={selectEl}
     value={selected}
     disabled={!ready}
     onchange={onSelect}
     data-testid="permission-mode-select"
   >
-    {#each view.options as option (option.mode)}
+    {#each view.options.filter((option) => !options || options.includes(option.mode)) as option (option.mode)}
       <option value={option.mode}>
         {option.label}{option.dangerous ? " — needs confirmation" : ""}
       </option>
@@ -208,18 +215,18 @@
 <dialog
   bind:this={dialog}
   {oncancel}
-  aria-labelledby="permission-confirm-title"
-  aria-describedby="permission-confirm-body"
+  aria-labelledby={`${id}-confirm-title`}
+  aria-describedby={`${id}-confirm-body`}
   data-testid="permission-confirm"
 >
   {#if pending}
-    <h2 id="permission-confirm-title">
+    <h2 id={`${id}-confirm-title`}>
       Enable {PERMISSION_MODE_LABELS[pending.mode]}?
     </h2>
-    <p id="permission-confirm-body">
-      {PERMISSION_MODE_LABELS[pending.mode]} removes approval prompts for this
-      session. This is a separate, explicit choice and it applies to this session
-      only. The safe choice keeps {view.effectiveLabel}.
+    <p id={`${id}-confirm-body`}>
+      {PERMISSION_MODE_LABELS[pending.mode]} removes approval prompts for this session.
+      This is a separate, explicit choice. The safe choice keeps
+      {view.effectiveLabel}.
     </p>
     <div class="actions">
       <button
@@ -245,6 +252,25 @@
 </dialog>
 
 <style>
+  .mode-select.compact {
+    display: inline-flex;
+    align-items: center;
+    max-width: none;
+  }
+  .compact label,
+  .compact [data-testid="permission-effective"],
+  .compact .announcement {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .compact select {
+    border-radius: 999px;
+    font-size: 0.75rem;
+  }
   .mode-select {
     display: grid;
     gap: var(--splyce-space-1, 0.25rem);

@@ -1,0 +1,73 @@
+[
+  {
+    "op": "sessions.list",
+    "request": {
+      "requestId": "page-read-1",
+      "workspaceId": "workspace-1"
+    },
+    "result": {
+      "sessions": [
+        {
+          "sessionId": "session-1",
+          "branchAnchorId": "branch-1",
+          "createdAt": "2026-10-28T00:00:00.000Z",
+          "updatedAt": "2026-10-28T01:00:00.000Z",
+          "state": "idle"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "op": "memory.list",
+    "request": {
+      "requestId": "page-read-1",
+      "workspaceId": "workspace-1"
+    },
+    "result": {
+      "entries": [
+        {
+          "observationId": "observation-1",
+          "sessionId": "session-1",
+          "createdAt": "2026-10-28T00:00:00.000Z",
+          "sourceCount": 2
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "op": "memory.search",
+    "request": {
+      "requestId": "page-read-1",
+      "workspaceId": "workspace-1",
+      "query": "project"
+    },
+    "result": {
+      "entries": [
+        {
+          "observationId": "observation-1",
+          "sessionId": "session-1",
+          "createdAt": "2026-10-28T00:00:00.000Z",
+          "sourceCount": 2
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "op": "usage.read",
+    "request": {
+      "requestId": "page-read-1",
+      "workspaceId": "workspace-1"
+    },
+    "result": {
+      "semantics": "unavailable",
+      "inputTokens": null,
+      "outputTokens": null,
+      "costUsd": null,
+      "sessionCount": 1,
+      "runCount": 2
+    }
+  }
+]

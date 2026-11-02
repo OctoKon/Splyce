@@ -1,4 +1,25 @@
 {
+  "event": {
+    "schemaVersion": 1,
+    "recordId": "event:event-ledger",
+    "createdAt": "2026-10-26T00:00:00.000Z",
+    "scopeId": "w-demo",
+    "sourceIds": ["e1"],
+    "envelope": {
+      "schemaVersion": 1,
+      "protocolVersion": 2,
+      "recordId": "e1",
+      "eventId": "event-ledger",
+      "createdAt": "2026-10-26T00:00:00.000Z",
+      "sourceIds": ["e1"],
+      "scopeId": "w-demo",
+      "sessionId": "s1",
+      "seq": 1,
+      "durable": true,
+      "kind": "engine.status",
+      "payload": { "state": "ready", "activeWorkers": 0 }
+    }
+  },
   "run": {
     "schemaVersion": 1,
     "recordId": "rec-run",
@@ -199,5 +220,30 @@
     "configRevision": "cfg1",
     "lastDurableCursor": "cursor12",
     "expiresAt": null
+  },
+  "branchAnchor": {
+    "schemaVersion": 1,
+    "recordId": "rec-anchor",
+    "createdAt": "2026-10-26T00:00:00.000Z",
+    "scopeId": "w-demo",
+    "sourceIds": [],
+    "branchAnchorId": "anchor2",
+    "piSessionId": "s1",
+    "parentAnchorId": "b1",
+    "forkPointEntryId": "entry1",
+    "firstChildEntryId": null,
+    "activeLeafEntryId": "entry1"
+  },
+  "fileClaim": {
+    "schemaVersion": 1,
+    "recordId": "rec-claim",
+    "createdAt": "2026-10-26T00:00:00.000Z",
+    "scopeId": "w-demo",
+    "sourceIds": ["e1"],
+    "workspaceId": "w-demo",
+    "path": "src/main.ts",
+    "ownerChildId": "child1",
+    "revision": "A",
+    "releasedAt": null
   }
 }

@@ -203,6 +203,53 @@ test("I3 redaction: every active secret is replaced; revoked ones are dropped fr
   assert.equal(resolver.redact(line), line);
 });
 
+test("I3: encoded forms remain redacted through pending revoke and rotation", async () => {
+  const secret = 'unicode-🚀-"-\\-\n';
+  const env: Record<string, string> = { TD16_KEY: secret };
+  const resolver = new NativeCredentialResolver({ env });
+  resolver.register(binding({ kind: "env", name: "TD16_KEY" }));
+  const lease = await resolver.resolve(request());
+  const forms = [
+    secret,
+    Buffer.from(secret).toString("base64"),
+    Buffer.from(secret).toString("base64url"),
+    encodeURIComponent(secret),
+    JSON.stringify(secret).slice(1, -1),
+  ];
+  for (const form of forms)
+    assert.equal(
+      resolver.redact(`prefix ${form} suffix`),
+      "prefix [REDACTED] suffix",
+    );
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const pending = lease.use(async () => {
+    await gate;
+  });
+  lease.revoke();
+  env.TD16_KEY = STORE_SECRET;
+  resolver.register(
+    binding({ kind: "env", name: "TD16_KEY" }, { connectionRevision: "r2" }),
+  );
+  const rotated = await resolver.resolve(request({ connectionRevision: "r2" }));
+  await rejectsWith(pending, "CREDENTIAL_REVOKED");
+  for (const form of forms) assert.equal(resolver.redact(form), "[REDACTED]");
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const form of forms) assert.equal(resolver.redact(form), form);
+  rotated.revoke();
+});
+
+test("I3: invalid Unicode credentials fail with a bounded error", async () => {
+  const resolver = new NativeCredentialResolver({
+    env: { TD16_KEY: "\ud800" },
+  });
+  resolver.register(binding({ kind: "env", name: "TD16_KEY" }));
+  await rejectsWith(resolver.resolve(request()), "CREDENTIAL_UNAVAILABLE");
+});
+
 test("I4: missing auth throws and never selects another source, connection or credential", async () => {
   let storeReads = 0;
   const resolver = new NativeCredentialResolver({
