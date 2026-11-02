@@ -348,8 +348,33 @@ impl BridgeState {
                 )
             )
             && valid_setup(params["command"].as_str().unwrap(), &params);
+        #[cfg(test)]
+        let diagnostic_started = std::time::Instant::now();
+        #[cfg(test)]
+        let diagnostic_phase = match method {
+            "handshake" => "handshake",
+            "native.workspace.admit" => "workspace.admit",
+            "native.provider.prepare" => "provider.prepare",
+            "native.provider.commit" => "provider.commit",
+            "native.provider.read" => "provider.read",
+            "send" => match params["command"].as_str() {
+                Some("setup.read") => "setup.read",
+                Some("profile.select") => "profile.select",
+                Some("session.start") => "session.start",
+                Some("sessions.list") => "sessions.list",
+                _ => "other-setup",
+            },
+            _ => "other-method",
+        };
+        #[cfg(test)]
+        eprintln!("bridge phase={diagnostic_phase} begin");
         let mut inner = self.inner.lock().map_err(|_| BridgeError::engine())?;
         if inner.closed {
+            #[cfg(test)]
+            eprintln!(
+                "bridge phase={diagnostic_phase} closed elapsed={:?}",
+                diagnostic_started.elapsed()
+            );
             return Err(BridgeError::engine());
         }
         let id = format!("native-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
@@ -359,7 +384,20 @@ impl BridgeState {
                 &json!({"id":id,"method":method,"params":params}),
                 accept_response,
             )
-            .map_err(|_| BridgeError::engine())?;
+            .map_err(|_error| {
+                #[cfg(test)]
+                eprintln!(
+                    "bridge phase={diagnostic_phase} transport-error={} elapsed={:?}",
+                    _error.code,
+                    diagnostic_started.elapsed()
+                );
+                BridgeError::engine()
+            })?;
+        #[cfg(test)]
+        eprintln!(
+            "bridge phase={diagnostic_phase} reply elapsed={:?}",
+            diagnostic_started.elapsed()
+        );
         let object = reply.as_object().ok_or_else(BridgeError::engine)?;
         if object.len() != 3 || reply["id"] != id {
             return Err(BridgeError::engine());
@@ -1734,7 +1772,9 @@ mod tests {
             .unwrap();
         let result = (|| -> Result<(), BridgeError> {
             let spec: Value = serde_json::from_str(PROTOCOL).unwrap();
+            eprintln!("packaged phase=initial-handshake begin");
             let handshake = state.call("handshake", json!({"protocolVersion":2}))?;
+            eprintln!("packaged phase=initial-handshake end");
             assert!(valid_handshake(&handshake, &spec));
             assert_eq!(handshake["readiness"]["ports"]["generation"], false);
             let admitted = crate::workspace::qualify_directory(&directory.join("project")).unwrap();
@@ -1787,7 +1827,9 @@ mod tests {
             )?;
             assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
             assert_eq!(listed["sessions"][0]["sessionId"], started["sessionId"]);
+            eprintln!("packaged phase=current-handshake begin");
             let handshake = state.call("handshake", json!({"protocolVersion":2}))?;
+            eprintln!("packaged phase=current-handshake end");
             assert!(valid_handshake(&handshake, &spec));
             assert_eq!(handshake["readiness"]["ports"]["generation"], true);
             let lease = state.inner.lock().unwrap();
@@ -1796,6 +1838,7 @@ mod tests {
             let reader = state.clone();
             let workspace_id = workspace_id.clone();
             let concurrent = std::thread::spawn(move || {
+                eprintln!("packaged phase=concurrent-read begin");
                 ready_tx.send(()).unwrap();
                 result_tx.send(reader.call("send", json!({"frame":"setup", "command":"sessions.list",
                     "requestId":"concurrent-read", "payload":{"requestId":"concurrent-read", "workspaceId":workspace_id}}))).ok();
@@ -1809,6 +1852,7 @@ mod tests {
                 "concurrent native calls must queue instead of being denied"
             );
             let concurrent = result_rx.recv().unwrap()?;
+            eprintln!("packaged phase=concurrent-read end");
             assert!(valid_page_read_view("sessions.list", &concurrent));
             assert_eq!(concurrent["sessions"].as_array().unwrap().len(), 1);
             Ok(())
