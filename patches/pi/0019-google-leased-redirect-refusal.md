@@ -2,7 +2,7 @@
 
 Refs [issue 138](https://github.com/OctoKon/Splyce/issues/138) (TD-13 / TD-20).
 Donor: Pi commit `d5b3de22d0e24a3e9c38a9410d3329b099717283`, `@earendil-works/pi-ai` 1.4.0, `@google/genai` 2.21.0.
-Preserve the donor MIT license. Apply `0016-google-leased-redirect-refusal.patch` from the Splyce root after 0004, on
+Preserve the donor MIT license. Apply `0019-google-leased-redirect-refusal.patch` from the Splyce root after 0004, on
 `Itachi-1824/td07-11-bootstrap` at `4ab0b7a`.
 
 With native credentials the Google and Vertex adapters hold the leased key for one SDK attempt. The pinned SDK follows
