@@ -27,10 +27,6 @@
       "types": "./dist/provider-admission.d.ts",
       "import": "./dist/provider-admission.js"
     },
-    "./setup-metadata": {
-      "types": "./dist/setup-metadata.d.ts",
-      "import": "./dist/setup-metadata.js"
-    },
     "./provider-profiles": {
       "types": "./dist/provider-profiles.d.ts",
       "import": "./dist/provider-profiles.js"

@@ -11,7 +11,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { getAgentDir } from "../src/config.ts";
 import {
 	expandPromptTemplate,
@@ -518,7 +518,11 @@ describe("parseCommandArgs + substituteArgs integration", () => {
 // ============================================================================
 
 describe("loadPromptTemplates - argument-hint", () => {
-	const testDir = join(tmpdir(), `pi-test-prompts-${Date.now()}`);
+	let testDir: string;
+
+	beforeAll(() => {
+		testDir = mkdtempSync(join(tmpdir(), "pi-test-prompts-"));
+	});
 
 	function writeTemplate(name: string, content: string) {
 		mkdirSync(testDir, { recursive: true });

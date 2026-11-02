@@ -818,7 +818,6 @@ fn tampered_files_and_self_consistent_manifest_never_launch() {
 
 #[test]
 fn private_credential_lane_stays_out_of_events_and_preserves_command_matching() {
-    let _inventory = crate::credentials::fixture_guard();
     let reference = credentials::write_generated("transport-private-fixture").unwrap();
     struct Cleanup(credentials::CredentialRef);
     impl Drop for Cleanup {
@@ -869,7 +868,6 @@ fn malformed_private_frame_terminates_transport_without_renderer_payload() {
 
 #[test]
 fn saturated_events_fail_explicitly_while_private_service_stays_live() {
-    let _inventory = crate::credentials::fixture_guard();
     let reference = credentials::write_generated("saturation-private-fixture").unwrap();
     struct Cleanup(credentials::CredentialRef);
     impl Drop for Cleanup {

@@ -9,10 +9,6 @@ const redactionUnavailable = () =>
   Object.assign(new Error("Persistence redaction unavailable"), {
     code: "PERSIST_REDACTION_UNAVAILABLE",
   });
-const entryTooLarge = () =>
-  Object.assign(new Error("Persistence entry too large"), {
-    code: "PERSIST_ENTRY_TOO_LARGE",
-  });
 const validText = (text) =>
   typeof text === "string" &&
   text.isWellFormed() &&
@@ -66,7 +62,7 @@ export class NativeControl {
       method === "credential.redact" &&
       !fitsFrame({ native: { id, method, params } })
     )
-      return Promise.reject(entryTooLarge());
+      return Promise.reject(unavailable());
     return new Promise((resolve, reject) => {
       const finish = (error, value) => {
         if (!this.#pending.delete(id)) return;
@@ -139,9 +135,6 @@ export class NativeControl {
         (typeof reply.value.secret === "string" &&
           Buffer.byteLength(reply.value.secret) <= 2560 &&
           !/\p{Cc}/u.test(reply.value.secret)));
-    const isStatus =
-      exact(reply.value, ["present"]) &&
-      typeof reply.value.present === "boolean";
     const isRedaction =
       exact(reply.value, ["text", "redactedCount"]) &&
       validText(reply.value.text) &&
@@ -149,52 +142,25 @@ export class NativeControl {
       reply.value.redactedCount >= 0 &&
       fitsFrame(frame);
     if (
-      (!isEmpty && !isSecret && !isRedaction && !isStatus) ||
+      (!isEmpty && !isSecret && !isRedaction) ||
       (pending &&
         (pending.method === "credential.read"
           ? !isSecret
           : pending.method === "credential.redact"
             ? !isRedaction
-            : pending.method === "credential.status"
-              ? !isStatus
-              : !isEmpty))
+            : !isEmpty))
     )
       return fail();
     pending?.finish(false, reply.value);
   }
 
-  async credentialStatus(params, signal) {
-    if (
-      !exact(params, ["target"]) ||
-      typeof params.target !== "string" ||
-      !/^splyce-credential:v1:[0-9a-f]{64}$/.test(params.target)
-    )
-      throw unavailable();
-    const result = await this.#call(
-      "credential.status",
-      { target: params.target },
-      signal,
-    );
-    if (this.#closed || signal?.aborted) throw unavailable();
-    return result;
-  }
-
   async redact(text, signal) {
-    if (!validText(text)) {
-      if (
-        typeof text === "string" &&
-        text.isWellFormed() &&
-        Buffer.byteLength(text) > 1048576
-      )
-        throw entryTooLarge();
-      throw redactionUnavailable();
-    }
+    if (!validText(text)) throw redactionUnavailable();
     try {
       const result = await this.#call("credential.redact", { text }, signal);
       if (this.#closed || signal?.aborted) throw redactionUnavailable();
       return result;
-    } catch (error) {
-      if (error?.code === "PERSIST_ENTRY_TOO_LARGE") throw entryTooLarge();
+    } catch {
       throw redactionUnavailable();
     }
   }

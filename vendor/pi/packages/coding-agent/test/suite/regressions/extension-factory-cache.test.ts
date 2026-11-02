@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -41,7 +41,7 @@ describe("extension factory cache", () => {
 	const roots: string[] = [];
 
 	function fixture(name: string) {
-		const root = join(tmpdir(), `pi-extension-cache-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const root = mkdtempSync(join(tmpdir(), `pi-extension-cache-${name}-`));
 		const cwd = join(root, "project");
 		const agentDir = join(root, "agent");
 		mkdirSync(cwd, { recursive: true });

@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,8 +7,7 @@ import { getMissingSessionCwdIssue, MissingSessionCwdError } from "../src/core/s
 import { SessionManager } from "../src/core/session-manager.ts";
 
 function createTempDir(name: string): string {
-	const dir = join(tmpdir(), `${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-	mkdirSync(dir, { recursive: true });
+	const dir = mkdtempSync(join(tmpdir(), `${name}-`));
 	return dir;
 }
 

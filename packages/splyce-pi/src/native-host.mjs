@@ -4,7 +4,6 @@ import { RevisionFence } from "../dist/admission.js";
 import { ConfigAuthority } from "../dist/config.js";
 import { createProviderProfiles } from "../dist/provider-profiles.js";
 import { Receipts } from "../dist/receipts.js";
-import { createNativeProviderSetup } from "./native-provider-setup.mjs";
 import {
   INITIAL_CONFIG_REVISION,
   Store,
@@ -45,7 +44,6 @@ export function createNativeHost(appDataDir) {
   const config = new ConfigAuthority(store);
   const receipts = new Receipts(store);
   const profiles = createProviderProfiles({ store, config });
-  const providerSetup = createNativeProviderSetup(store, directory);
   try {
     store.audit();
     receipts.durableCursor();
@@ -144,9 +142,6 @@ export function createNativeHost(appDataDir) {
         .listWorkspaces()
         .find(({ workspaceId }) => workspaceId === id);
     },
-    prepareProviderSetup: providerSetup.prepare,
-    commitProviderSetup: providerSetup.commit,
-    readProviderSetup: providerSetup.read,
     close() {
       store.close();
     },

@@ -771,7 +771,6 @@ export interface EventPayloads {
     activeWorkers: number;
     ports?: PortAvailability;
   };
-  "stream.resync": { fromSeq: number };
   "run.reconnect_snapshot": {
     runId: string;
     lastDurableSeq: number;
@@ -844,7 +843,6 @@ const EVENT_SCHEMAS = {
     state: ["ready", "busy", "stopping", "stopped"],
     activeWorkers: "uint",
   },
-  "stream.resync": { fromSeq: "uint" },
   "run.reconnect_snapshot": {
     runId: "ref",
     lastDurableSeq: "uint",
@@ -898,6 +896,15 @@ export interface Handshake {
   };
 }
 
+/** Unsequenced transport control: never persisted, never a cursor advance. */
+export interface ResyncControlFrame {
+  frame: "control";
+  kind: "stream.resync";
+  sessionId: string;
+  /** Replay is requested strictly after this cursor (may be 0). */
+  fromSeq: number;
+}
+
 export interface NativeLifecycleEvent {
   protocolVersion: typeof PROTOCOL_VERSION;
   kind: "engine_exited";
@@ -934,10 +941,7 @@ function opaque(value: unknown, field: string): asserts value is string {
   requireThat(!/\s|[\\/]/u.test(value), "INVALID_SHAPE", field);
 }
 /** A model reference may contain `/` and `:` (OpenRouter, Bedrock); no whitespace, control or format chars. */
-export function modelRef(
-  value: unknown,
-  field: string,
-): asserts value is string {
+function modelRef(value: unknown, field: string): asserts value is string {
   text(value, field);
   requireThat(
     value.length <= 256 && !/[\s\u0000-\u001f\u007f-\u009f\p{Cf}]/u.test(value),
@@ -1231,8 +1235,24 @@ export function validateRecord<K extends RecordKind>(
   const record = object(value, "record");
   metadata(record, context);
   shape(record, RECORD_SCHEMAS[kind], {}, context, false);
-  if (kind === "profileSnapshot" && Object.hasOwn(record, "bindings"))
-    validateProfileBindings(record.bindings, context);
+  if (kind === "profileSnapshot" && Object.hasOwn(record, "bindings")) {
+    requireThat(Array.isArray(record.bindings), "INVALID_SHAPE", "bindings");
+    const roles = new Set<string>();
+    for (const value of record.bindings as unknown[]) {
+      const binding = object(value, "binding");
+      shape(
+        binding,
+        { role: "id", providerConnectionId: "id", connectionRevision: "id" },
+        { modelId: "modelRef" },
+        context,
+        true,
+      );
+      const role = binding.role as string;
+      requireThat(!roles.has(role), "INVALID_SHAPE", "duplicate binding role");
+      roles.add(role);
+    }
+    requireThat(roles.has("chat"), "INVALID_SHAPE", "chat binding");
+  }
   if (kind === "configurationTransition") {
     const hasProfile = Object.hasOwn(record, "profileId");
     const hasRevision = Object.hasOwn(record, "profileRevision");
@@ -1338,40 +1358,6 @@ export function validateRecord<K extends RecordKind>(
   return value as RecordByKind[K];
 }
 
-/** Binding-set invariants of a profile snapshot: strict shape, unique roles, a chat binding. */
-export function validateProfileBindings(
-  bindings: unknown,
-  context: ContractContext = BINDINGS_CONTEXT,
-): void {
-  requireThat(Array.isArray(bindings), "INVALID_SHAPE", "bindings");
-  const roles = new Set<string>();
-  for (const value of bindings as unknown[]) {
-    const binding = object(value, "binding");
-    shape(
-      binding,
-      { role: "id", providerConnectionId: "id", connectionRevision: "id" },
-      { modelId: "modelRef" },
-      context,
-      true,
-    );
-    const role = binding.role as string;
-    requireThat(!roles.has(role), "INVALID_SHAPE", "duplicate binding role");
-    roles.add(role);
-  }
-  requireThat(roles.has("chat"), "INVALID_SHAPE", "chat binding");
-}
-// Binding fields are ids and model references only, so nothing is ever resolved.
-const BINDINGS_CONTEXT: ContractContext = {
-  scopeId: "bindings",
-  sessionId: "bindings",
-  configRevision: "bindings",
-  profileRevision: "bindings",
-  policyRevision: "bindings",
-  lastDurableSeq: 0,
-  maxInlineBytes: 1,
-  resolveReference: () => false,
-};
-
 export function validateCursor(
   afterSeq: unknown,
   context: ContractContext,
@@ -1380,6 +1366,24 @@ export function validateCursor(
   uint(afterSeq, "afterSeq");
   requireThat(afterSeq <= context.lastDurableSeq, "INVALID_CURSOR", "afterSeq");
   return afterSeq;
+}
+
+const CONTROL_KEYS = ["frame", "kind", "sessionId", "fromSeq"];
+
+/** Exact-shape resync control frame; unknown or missing keys are rejected. */
+export function validateControlFrame(value: unknown): ResyncControlFrame {
+  const frame = object(value, "control");
+  requireThat(
+    Object.keys(frame).length === CONTROL_KEYS.length &&
+      CONTROL_KEYS.every((key) => Object.hasOwn(frame, key)),
+    "INVALID_SHAPE",
+    "control",
+  );
+  requireThat(frame.frame === "control", "INVALID_SHAPE", "frame");
+  requireThat(frame.kind === "stream.resync", "UNKNOWN_KIND", "kind");
+  opaque(frame.sessionId, "sessionId");
+  uint(frame.fromSeq, "fromSeq");
+  return frame as unknown as ResyncControlFrame;
 }
 
 export function validateCommand(
@@ -1559,7 +1563,6 @@ export function validateEvent(
         "WRONG_SCOPE",
         "sessionId",
       );
-    if (kind === "stream.resync") validateCursor(payload.fromSeq, context);
     if (kind === "run.reconnect_snapshot")
       validateCursor(payload.lastDurableSeq, context);
   }

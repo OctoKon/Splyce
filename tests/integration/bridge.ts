@@ -8,16 +8,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  DesktopBridge,
+  CONTRACT_VERSION,
+  PROTOCOL_VERSION,
+} from "../../packages/splyce-pi/dist/contracts.js";
+import {
   BridgeError,
+  DesktopBridge,
   TRANSPORT_LIMIT_OPTIONS,
 } from "../../packages/splyce-pi/dist/desktop-bridge.js";
 import { Receipts } from "../../packages/splyce-pi/dist/receipts.js";
 import { Store } from "../../packages/splyce-pi/dist/store.js";
-import {
-  CONTRACT_VERSION,
-  PROTOCOL_VERSION,
-} from "../../packages/splyce-pi/dist/contracts.js";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "td15-bridge-"));
 let tmpCounter = 0;
@@ -193,17 +193,36 @@ test("durable overflow emits exactly one resync and pauses delivery", () => {
     policyRevision: "policy1",
     resolveReference: () => true,
   };
-  const run = JSON.parse(
+  const runFixtures = JSON.parse(
     readFileSync(
       new URL("../fixtures/contracts/records.json", import.meta.url),
       "utf8",
     ),
   ) as Record<string, Record<string, unknown>>;
-  const record = { ...structuredClone(run.run), scopeId: "w-demo" } as Record<
-    string,
-    unknown
-  >;
-  receipts_commit(store, caller, record);
+  const seedRecord = {
+    ...structuredClone(runFixtures.run),
+    recordId: "rec-seed",
+    scopeId: "w-demo",
+  };
+  const seedDraft = {
+    schemaVersion: CONTRACT_VERSION,
+    protocolVersion: PROTOCOL_VERSION,
+    eventId: "evt-seed",
+    recordId: "rec-seed",
+    createdAt: "2026-10-26T00:00:00.000Z",
+    sourceIds: ["rec-seed"],
+    sessionId: "s1",
+    scopeId: "w-demo",
+    durable: true,
+    kind: "engine.status",
+    payload: { state: "ready", activeWorkers: 0 },
+  };
+  store.commitEvents(
+    [{ kind: "run", record: seedRecord }],
+    [seedDraft as never],
+    caller,
+  );
+  bridge.resubscribe(store.eventHighwater("w-demo", "s1"));
 
   bridge.submit(event("turn.started", { runId: "r1", turnId: "t1" }));
   bridge.submit(
@@ -228,9 +247,20 @@ test("durable overflow emits exactly one resync and pauses delivery", () => {
     }),
   );
   assert.ok(resync, "resync frame returned");
-  assert.equal(resync.event.kind, "stream.resync");
-  const payload = resync.event.payload as { fromSeq: number };
-  assert.equal(payload.fromSeq, store.sessionCursor("w-demo", "s1"));
+  const payload = resync.event;
+  // Exact unsequenced control shape on the wire: no seq, nothing persisted.
+  const control = {
+    frame: "control",
+    kind: "stream.resync",
+    sessionId: "s1",
+    fromSeq: store.eventHighwater("w-demo", "s1"),
+  };
+  assert.deepEqual(resync.event, control);
+  assert.deepEqual(
+    JSON.parse(new TextDecoder().decode(resync.encoded.subarray(4))),
+    control,
+  );
+  assert.equal(store.eventHighwater("w-demo", "s1"), control.fromSeq);
   assert.equal(bridge.status().pendingFrames, 0);
   assert.equal(bridge.status().paused, true);
   assert.equal(bridge.status().lastResyncFromSeq, payload.fromSeq);
@@ -252,22 +282,41 @@ test("durable overflow emits exactly one resync and pauses delivery", () => {
   // durable cursor produces a new resync (not an error).
   const resync2 = bridge["resyncFrame"]();
   assert.equal(resync2.event.kind, "stream.resync");
-  assert.equal(
-    (resync2.event.payload as { fromSeq: number }).fromSeq,
-    store.sessionCursor("w-demo", "s1"),
-  );
+  assert.equal(resync2.event.fromSeq, store.eventHighwater("w-demo", "s1"));
 
   // New durable progress advances the resync cursor.
-  receipts_commit(store, caller, record);
+  store.commitEvents(
+    [
+      {
+        kind: "run",
+        record: {
+          ...structuredClone(runFixtures.run),
+          recordId: "rec-seed2",
+          scopeId: "w-demo",
+        },
+      },
+    ],
+    [
+      {
+        schemaVersion: CONTRACT_VERSION,
+        protocolVersion: PROTOCOL_VERSION,
+        eventId: "evt-seed2",
+        recordId: "rec-seed2",
+        createdAt: "2026-10-26T00:00:00.000Z",
+        sourceIds: ["rec-seed2"],
+        sessionId: "s1",
+        scopeId: "w-demo",
+        durable: true,
+        kind: "engine.status",
+        payload: { state: "ready", activeWorkers: 0 },
+      } as never,
+    ],
+    caller,
+  );
+  bridge.resubscribe(store.eventHighwater("w-demo", "s1"));
   const resync3 = bridge["resyncFrame"]();
-  assert.equal(
-    (resync3.event.payload as { fromSeq: number }).fromSeq,
-    store.sessionCursor("w-demo", "s1"),
-  );
-  assert.equal(
-    (resync3.event.payload as { fromSeq: number }).fromSeq > payload.fromSeq,
-    true,
-  );
+  assert.equal(resync3.event.fromSeq, store.eventHighwater("w-demo", "s1"));
+  assert.equal(resync3.event.fromSeq > payload.fromSeq, true);
   store.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -295,7 +344,8 @@ test("drain honors the renderer budget and replays from the durable cursor", () 
   assert.equal(third.frames.length, 1);
   assert.equal(third.morePending, false);
 
-  // Replay after the last delivered seq is exclusive and cursor-bounded.
+  // Replay is this session's event envelopes after an event seq (exclusive),
+  // never the receipts' record cursor.
   const receipts = new Receipts(store);
   const run = JSON.parse(
     readFileSync(
@@ -308,9 +358,32 @@ test("drain honors the renderer budget and replays from the durable cursor", () 
     unknown
   >;
   receipts_commit(store, caller, record);
-  const cursor = receipts.durableCursor("w-demo");
-  const replayed = bridge.replay(cursor, caller);
-  assert.equal(replayed.records.length, 0);
+  store.commitEvents(
+    [{ kind: "run", record: { ...record, recordId: "rec-drain" } as never }],
+    [
+      {
+        schemaVersion: CONTRACT_VERSION,
+        protocolVersion: PROTOCOL_VERSION,
+        eventId: "evt-drain",
+        recordId: "rec-drain",
+        createdAt: "2026-10-26T00:00:00.000Z",
+        sourceIds: [],
+        sessionId: "s1",
+        scopeId: "w-demo",
+        durable: true,
+        kind: "engine.status",
+        payload: { state: "ready", activeWorkers: 0 },
+      } as never,
+    ],
+    caller,
+  );
+  const highwater = store.eventHighwater("w-demo", "s1");
+  assert.ok(receipts.durableCursor("w-demo") > highwater);
+  assert.deepEqual(
+    bridge.replay(highwater - 1).map((e) => [e.eventId, e.seq]),
+    [["evt-drain", highwater]],
+  );
+  assert.deepEqual(bridge.replay(highwater), []);
   store.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -471,4 +544,122 @@ test("highestQueuedSeq counts durable frames only", () => {
   assert.equal(bridge.highestQueuedSeq(), durable.seq);
   store.close();
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("fresh client (applied 0) overflow resyncs from 0", () => {
+  const { bridge, store } = makeBridge();
+  const caller = {
+    sessionId: "s1",
+    configRevision: "cfg1",
+    profileRevision: "profile1",
+    policyRevision: "policy1",
+    resolveReference: () => true,
+  };
+  const runFixtures = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/contracts/records.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, Record<string, unknown>>;
+  store.commitEvents(
+    [
+      {
+        kind: "run",
+        record: {
+          ...structuredClone(runFixtures.run),
+          recordId: "rec-fresh-src",
+          scopeId: "w-demo",
+        },
+      },
+    ],
+    [
+      {
+        schemaVersion: CONTRACT_VERSION,
+        protocolVersion: PROTOCOL_VERSION,
+        eventId: "evt-fresh-1",
+        recordId: "rec-fresh-src",
+        createdAt: "2026-10-26T00:00:00.000Z",
+        sourceIds: ["rec-fresh-src"],
+        sessionId: "s1",
+        scopeId: "w-demo",
+        durable: true,
+        kind: "engine.status",
+        payload: { state: "ready", activeWorkers: 0 },
+      } as never,
+    ],
+    caller,
+  );
+  bridge.resubscribe(0);
+  const resync = bridge["resyncFrame"]();
+  assert.equal(resync.event.fromSeq, 0);
+});
+
+test("overflow resync starts at the client applied cursor (saturation)", () => {
+  const { bridge, store } = makeBridge();
+  const caller = {
+    sessionId: "s1",
+    configRevision: "cfg1",
+    profileRevision: "profile1",
+    policyRevision: "policy1",
+    resolveReference: () => true,
+  };
+  const runFixtures = JSON.parse(
+    readFileSync(
+      new URL("../fixtures/contracts/records.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, Record<string, unknown>>;
+  // Seed a source record so events have a resolvable source.
+  store.commitEvents(
+    [
+      {
+        kind: "run",
+        record: {
+          ...structuredClone(runFixtures.run),
+          recordId: "rec-sat-src",
+          scopeId: "w-demo",
+        },
+      },
+    ],
+    [],
+    caller,
+  );
+  const drafts = Array.from({ length: 1025 }, (_, i) => ({
+    schemaVersion: CONTRACT_VERSION,
+    protocolVersion: PROTOCOL_VERSION,
+    eventId: `evt-sat-${String(i + 1)}`,
+    recordId: "rec-sat-src",
+    createdAt: "2026-10-26T00:00:00.000Z",
+    sourceIds: ["rec-sat-src"],
+    sessionId: "s1",
+    scopeId: "w-demo",
+    durable: true,
+    kind: "engine.status",
+    payload: { state: "ready", activeWorkers: 0 },
+  }));
+  store.commitEvents([], drafts as never, caller);
+  bridge.resubscribe(900);
+  const resync = bridge["resyncFrame"]();
+  assert.equal(resync.event.kind, "stream.resync");
+  assert.equal(resync.event.fromSeq, 900);
+  assert.notEqual(resync.event.fromSeq, store.eventHighwater("w-demo", "s1"));
+  const replayed = store.list("w-demo", 900, "s1");
+  const seqs = replayed.records.map((r) => r.seq);
+  assert.equal(seqs.length, 126);
+  assert.equal(seqs[0], 901);
+  assert.equal(seqs[seqs.length - 1], 1026);
+  for (let i = 1; i < seqs.length; i += 1) {
+    assert.equal(seqs[i], seqs[i - 1] + 1);
+  }
+});
+
+test("fromSeq never exceeds Store.eventHighwater (INVALID_CURSOR)", () => {
+  const { bridge, store } = makeBridge();
+  const highwater = store.eventHighwater("w-demo", "s1");
+  bridge.resubscribe(highwater + 5);
+  assert.throws(
+    () => bridge["resyncFrame"](),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_CURSOR",
+  );
 });

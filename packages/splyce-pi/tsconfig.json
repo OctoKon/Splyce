@@ -18,7 +18,6 @@
   "include": [
     "src/contracts.ts",
     "src/store.ts",
-    "src/setup-metadata.ts",
     "src/policy.ts",
     "src/provider-auth.ts",
     "src/credential-resolver.ts",

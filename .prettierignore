@@ -14,3 +14,5 @@ research/site/index.html
 
 # UI prototype carries its own Svelte/Vite toolchain.
 apps/desktop/prototype/
+vendor/glib/
+vendor/mocha/

@@ -23,12 +23,6 @@ pub const MAX_REDACTION_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_REDACTION_CREDENTIALS: usize = 128;
 const REDACTED: &str = "[REDACTED:credential]";
 
-#[cfg(test)]
-pub fn fixture_guard() -> std::sync::MutexGuard<'static, ()> {
-    static INVENTORY: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    INVENTORY.lock().expect("Credential fixture inventory lock")
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub struct CredentialRef(String);
 
@@ -64,11 +58,6 @@ impl CredentialRef {
 pub struct SecretBuffer(Vec<u8>);
 
 impl SecretBuffer {
-    pub fn from_string(secret: String) -> Result<Self, CredentialError> {
-        let secret = Self(secret.into_bytes());
-        validate_secret(secret.as_str())?;
-        Ok(secret)
-    }
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -263,56 +252,6 @@ impl Drop for NativeInventory {
     }
 }
 
-#[cfg(test)]
-pub fn count_fixture_value(secret: &str) -> Result<u32, CredentialError> {
-    validate_secret(secret)?;
-    let filter: Vec<u16> = format!("{TARGET_PREFIX}*")
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    let mut inventory = NativeInventory {
-        pointer: null_mut(),
-        count: 0,
-    };
-    if unsafe {
-        CredEnumerateW(
-            filter.as_ptr(),
-            0,
-            &mut inventory.count,
-            &mut inventory.pointer,
-        )
-    } == 0
-    {
-        return if last_error() == CredentialError::NotFound
-            && inventory.count == 0
-            && inventory.pointer.is_null()
-        {
-            Ok(0)
-        } else {
-            Err(CredentialError::Unavailable)
-        };
-    }
-    if inventory.pointer.is_null() {
-        return Err(CredentialError::Unavailable);
-    }
-    let mut matches = 0;
-    for index in 0..inventory.count as usize {
-        let pointer = unsafe { *inventory.pointer.add(index) };
-        if pointer.is_null() {
-            return Err(CredentialError::Unavailable);
-        }
-        let credential = unsafe { &*pointer };
-        if credential.CredentialBlobSize as usize == secret.len()
-            && !credential.CredentialBlob.is_null()
-            && unsafe { std::slice::from_raw_parts(credential.CredentialBlob, secret.len()) }
-                == secret.as_bytes()
-        {
-            matches += 1;
-        }
-    }
-    Ok(matches)
-}
-
 fn base64(bytes: &[u8], url: bool, padding: bool) -> String {
     let alphabet = if url {
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -382,12 +321,6 @@ fn secret_forms(secret: &str) -> Vec<SecretBuffer> {
     escaped.pop();
     forms.push(SecretBuffer(escaped));
     forms
-}
-
-pub fn contains_secret_form(text: &str, secret: &SecretBuffer) -> bool {
-    secret_forms(secret.as_str())
-        .iter()
-        .any(|form| text.contains(form.as_str()))
 }
 
 /// Enumerates only the app's generated namespace; never returns inventory or locations.

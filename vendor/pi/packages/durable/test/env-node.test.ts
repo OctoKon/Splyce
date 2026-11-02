@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { access, chmod, type FileHandle, open, realpath, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -13,8 +13,7 @@ const tempDirs: string[] = [];
 const chmodRestorePaths: string[] = [];
 
 function createTempDir(): string {
-	const dir = join(tmpdir(), `pi-durable-env-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-	mkdirSync(dir, { recursive: true });
+	const dir = mkdtempSync(join(tmpdir(), "pi-durable-env-"));
 	tempDirs.push(dir);
 	return dir;
 }

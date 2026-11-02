@@ -5,17 +5,18 @@
 
 import {
   type ContractContext,
-  type RecordKind,
   type RecordByKind,
+  type RecordKind,
+  type SplyceEvent,
   TRANSPORT_LIMITS,
   validateCursor,
 } from "./contracts.js";
 import {
-  Store,
-  type AppendInput,
   type AppendBatchResult,
+  type AppendInput,
   type CallerContext,
   type ListResult,
+  Store,
 } from "./store.js";
 export class ReceiptsError extends Error {
   readonly code: string;
@@ -128,6 +129,26 @@ export class Receipts {
   ack(recordId: string): { seq: number; record: RecordByKind[RecordKind] } {
     const got = this.store.get(recordId);
     return { seq: got.seq, record: got.record };
+  }
+
+  /**
+   * Event-namespace cursor for the renderer/transport surface: the highest
+   * ALLOCATED event envelope sequence (including transient reservations).
+   * Used by DesktopBridge overflow resync `fromSeq` so `follow(after X)` is
+   * valid for `X <= highwater`. Distinct from the record-namespace
+   * `sessionDurableCursor` used by receipt replay/recovery.
+   */
+  sessionEventCursor(scopeId: string, sessionId: string): number {
+    return this.store.eventHighwater(scopeId, sessionId);
+  }
+
+  /** This session's retained event envelopes with seq > afterSeq (event domain). */
+  replayEvents(
+    scopeId: string,
+    sessionId: string,
+    afterSeq: number,
+  ): SplyceEvent[] {
+    return this.store.replayEvents(scopeId, sessionId, afterSeq);
   }
 }
 
