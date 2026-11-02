@@ -98,7 +98,7 @@
     "markdownlint-cli2": "0.24.0",
     "mocha": "file:patches/mocha/mocha-10.8.2.tgz",
     "prettier": "3.9.10",
-    "svelte": "5.57.2",
+    "svelte": "5.57.3",
     "svelte-check": "4.7.7",
     "typescript": "6.0.3",
     "vite": "8.3.5"
