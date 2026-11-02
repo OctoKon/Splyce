@@ -36,6 +36,7 @@
   } = $props();
 
   let el: HTMLTextAreaElement | undefined = $state();
+  let composing = false;
   let attachOpen = $state(false);
   let attachPinned = $state(false);
   let suppressHover = false;
@@ -258,7 +259,10 @@
       {placeholder}
       rows={compact ? 1 : 2}
       aria-label={placeholder}
+      oncompositionstart={() => (composing = true)}
+      oncompositionend={() => (composing = false)}
       onkeydown={(event) => {
+        if (composing || event.isComposing || event.keyCode === 229) return;
         if (event.key === 'Enter' && !event.shiftKey) {
           event.preventDefault();
           submit();
