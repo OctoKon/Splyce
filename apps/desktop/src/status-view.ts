@@ -91,8 +91,9 @@ const STATE_VIEWS: Readonly<Record<string, StatusView>> = Object.freeze({
 });
 
 function projectState(state: unknown): StatusView {
-  if (typeof state !== "string") return UNKNOWN;
-  return STATE_VIEWS[state] ?? UNKNOWN;
+  if (typeof state !== "string" || !Object.hasOwn(STATE_VIEWS, state))
+    return UNKNOWN;
+  return STATE_VIEWS[state]!;
 }
 
 export type TurnViewStatus =
@@ -132,15 +133,15 @@ const TOOL_STATUS_VIEWS: Readonly<Record<ToolViewStatus, StatusView>> =
 export function projectTurnStatus(
   status: TurnViewStatus | null | undefined,
 ): StatusView {
-  if (!status) return UNKNOWN;
-  return TURN_STATUS_VIEWS[status] ?? UNKNOWN;
+  if (!status || !Object.hasOwn(TURN_STATUS_VIEWS, status)) return UNKNOWN;
+  return TURN_STATUS_VIEWS[status]!;
 }
 
 export function projectToolStatus(
   status: ToolViewStatus | null | undefined,
 ): StatusView {
-  if (!status) return UNKNOWN;
-  return TOOL_STATUS_VIEWS[status] ?? UNKNOWN;
+  if (!status || !Object.hasOwn(TOOL_STATUS_VIEWS, status)) return UNKNOWN;
+  return TOOL_STATUS_VIEWS[status]!;
 }
 
 function projectOutcome(

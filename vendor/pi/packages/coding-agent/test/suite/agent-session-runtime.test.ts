@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -42,7 +42,7 @@ describe("AgentSessionRuntime characterization", () => {
 		options?: { cwd?: string; bootstrapModel?: boolean; bootstrapThinkingLevel?: boolean },
 	) {
 		const tempDir =
-			options?.cwd ?? join(tmpdir(), `pi-runtime-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+			options?.cwd ?? mkdtempSync(join(tmpdir(), "pi-runtime-suite-"));
 		mkdirSync(tempDir, { recursive: true });
 
 		const faux = registerFauxProvider({
@@ -315,8 +315,7 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(runtime.session.sessionFile).toBe(originalSessionFile);
 
 		events.length = 0;
-		const otherDir = join(tmpdir(), `pi-runtime-other-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		mkdirSync(otherDir, { recursive: true });
+		const otherDir = mkdtempSync(join(tmpdir(), "pi-runtime-other-"));
 		const otherSession = SessionManager.create(otherDir);
 		otherSession.appendMessage({ role: "user", content: [{ type: "text", text: "other" }], timestamp: Date.now() });
 		const otherSessionFile = otherSession.getSessionFile();
@@ -429,7 +428,7 @@ describe("AgentSessionRuntime characterization", () => {
 	});
 
 	it("duplicates the current active branch in-memory when forking at the current position", async () => {
-		const tempDir = join(tmpdir(), `pi-runtime-suite-in-memory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-suite-in-memory-"));
 		mkdirSync(tempDir, { recursive: true });
 
 		const faux = registerFauxProvider({
@@ -546,10 +545,8 @@ describe("AgentSessionRuntime characterization", () => {
 	});
 
 	it("updates the runtime session cwd on cross-cwd session replacement", async () => {
-		const firstDir = join(tmpdir(), `pi-runtime-cwd-a-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		const secondDir = join(tmpdir(), `pi-runtime-cwd-b-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		mkdirSync(firstDir, { recursive: true });
-		mkdirSync(secondDir, { recursive: true });
+		const firstDir = mkdtempSync(join(tmpdir(), "pi-runtime-cwd-a-"));
+		const secondDir = mkdtempSync(join(tmpdir(), "pi-runtime-cwd-b-"));
 		const { runtime, faux, tempDir } = await createRuntimeForTest(() => {}, { cwd: firstDir });
 		const otherAuthStorage = AuthStorage.inMemory();
 		await otherAuthStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));

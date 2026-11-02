@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 function Get-Sha256Hex([string]$path) {
   $stream = [IO.File]::OpenRead($path)

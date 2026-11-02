@@ -1,0 +1,91 @@
+diff --git a/vendor/pi/packages/coding-agent/test/package-manager.test.ts b/vendor/pi/packages/coding-agent/test/package-manager.test.ts
+index f8446b6..c15a557 100644
+--- a/vendor/pi/packages/coding-agent/test/package-manager.test.ts
++++ b/vendor/pi/packages/coding-agent/test/package-manager.test.ts
+@@ -1,5 +1,5 @@
+ import { EventEmitter } from "node:events";
+-import { existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join, relative } from "node:path";
+ import { PassThrough } from "node:stream";
+@@ -78,8 +78,7 @@ describe("DefaultPackageManager", () => {
+ 	beforeEach(() => {
+ 		previousOfflineEnv = process.env.PI_OFFLINE;
+ 		delete process.env.PI_OFFLINE;
+-		tempDir = join(tmpdir(), `pm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-		mkdirSync(tempDir, { recursive: true });
++		tempDir = mkdtempSync(join(tmpdir(), "pm-test-"));
+ 		agentDir = join(tempDir, "agent");
+ 		mkdirSync(agentDir, { recursive: true });
+ 
+diff --git a/vendor/pi/packages/coding-agent/test/resource-loader.test.ts b/vendor/pi/packages/coding-agent/test/resource-loader.test.ts
+index e68b4cf..837141e 100644
+--- a/vendor/pi/packages/coding-agent/test/resource-loader.test.ts
++++ b/vendor/pi/packages/coding-agent/test/resource-loader.test.ts
+@@ -1,4 +1,4 @@
+-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { pathToFileURL } from "node:url";
+@@ -19,7 +19,7 @@ describe("DefaultResourceLoader", () => {
+ 	let cwd: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `rl-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++		tempDir = mkdtempSync(join(tmpdir(), "rl-test-"));
+ 		agentDir = join(tempDir, "agent");
+ 		cwd = join(tempDir, "project");
+ 		mkdirSync(agentDir, { recursive: true });
+diff --git a/vendor/pi/packages/coding-agent/test/tools.test.ts b/vendor/pi/packages/coding-agent/test/tools.test.ts
+index 9143262..628f4d4 100644
+--- a/vendor/pi/packages/coding-agent/test/tools.test.ts
++++ b/vendor/pi/packages/coding-agent/test/tools.test.ts
+@@ -1,5 +1,5 @@
+ import { applyPatch } from "diff";
+-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
++import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+ import { tmpdir } from "os";
+ import { join } from "path";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+@@ -67,8 +67,7 @@ describe("Coding Agent Tools", () => {
+ 
+ 	beforeEach(() => {
+ 		// Create a unique temporary directory for each test
+-		testDir = join(tmpdir(), `coding-agent-test-${Date.now()}`);
+-		mkdirSync(testDir, { recursive: true });
++		testDir = mkdtempSync(join(tmpdir(), "coding-agent-test-"));
+ 	});
+ 
+ 	afterEach(() => {
+@@ -1028,8 +1027,7 @@ describe("tool cwd resolution", () => {
+ 	let testDir: string;
+ 
+ 	beforeEach(() => {
+-		testDir = join(tmpdir(), `coding-agent-cwd-test-${Date.now()}`);
+-		mkdirSync(testDir, { recursive: true });
++		testDir = mkdtempSync(join(tmpdir(), "coding-agent-cwd-test-"));
+ 	});
+ 
+ 	afterEach(() => {
+@@ -1134,8 +1132,7 @@ describe("edit tool fuzzy matching", () => {
+ 	let testDir: string;
+ 
+ 	beforeEach(() => {
+-		testDir = join(tmpdir(), `coding-agent-fuzzy-test-${Date.now()}`);
+-		mkdirSync(testDir, { recursive: true });
++		testDir = mkdtempSync(join(tmpdir(), "coding-agent-fuzzy-test-"));
+ 	});
+ 
+ 	afterEach(() => {
+@@ -1361,8 +1358,7 @@ describe("edit tool CRLF handling", () => {
+ 	let testDir: string;
+ 
+ 	beforeEach(() => {
+-		testDir = join(tmpdir(), `coding-agent-crlf-test-${Date.now()}`);
+-		mkdirSync(testDir, { recursive: true });
++		testDir = mkdtempSync(join(tmpdir(), "coding-agent-crlf-test-"));
+ 	});
+ 
+ 	afterEach(() => {

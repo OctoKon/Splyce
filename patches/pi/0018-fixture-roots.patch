@@ -1,0 +1,561 @@
+diff --git a/vendor/pi/packages/coding-agent/test/auth-check.test.ts b/vendor/pi/packages/coding-agent/test/auth-check.test.ts
+index 5f1ce63..26ba7b4 100644
+--- a/vendor/pi/packages/coding-agent/test/auth-check.test.ts
++++ b/vendor/pi/packages/coding-agent/test/auth-check.test.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { InMemoryModelsStore } from "@earendil-works/pi-ai";
+@@ -9,7 +9,7 @@ import { parseAuthCommand } from "../src/cli/auth-command.ts";
+ import { AuthStorage, ReadOnlyAuthStorage } from "../src/core/auth-storage.ts";
+ import { ModelRuntime } from "../src/core/model-runtime.ts";
+ 
+-const tempDir = join(tmpdir(), `pi-test-auth-check-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++let tempDir: string;
+ 
+ async function createRuntime(credentials: AuthStorage | ReadOnlyAuthStorage): Promise<ModelRuntime> {
+ 	return ModelRuntime.create({
+@@ -23,8 +23,7 @@ async function createRuntime(credentials: AuthStorage | ReadOnlyAuthStorage): Pr
+ 
+ describe("auth check command", () => {
+ 	beforeEach(() => {
+-		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true });
+-		mkdirSync(tempDir, { recursive: true });
++		tempDir = mkdtempSync(join(tmpdir(), "pi-test-auth-check-"));
+ 	});
+ 
+ 	afterEach(() => {
+diff --git a/vendor/pi/packages/coding-agent/test/auth-storage.test.ts b/vendor/pi/packages/coding-agent/test/auth-storage.test.ts
+index 8005bf9..510cd8f 100644
+--- a/vendor/pi/packages/coding-agent/test/auth-storage.test.ts
++++ b/vendor/pi/packages/coding-agent/test/auth-storage.test.ts
+@@ -1,25 +1,31 @@
+-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
++import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { type CredentialStore, createModels, type Provider } from "@earendil-works/pi-ai";
+ import lockfile from "proper-lockfile";
+-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
++import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+ import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.ts";
+ 
+ describe("AuthStorage", () => {
+-	const tempDir = join(tmpdir(), `pi-test-auth-storage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-	const authJsonPath = join(tempDir, "auth.json");
++	let tempDir: string;
++	let authJsonPath: string;
+ 
+-	beforeEach(() => {
+-		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true });
+-		mkdirSync(tempDir, { recursive: true });
++	beforeAll(() => {
++		tempDir = mkdtempSync(join(tmpdir(), "pi-test-auth-storage-"));
++		authJsonPath = join(tempDir, "auth.json");
+ 	});
+ 
+ 	afterEach(() => {
+-		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true });
++		if (existsSync(tempDir)) {
++			for (const entry of readdirSync(tempDir)) rmSync(join(tempDir, entry), { recursive: true, force: true });
++		}
+ 		vi.restoreAllMocks();
+ 	});
+ 
++	afterAll(() => {
++		rmSync(tempDir, { recursive: true, force: true });
++	});
++
+ 	function writeAuthJson(data: Record<string, unknown>): void {
+ 		writeFileSync(authJsonPath, JSON.stringify(data));
+ 	}
+diff --git a/vendor/pi/packages/coding-agent/test/block-images.test.ts b/vendor/pi/packages/coding-agent/test/block-images.test.ts
+index 935d854..03fcabe 100644
+--- a/vendor/pi/packages/coding-agent/test/block-images.test.ts
++++ b/vendor/pi/packages/coding-agent/test/block-images.test.ts
+@@ -1,4 +1,4 @@
+-import { mkdirSync, rmSync, writeFileSync } from "fs";
++import { mkdtempSync, rmSync, writeFileSync } from "fs";
+ import { tmpdir } from "os";
+ import { join } from "path";
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+@@ -62,8 +62,7 @@ describe("blockImages setting", () => {
+ 		let testDir: string;
+ 
+ 		beforeEach(() => {
+-			testDir = join(tmpdir(), `block-images-test-${Date.now()}`);
+-			mkdirSync(testDir, { recursive: true });
++			testDir = mkdtempSync(join(tmpdir(), "block-images-test-"));
+ 		});
+ 
+ 		afterEach(() => {
+@@ -103,8 +102,7 @@ describe("blockImages setting", () => {
+ 		let testDir: string;
+ 
+ 		beforeEach(() => {
+-			testDir = join(tmpdir(), `block-images-process-test-${Date.now()}`);
+-			mkdirSync(testDir, { recursive: true });
++			testDir = mkdtempSync(join(tmpdir(), "block-images-process-test-"));
+ 		});
+ 
+ 		afterEach(() => {
+diff --git a/vendor/pi/packages/coding-agent/test/default-tools-setting.test.ts b/vendor/pi/packages/coding-agent/test/default-tools-setting.test.ts
+index 9ae2a70..3942fb0 100644
+--- a/vendor/pi/packages/coding-agent/test/default-tools-setting.test.ts
++++ b/vendor/pi/packages/coding-agent/test/default-tools-setting.test.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { getModel } from "@earendil-works/pi-ai/compat";
+@@ -17,7 +17,7 @@ describe("defaultTools setting", () => {
+ 	let agentDir: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `pi-default-tools-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++		tempDir = mkdtempSync(join(tmpdir(), "pi-default-tools-"));
+ 		agentDir = join(tempDir, "agent");
+ 		mkdirSync(agentDir, { recursive: true });
+ 	});
+diff --git a/vendor/pi/packages/coding-agent/test/git-update.test.ts b/vendor/pi/packages/coding-agent/test/git-update.test.ts
+index 8030827..5a9fc26 100644
+--- a/vendor/pi/packages/coding-agent/test/git-update.test.ts
++++ b/vendor/pi/packages/coding-agent/test/git-update.test.ts
+@@ -7,7 +7,7 @@
+  */
+ 
+ import { spawnSync } from "node:child_process";
+-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+@@ -80,8 +80,7 @@ describe("DefaultPackageManager git update", () => {
+ 
+ 	beforeEach(() => {
+ 		allowNetwork();
+-		tempDir = join(tmpdir(), `git-update-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-		mkdirSync(tempDir, { recursive: true });
++		tempDir = mkdtempSync(join(tmpdir(), "git-update-test-"));
+ 		remoteDir = join(tempDir, "remote");
+ 		agentDir = join(tempDir, "agent");
+ 
+diff --git a/vendor/pi/packages/coding-agent/test/image-resize-callers.test.ts b/vendor/pi/packages/coding-agent/test/image-resize-callers.test.ts
+index c6fd0c7..710bf57 100644
+--- a/vendor/pi/packages/coding-agent/test/image-resize-callers.test.ts
++++ b/vendor/pi/packages/coding-agent/test/image-resize-callers.test.ts
+@@ -1,4 +1,4 @@
+-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import type { Api, Model } from "@earendil-works/pi-ai";
+@@ -21,8 +21,7 @@ describe("image resize callers", () => {
+ 	let testDir: string;
+ 
+ 	beforeEach(() => {
+-		testDir = join(tmpdir(), `image-resize-callers-${Date.now()}`);
+-		mkdirSync(testDir, { recursive: true });
++		testDir = mkdtempSync(join(tmpdir(), "image-resize-callers-"));
+ 		vi.mocked(resizeImage).mockReset();
+ 		vi.mocked(resizeImage).mockResolvedValue(null);
+ 	});
+diff --git a/vendor/pi/packages/coding-agent/test/model-registry.test.ts b/vendor/pi/packages/coding-agent/test/model-registry.test.ts
+index 67142f7..28da3db 100644
+--- a/vendor/pi/packages/coding-agent/test/model-registry.test.ts
++++ b/vendor/pi/packages/coding-agent/test/model-registry.test.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { normalizeContext } from "@earendil-works/pi-ai";
+@@ -16,8 +16,7 @@ describe("ModelRegistry", () => {
+ 	let authStorage: AuthStorage;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `pi-test-model-registry-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-		mkdirSync(tempDir, { recursive: true });
++		tempDir = mkdtempSync(join(tmpdir(), "pi-test-model-registry-"));
+ 		modelsJsonPath = join(tempDir, "models.json");
+ 		authStorage = AuthStorage.inMemory();
+ 	});
+diff --git a/vendor/pi/packages/coding-agent/test/models-store.test.ts b/vendor/pi/packages/coding-agent/test/models-store.test.ts
+index bf64504..22e1f5b 100644
+--- a/vendor/pi/packages/coding-agent/test/models-store.test.ts
++++ b/vendor/pi/packages/coding-agent/test/models-store.test.ts
+@@ -1,4 +1,4 @@
+-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
++import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import type { Model } from "@earendil-works/pi-ai";
+@@ -6,11 +6,12 @@ import lockfile from "proper-lockfile";
+ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+ import { FileModelsStore } from "../src/core/models-store.ts";
+ 
+-const sharedTempDir = join(tmpdir(), `pi-models-store-shared-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-const sharedModelsPath = join(sharedTempDir, "models-store.json");
++let sharedTempDir: string;
++let sharedModelsPath: string;
+ 
+ beforeAll(() => {
+-	mkdirSync(sharedTempDir, { recursive: true });
++	sharedTempDir = mkdtempSync(join(tmpdir(), "pi-models-store-shared-"));
++	sharedModelsPath = join(sharedTempDir, "models-store.json");
+ });
+ 
+ afterAll(() => {
+diff --git a/vendor/pi/packages/coding-agent/test/package-command-paths.test.ts b/vendor/pi/packages/coding-agent/test/package-command-paths.test.ts
+index 68949f9..cc2d219 100644
+--- a/vendor/pi/packages/coding-agent/test/package-command-paths.test.ts
++++ b/vendor/pi/packages/coding-agent/test/package-command-paths.test.ts
+@@ -2,6 +2,7 @@ import {
+ 	chmodSync,
+ 	existsSync,
+ 	mkdirSync,
++	mkdtempSync,
+ 	readdirSync,
+ 	readFileSync,
+ 	realpathSync,
+@@ -136,7 +137,7 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
+ 
+ 	beforeEach(() => {
+ 		allowNetwork();
+-		tempDir = join(tmpdir(), `pi-package-commands-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++		tempDir = mkdtempSync(join(tmpdir(), "pi-package-commands-"));
+ 		agentDir = join(tempDir, "agent");
+ 		projectDir = join(tempDir, "project");
+ 		packageDir = join(tempDir, "local-package");
+diff --git a/vendor/pi/packages/coding-agent/test/prompt-templates.test.ts b/vendor/pi/packages/coding-agent/test/prompt-templates.test.ts
+index d67346a..e83df83 100644
+--- a/vendor/pi/packages/coding-agent/test/prompt-templates.test.ts
++++ b/vendor/pi/packages/coding-agent/test/prompt-templates.test.ts
+@@ -11,7 +11,7 @@
+ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+ import { tmpdir } from "os";
+ import { join } from "path";
+-import { afterAll, describe, expect, test } from "vitest";
++import { afterAll, beforeAll, describe, expect, test } from "vitest";
+ import { getAgentDir } from "../src/config.ts";
+ import {
+ 	expandPromptTemplate,
+@@ -518,7 +518,11 @@ describe("parseCommandArgs + substituteArgs integration", () => {
+ // ============================================================================
+ 
+ describe("loadPromptTemplates - argument-hint", () => {
+-	const testDir = join(tmpdir(), `pi-test-prompts-${Date.now()}`);
++	let testDir: string;
++
++	beforeAll(() => {
++		testDir = mkdtempSync(join(tmpdir(), "pi-test-prompts-"));
++	});
+ 
+ 	function writeTemplate(name: string, content: string) {
+ 		mkdirSync(testDir, { recursive: true });
+diff --git a/vendor/pi/packages/coding-agent/test/radius.test.ts b/vendor/pi/packages/coding-agent/test/radius.test.ts
+index b905c17..89bdbe6 100644
+--- a/vendor/pi/packages/coding-agent/test/radius.test.ts
++++ b/vendor/pi/packages/coding-agent/test/radius.test.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { InMemoryModelsStore } from "@earendil-works/pi-ai";
+@@ -39,8 +39,7 @@ let tempDir: string;
+ 
+ beforeEach(() => {
+ 	allowNetwork();
+-	tempDir = join(tmpdir(), `pi-test-radius-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-	mkdirSync(tempDir, { recursive: true });
++	tempDir = mkdtempSync(join(tmpdir(), "pi-test-radius-"));
+ });
+ 
+ afterEach(() => {
+diff --git a/vendor/pi/packages/coding-agent/test/resolve-config-value.test.ts b/vendor/pi/packages/coding-agent/test/resolve-config-value.test.ts
+index b202f1c..b731d7f 100644
+--- a/vendor/pi/packages/coding-agent/test/resolve-config-value.test.ts
++++ b/vendor/pi/packages/coding-agent/test/resolve-config-value.test.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+@@ -13,8 +13,7 @@ describe("resolveConfigValue", () => {
+ 	let tempDir: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `pi-config-value-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-		mkdirSync(tempDir, { recursive: true });
++		tempDir = mkdtempSync(join(tmpdir(), "pi-config-value-"));
+ 		clearConfigValueCache();
+ 	});
+ 
+diff --git a/vendor/pi/packages/coding-agent/test/sdk-skills.test.ts b/vendor/pi/packages/coding-agent/test/sdk-skills.test.ts
+index 007a514..299edcc 100644
+--- a/vendor/pi/packages/coding-agent/test/sdk-skills.test.ts
++++ b/vendor/pi/packages/coding-agent/test/sdk-skills.test.ts
+@@ -1,4 +1,4 @@
+-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+@@ -13,7 +13,7 @@ describe("createAgentSession skills option", () => {
+ 	let skillsDir: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `pi-sdk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++		tempDir = mkdtempSync(join(tmpdir(), "pi-sdk-test-"));
+ 		skillsDir = join(tempDir, "skills", "test-skill");
+ 		mkdirSync(skillsDir, { recursive: true });
+ 
+diff --git a/vendor/pi/packages/coding-agent/test/session-cwd.test.ts b/vendor/pi/packages/coding-agent/test/session-cwd.test.ts
+index 8a7d23f..f773c6d 100644
+--- a/vendor/pi/packages/coding-agent/test/session-cwd.test.ts
++++ b/vendor/pi/packages/coding-agent/test/session-cwd.test.ts
+@@ -1,4 +1,4 @@
+-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { afterEach, describe, expect, it } from "vitest";
+@@ -7,8 +7,7 @@ import { getMissingSessionCwdIssue, MissingSessionCwdError } from "../src/core/s
+ import { SessionManager } from "../src/core/session-manager.ts";
+ 
+ function createTempDir(name: string): string {
+-	const dir = join(tmpdir(), `${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-	mkdirSync(dir, { recursive: true });
++	const dir = mkdtempSync(join(tmpdir(), `${name}-`));
+ 	return dir;
+ }
+ 
+diff --git a/vendor/pi/packages/coding-agent/test/session-manager/file-operations.test.ts b/vendor/pi/packages/coding-agent/test/session-manager/file-operations.test.ts
+index 097e035..ca3ffe4 100644
+--- a/vendor/pi/packages/coding-agent/test/session-manager/file-operations.test.ts
++++ b/vendor/pi/packages/coding-agent/test/session-manager/file-operations.test.ts
+@@ -295,8 +295,7 @@ describe("findMostRecentSession", () => {
+ 	let tempDir: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
+-		mkdirSync(tempDir, { recursive: true });
++		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
+ 	});
+ 
+ 	afterEach(() => {
+@@ -387,7 +386,7 @@ describe("SessionManager custom flat session directory", () => {
+ 	let projectB: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
++		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
+ 		projectA = join(tempDir, "project-a");
+ 		projectB = join(tempDir, "project-b");
+ 		mkdirSync(projectA, { recursive: true });
+@@ -461,8 +460,7 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
+ 	let tempDir: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
+-		mkdirSync(tempDir, { recursive: true });
++		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
+ 	});
+ 
+ 	afterEach(() => {
+diff --git a/vendor/pi/packages/coding-agent/test/suite/agent-session-prompt.test.ts b/vendor/pi/packages/coding-agent/test/suite/agent-session-prompt.test.ts
+index 8052fd6..6949623 100644
+--- a/vendor/pi/packages/coding-agent/test/suite/agent-session-prompt.test.ts
++++ b/vendor/pi/packages/coding-agent/test/suite/agent-session-prompt.test.ts
+@@ -1,4 +1,4 @@
+-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import type { AgentTool } from "@earendil-works/pi-agent-core";
+@@ -204,8 +204,7 @@ describe("AgentSession prompt characterization", () => {
+ 	});
+ 
+ 	it("expands skill commands before sending the prompt", async () => {
+-		const tempDir = join(tmpdir(), `pi-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-		mkdirSync(tempDir, { recursive: true });
++		const tempDir = mkdtempSync(join(tmpdir(), "pi-skill-"));
+ 		tempDirs.push(tempDir);
+ 		const skillPath = join(tempDir, "test-skill.md");
+ 		writeFileSync(skillPath, "# Test Skill\n\nUse the skill body.");
+diff --git a/vendor/pi/packages/coding-agent/test/suite/agent-session-runtime.test.ts b/vendor/pi/packages/coding-agent/test/suite/agent-session-runtime.test.ts
+index 93d40fc..845f176 100644
+--- a/vendor/pi/packages/coding-agent/test/suite/agent-session-runtime.test.ts
++++ b/vendor/pi/packages/coding-agent/test/suite/agent-session-runtime.test.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join, parse } from "node:path";
+ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+@@ -42,7 +42,7 @@ describe("AgentSessionRuntime characterization", () => {
+ 		options?: { cwd?: string; bootstrapModel?: boolean; bootstrapThinkingLevel?: boolean },
+ 	) {
+ 		const tempDir =
+-			options?.cwd ?? join(tmpdir(), `pi-runtime-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++			options?.cwd ?? mkdtempSync(join(tmpdir(), "pi-runtime-suite-"));
+ 		mkdirSync(tempDir, { recursive: true });
+ 
+ 		const faux = registerFauxProvider({
+@@ -315,8 +315,7 @@ describe("AgentSessionRuntime characterization", () => {
+ 		expect(runtime.session.sessionFile).toBe(originalSessionFile);
+ 
+ 		events.length = 0;
+-		const otherDir = join(tmpdir(), `pi-runtime-other-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-		mkdirSync(otherDir, { recursive: true });
++		const otherDir = mkdtempSync(join(tmpdir(), "pi-runtime-other-"));
+ 		const otherSession = SessionManager.create(otherDir);
+ 		otherSession.appendMessage({ role: "user", content: [{ type: "text", text: "other" }], timestamp: Date.now() });
+ 		const otherSessionFile = otherSession.getSessionFile();
+@@ -429,7 +428,7 @@ describe("AgentSessionRuntime characterization", () => {
+ 	});
+ 
+ 	it("duplicates the current active branch in-memory when forking at the current position", async () => {
+-		const tempDir = join(tmpdir(), `pi-runtime-suite-in-memory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++		const tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-suite-in-memory-"));
+ 		mkdirSync(tempDir, { recursive: true });
+ 
+ 		const faux = registerFauxProvider({
+@@ -546,10 +545,8 @@ describe("AgentSessionRuntime characterization", () => {
+ 	});
+ 
+ 	it("updates the runtime session cwd on cross-cwd session replacement", async () => {
+-		const firstDir = join(tmpdir(), `pi-runtime-cwd-a-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-		const secondDir = join(tmpdir(), `pi-runtime-cwd-b-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-		mkdirSync(firstDir, { recursive: true });
+-		mkdirSync(secondDir, { recursive: true });
++		const firstDir = mkdtempSync(join(tmpdir(), "pi-runtime-cwd-a-"));
++		const secondDir = mkdtempSync(join(tmpdir(), "pi-runtime-cwd-b-"));
+ 		const { runtime, faux, tempDir } = await createRuntimeForTest(() => {}, { cwd: firstDir });
+ 		const otherAuthStorage = AuthStorage.inMemory();
+ 		await otherAuthStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
+diff --git a/vendor/pi/packages/coding-agent/test/suite/harness.ts b/vendor/pi/packages/coding-agent/test/suite/harness.ts
+index 988e9e8..137505f 100644
+--- a/vendor/pi/packages/coding-agent/test/suite/harness.ts
++++ b/vendor/pi/packages/coding-agent/test/suite/harness.ts
+@@ -3,7 +3,7 @@ import { createInMemoryModelRegistry, createModelRegistry, getModelRuntime } fro
+  * Local test harness for the new coding-agent test suite.
+  */
+ 
+-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+@@ -143,8 +143,7 @@ export interface Harness {
+ }
+ 
+ function createTempDir(): string {
+-	const tempDir = join(tmpdir(), `pi-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-	mkdirSync(tempDir, { recursive: true });
++	const tempDir = mkdtempSync(join(tmpdir(), "pi-suite-"));
+ 	return tempDir;
+ }
+ 
+diff --git a/vendor/pi/packages/coding-agent/test/suite/regressions/2753-reload-stale-resource-settings.test.ts b/vendor/pi/packages/coding-agent/test/suite/regressions/2753-reload-stale-resource-settings.test.ts
+index e3ad2c9..f1cdf90 100644
+--- a/vendor/pi/packages/coding-agent/test/suite/regressions/2753-reload-stale-resource-settings.test.ts
++++ b/vendor/pi/packages/coding-agent/test/suite/regressions/2753-reload-stale-resource-settings.test.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
+@@ -23,7 +23,7 @@ describe("issue #2753 reload stale resource settings", () => {
+ 	});
+ 
+ 	it("applies updated top-level prompt settings on reload after startup", async () => {
+-		const tempDir = join(tmpdir(), `pi-2753-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++		const tempDir = mkdtempSync(join(tmpdir(), "pi-2753-"));
+ 		const agentDir = join(tempDir, "agent");
+ 		const promptsDir = join(agentDir, "prompts");
+ 		mkdirSync(promptsDir, { recursive: true });
+diff --git a/vendor/pi/packages/coding-agent/test/suite/regressions/2781-skill-collision-precedence.test.ts b/vendor/pi/packages/coding-agent/test/suite/regressions/2781-skill-collision-precedence.test.ts
+index cf36e77..f6b250c 100644
+--- a/vendor/pi/packages/coding-agent/test/suite/regressions/2781-skill-collision-precedence.test.ts
++++ b/vendor/pi/packages/coding-agent/test/suite/regressions/2781-skill-collision-precedence.test.ts
+@@ -1,4 +1,4 @@
+-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+@@ -10,7 +10,7 @@ describe("issue #2781 skill collision precedence: user skills should override pa
+ 	let cwd: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `pi-2781-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++		tempDir = mkdtempSync(join(tmpdir(), "pi-2781-"));
+ 		agentDir = join(tempDir, "agent");
+ 		cwd = join(tempDir, "project");
+ 		mkdirSync(agentDir, { recursive: true });
+diff --git a/vendor/pi/packages/coding-agent/test/suite/regressions/extension-factory-cache.test.ts b/vendor/pi/packages/coding-agent/test/suite/regressions/extension-factory-cache.test.ts
+index ced0122..691e362 100644
+--- a/vendor/pi/packages/coding-agent/test/suite/regressions/extension-factory-cache.test.ts
++++ b/vendor/pi/packages/coding-agent/test/suite/regressions/extension-factory-cache.test.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+@@ -41,7 +41,7 @@ describe("extension factory cache", () => {
+ 	const roots: string[] = [];
+ 
+ 	function fixture(name: string) {
+-		const root = join(tmpdir(), `pi-extension-cache-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++		const root = mkdtempSync(join(tmpdir(), `pi-extension-cache-${name}-`));
+ 		const cwd = join(root, "project");
+ 		const agentDir = join(root, "agent");
+ 		mkdirSync(cwd, { recursive: true });
+diff --git a/vendor/pi/packages/coding-agent/test/trust-manager.test.ts b/vendor/pi/packages/coding-agent/test/trust-manager.test.ts
+index 01500ba..621d047 100644
+--- a/vendor/pi/packages/coding-agent/test/trust-manager.test.ts
++++ b/vendor/pi/packages/coding-agent/test/trust-manager.test.ts
+@@ -1,4 +1,4 @@
+-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+@@ -10,7 +10,7 @@ describe("ProjectTrustStore", () => {
+ 	let cwd: string;
+ 
+ 	beforeEach(() => {
+-		tempDir = join(tmpdir(), `trust-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
++		tempDir = mkdtempSync(join(tmpdir(), "trust-test-"));
+ 		agentDir = join(tempDir, "agent");
+ 		cwd = join(tempDir, "project");
+ 		mkdirSync(agentDir, { recursive: true });
+diff --git a/vendor/pi/packages/durable/test/env-node.test.ts b/vendor/pi/packages/durable/test/env-node.test.ts
+index 4287987..f6d57bc 100644
+--- a/vendor/pi/packages/durable/test/env-node.test.ts
++++ b/vendor/pi/packages/durable/test/env-node.test.ts
+@@ -1,5 +1,5 @@
+ import { execFileSync } from "node:child_process";
+-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
++import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+ import { access, chmod, type FileHandle, open, realpath, symlink } from "node:fs/promises";
+ import { homedir, tmpdir } from "node:os";
+ import { delimiter, join } from "node:path";
+@@ -13,8 +13,7 @@ const tempDirs: string[] = [];
+ const chmodRestorePaths: string[] = [];
+ 
+ function createTempDir(): string {
+-	const dir = join(tmpdir(), `pi-durable-env-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+-	mkdirSync(dir, { recursive: true });
++	const dir = mkdtempSync(join(tmpdir(), "pi-durable-env-"));
+ 	tempDirs.push(dir);
+ 	return dir;
+ }
