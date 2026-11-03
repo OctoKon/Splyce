@@ -40,6 +40,7 @@ e5f6cce is only on origin/Itachi-1824/slice-recovery-tools (not on td07-11-boots
 ## Components (all new code in packages/splyce-pi/src, none in vendor)
 
 ### A. `tool-dispatch.ts` - `createToolDispatch(deps)` returns `{ tools, bind(session), onTurnEnd() }`
+
 - `tools`: pi `ToolDefinition`s built from `createWorkspaceTools` (read, ls, find, grep, write, edit, bash,
   powershell) + `createAgentContextTools` (code index tools, memory_search). Parameters = their JSON schema.
   `execute` = `(id, args, signal) => tool.result(args, signal, id)` mapped to
@@ -48,7 +49,9 @@ e5f6cce is only on origin/Itachi-1824/slice-recovery-tools (not on td07-11-boots
 - Allowlist passed to `createAgentSession` = `tools.map(t=>t.name)`; `excludeTools` unnecessary.
 
 ### B. `ToolAdmissionAdapter implements SplyceToolAdmission` (one per session, wraps one NativePolicy)
+
 Holds `Map<toolCallId, {reserved:boolean}>`. Mapping to the loop (agent-loop.ts line refs):
+
 - `reserve` (:828): record id only. (Nothing durable; policy.reserve needs a permit not yet minted.)
 - `prepare` (:851): receives validatedArgs. (1) capability/target from tool name + args (read/ls/find/grep/context
   = fs.read; write/edit = fs.write; bash/powershell = shell.run); (2) digest = `actionArgumentsDigest(args)`;
@@ -68,10 +71,11 @@ Holds `Map<toolCallId, {reserved:boolean}>`. Mapping to the loop (agent-loop.ts 
   called right after agent-session.ts:3698. Recommend A first; B only if Codex's factory calls reload.
 
 ### C. Real ports for workspace-tools (permit-backed, not store-backed)
+
 - `WorkspacePort.workspace(id)` -> `store.getWorkspace(id)` (store.ts:2480, the admittedWorkspace record):
   `{workspaceId, canonicalPath, revision}`; undefined if not admitted (also fed by `host.resolveWorkspace`).
 - `GrantPort` over the PERMIT (in-memory, per action): `check(req)` returns `{ok:true, grantId: permit.grantId,
-  scope: once|session}` iff req.actionId == permit.toolCallId, req.argumentsDigest == permit.argumentsDigest
+scope: once|session}` iff req.actionId == permit.toolCallId, req.argumentsDigest == permit.argumentsDigest
   (hex vs `sha256:` prefix normalised), workspaceId/sessionId/capability match; else GRANT_REQUIRED. `consume()`
   is an assertion-only no-op because NativePolicy.execute already consumed (item 6). The real store grants stay
   the single source of truth, enforced in policy.ts (:429 requireGrant, :376 consumeOnceGrant, with fresh native
@@ -83,6 +87,7 @@ Holds `Map<toolCallId, {reserved:boolean}>`. Mapping to the loop (agent-loop.ts 
   `MemoryWorkspaceIdentity`. Real source = Codex/Rust.
 
 ### D. Events to the renderer
+
 - `Store.commitEvents(receipts, drafts, caller, fences)`; drafts = `SplyceEventDraft` (eventId, scopeId, sessionId,
   durable:true, kind, payload). The bridge replays/subscribes from the store (desktop-bridge.ts), nothing extra to
   publish. `turn.tool_intent` {runId, actionId, capabilityId, target(redacted), argsSummary(redacted, <=text cap)}.
@@ -95,12 +100,14 @@ Holds `Map<toolCallId, {reserved:boolean}>`. Mapping to the loop (agent-loop.ts 
   Acceptable (memory/renderer reconcile from receipts); strict atomicity would need a policy.ts `events` option.
 
 ### E. captureMemoryAfterTurn
+
 - Called by the turn runner (factory) once per turn after the last tool_outcome and `turn.completed|failed|canceled`
   are committed: `captureMemoryAfterTurn(memory, scopeId, sessionId)` (agent-context-tools.ts:241) inside try/catch;
   capture failure must not fail the turn (log + `engine.status` no-op). The adapter exposes `onTurnEnd()` only;
   the call site is the factory's turn-completion path (Blocked item 1).
 
 ## Blocked on Codex (factory hook points)
+
 1. Session factory/turn runner: where createAgentSession is called, run record + `run.grantIds` creation (permit needs
    `runRecordId`, `runId`, ownership via `store.acquireWorkspace` store.ts:2093), `caller` (CallerContext), `current()`
    CurrentPolicy (native-host fence currently `planMode:true, grantIds:[]`), turn completion hook for memory capture.
@@ -111,6 +118,7 @@ Holds `Map<toolCallId, {reserved:boolean}>`. Mapping to the loop (agent-loop.ts 
    a rule that it is the digest-keyed artifact created in `prepare`.
 
 ## Files I intend to touch (phase 2)
+
 New: packages/splyce-pi/src/tool-dispatch.ts; tests/tool-dispatch.test.mjs (or tests/integration/tool-dispatch.ts via run-store case).
 Edit (small): packages/splyce-pi/package.json exports (tool-dispatch), package.json (one test script + release-gate entry),
 scripts/run-store.mjs (case C2_tool_dispatch), tests only otherwise.
