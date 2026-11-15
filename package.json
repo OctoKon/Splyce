@@ -28,9 +28,9 @@
     "test:desktop": "npm run check --workspace=@splyce/desktop && npm run test --workspace=@splyce/desktop"
   },
   "devDependencies": {
-    "markdownlint-cli2": "0.24.0",
-    "prettier": "3.9.10",
-    "typescript": "5.9.3"
+    "markdownlint-cli2": "0.24.1",
+    "prettier": "3.10.1",
+    "typescript": "7.0.2"
   },
   "overrides": {
     "katex": "0.18.11"
